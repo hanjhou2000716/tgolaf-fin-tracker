@@ -30,8 +30,16 @@ def calculate_current_assets():
     
     sheet = client.open("Tranquil_Growth_DB")
     
-    # 讀取 Google 表單連動的預設分頁
-    form_ws = sheet.worksheet("表單回應 1")
+    # 智慧尋找 Google 表單連動的分頁 (不管名稱有幾個空白，只要有關鍵字就抓)
+    form_ws = None
+    for ws in sheet.worksheets():
+        if "表單" in ws.title or "Form" in ws.title:
+            form_ws = ws
+            break
+            
+    if form_ws is None:
+        raise ValueError("❌ 找不到表單分頁！請確認 Google 表單的「回覆」頁籤中，是否已經點擊綠色圖示並連結到此試算表。")
+        
     form_records = form_ws.get_all_records()
     history_sheet = sheet.worksheet("History")
     
