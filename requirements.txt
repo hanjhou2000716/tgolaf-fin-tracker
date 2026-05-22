@@ -1,0 +1,6 @@
+requests
+gspread
+google-auth
+yfinance
+finmind
+pandas
