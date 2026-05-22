@@ -56,17 +56,18 @@ def calculate_current_assets():
         
         asset_type, raw_symbol, mode, raw_amount = "", "", "", "0"
         
-        # 終極防呆：模糊比對欄位名稱 (容許表單題目有些微差異)
+       # 終極防呆：超級模糊比對 (只要欄位包含這些字眼就強制命中)
         for k, v in cleaned_row.items():
-            k_str = str(k)
-            if any(x in k_str for x in ["類別", "資產"]) and not any(x in k_str for x in ["代號", "名稱"]):
-                asset_type = str(v)
-            elif any(x in k_str for x in ["代號", "名稱", "標的", "股票"]):
-                raw_symbol = str(v)
-            elif any(x in k_str for x in ["模式", "異動", "買", "賣"]):
-                mode = str(v)
-            elif any(x in k_str for x in ["數", "金", "量", "額"]):
-                raw_amount = str(v)
+            k_str = str(k).strip()
+            if "類別" in k_str or "資產" in k_str:
+                if "代號" not in k_str and "名稱" not in k_str:
+                    asset_type = str(v).strip()
+            if "代號" in k_str or "名稱" in k_str or "標的" in k_str or "股票" in k_str:
+                raw_symbol = str(v).strip()
+            if "模式" in k_str or "異動" in k_str or "交易" in k_str:
+                mode = str(v).strip()
+            if "數" in k_str or "金" in k_str or "量" in k_str or "額" in k_str:
+                raw_amount = str(v).strip()
 
         if not asset_type: continue
         
