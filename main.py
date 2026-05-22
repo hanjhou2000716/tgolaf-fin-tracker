@@ -29,8 +29,12 @@ def get_sheets_data():
     config_data = sheet.worksheet("Config").get_all_records()
     history_sheet = sheet.worksheet("History")
     
-    # 將 Config 轉為字典方便讀取
-    config = {row['Key']: row['Value'] for row in config_data}
+    config = {}
+    for row in config_data:
+        cleaned_row = {str(k).strip().capitalize(): v for k, v in row.items()}
+        if 'Key' in cleaned_row and 'Value' in cleaned_row:
+            config[cleaned_row['Key']] = cleaned_row['Value']
+            
     return inventory_data, config, history_sheet
 
 # ==========================================
@@ -48,15 +52,9 @@ def get_us_stock_price(symbol):
         return 0
 
 def get_tw_stock_price(symbol):
-    # 使用 FinMind API 抓取台股報價 (抓取近5天，取最後一筆收盤價)
     url = "https://api.finmindtrade.com/api/v4/data"
     start_date = (datetime.date.today() - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
-    parameter = {
-        "dataset": "TaiwanStockPrice",
-        "data_id": str(symbol),
-        "start_date": start_date,
-        "token": FINMIND_TOKEN
-    }
+    parameter = {"dataset": "TaiwanStockPrice", "data_id": str(symbol), "start_date": start_date, "token": FINMIND_TOKEN}
     try:
         resp = requests.get(url, params=parameter)
         data = resp.json()
@@ -67,10 +65,9 @@ def get_tw_stock_price(symbol):
         return 0
 
 # ==========================================
-# 4. 繪製 QuickChart 圖表
+# 4. 圖表渲染模組
 # ==========================================
 def generate_pie_chart(tw_val, pledged_val, us_val):
-    # 圓餅圖：現貨台股、質押台股、現貨美股
     tw_spot = tw_val - pledged_val
     chart_config = {
         "type": "outlabeledPie",
@@ -78,10 +75,28 @@ def generate_pie_chart(tw_val, pledged_val, us_val):
             "labels": ["🇹🇼 現貨台股", "🦆 質押台股", "🇺🇸 現貨美股"],
             "datasets": [{"backgroundColor": ["#36a2eb", "#ff6384", "#ffce56"], "data": [tw_spot, pledged_val, us_val]}]
         },
-        "options": {"plugins": {"legend": {"display": False}, "outlabels": {"text": "%l %p", "color": "white", "stretch": 35, "font": {"resizable": True, "minSize": 12, "maxSize": 18}}}}
+        "options": {"plugins": {"legend": {"display": False}, "outlabels": {"text": "%l %p", "color": "white", "stretch": 35, "font": {"minSize": 12}}}}
     }
-    encoded_config = urllib.parse.quote(json.dumps(chart_config))
-    return f"https://quickchart.io/chart?c={encoded_config}&w=400&h=250"
+    return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=400&h=250"
+
+def generate_line_chart(history_records, today_str, total_asset, net_asset):
+    # 抓取近 14 天的歷史數據並補上今天的數據
+    dates = [str(row.get('Date', ''))[-5:] for row in history_records[-14:]] + [today_str]
+    total_data = [float(str(row.get('Total_Asset', 0)).replace(',', '')) for row in history_records[-14:]] + [total_asset]
+    net_data = [float(str(row.get('Net_Asset', 0)).replace(',', '')) for row in history_records[-14:]] + [net_asset]
+    
+    chart_config = {
+        "type": "line",
+        "data": {
+            "labels": dates,
+            "datasets": [
+                {"label": "總資產", "data": total_data, "borderColor": "#36a2eb", "fill": False},
+                {"label": "淨資產", "data": net_data, "borderColor": "#ff6384", "fill": False}
+            ]
+        },
+        "options": {"title": {"display": True, "text": "近期資產軌跡 (Total vs Net)"}}
+    }
+    return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=400&h=250"
 
 # ==========================================
 # 5. 主程式運算邏輯
@@ -89,6 +104,11 @@ def generate_pie_chart(tw_val, pledged_val, us_val):
 def main():
     today_str = datetime.date.today().strftime("%m-%d")
     inventory, config, history_sheet = get_sheets_data()
+    
+    try:
+        history_records = history_sheet.get_all_records()
+    except:
+        history_records = []
     
     usd_rate = get_usd_twd_rate()
     
@@ -100,9 +120,12 @@ def main():
     tsmc_exposure_twd = 0
     price_006208 = 0
 
-    # 結算各項資產
+    # 修正 Google Sheets 自動去掉 0 的問題
+    symbol_overrides = {'6208': '006208', '403A': '00403A', '886': '00886', '895': '00895', '878': '00878', '685L': '00685L'}
+
     for item in inventory:
-        symbol = str(item['Symbol'])
+        raw_symbol = str(item['Symbol']).strip()
+        symbol = symbol_overrides.get(raw_symbol, raw_symbol)
         shares = float(item['Shares'])
         itype = item['Type']
         
@@ -112,7 +135,7 @@ def main():
             tw_stock_value += value
             if symbol == '2330': tsmc_exposure_twd += value
             if symbol == '006208': 
-                tsmc_exposure_twd += (value * 0.55) # 概算含積量 55%
+                tsmc_exposure_twd += (value * 0.55)
                 price_006208 = price
                 
         elif itype == '美股':
@@ -125,7 +148,6 @@ def main():
         elif itype == '現金_USD': cash_usd += shares
         elif itype == '基金': fund_value += shares
 
-    # 彙整總值
     us_stock_value_twd = us_stock_value_usd * usd_rate
     total_cash_twd = cash_twd + (cash_usd * usd_rate)
     
@@ -133,19 +155,26 @@ def main():
     debt = float(config.get('Current_Debt', 690000))
     net_asset = total_asset - debt
     
-    # 質押維持率計算
+    # 計算單日變化 (抓昨天最後一筆淨資產)
+    yesterday_net = float(str(history_records[-1].get('Net_Asset', 0)).replace(',', '')) if len(history_records) > 0 else 0
+    daily_diff = net_asset - yesterday_net if yesterday_net else 0
+    daily_pct = (daily_diff / yesterday_net * 100) if yesterday_net else 0
+    sign = "+" if daily_diff >= 0 else ""
+    emoji = "📈" if daily_diff >= 0 else "📉"
+    daily_str = f"單日變化：{emoji}{sign}{daily_pct:.1f}% ({sign}${daily_diff:,.0f})" if yesterday_net else "單日變化：-- (首日無數據)"
+
+    # 質押維持率
     pledged_shares = float(config.get('Pledged_Shares_006208', 8000))
     pledged_value = pledged_shares * price_006208
     maintenance_ratio = (pledged_value / debt) * 100 if debt > 0 else 0
     ratio_status = "安全 ✅" if maintenance_ratio > 160 else "危險 ⚠️"
 
-    # 進度條計算
+    # 目標進度
     target_asset = float(config.get('Target_Asset', 10000000))
     progress_pct = (net_asset / target_asset) * 100
-    filled_blocks = int(progress_pct / 10)
-    bar = "█" * filled_blocks + "░" * (10 - filled_blocks)
+    bar = "█" * int(progress_pct / 10) + "░" * (10 - int(progress_pct / 10))
 
-    # 寫入 History (用於下次畫折線圖)
+    # 寫入今日歷史數據
     history_sheet.append_row([
         datetime.date.today().strftime("%Y-%m-%d"), 
         round(total_asset, 2), 
@@ -154,18 +183,18 @@ def main():
         round(tsmc_exposure_twd, 2)
     ])
 
-    # 生成圖表連結
-    pie_chart_url = generate_pie_chart(tw_stock_value, pledged_value, us_stock_value_twd)
+    # 產生兩張圖表
+    pie_url = generate_pie_chart(tw_stock_value, pledged_value, us_stock_value_twd)
+    line_url = generate_line_chart(history_records, today_str, total_asset, net_asset)
 
-    # ==========================================
-    # 6. Telegram 報表排版與推播
-    # ==========================================
+    # 組合訊息字串
     msg = f"""
 🦎Tranquil Growth（{today_str} 盤後結算）
 ======================
 💎【資產總覽】
 總資產 (Total)：${total_asset:,.0f}
 淨資產 (Net)：${net_asset:,.0f}
+{daily_str}
 ======================
 📂【資產明細】
 🇹🇼 台股現值：${tw_stock_value:,.0f}
@@ -195,15 +224,10 @@ def main():
 - 2029-08: 1000萬 達標
 """
 
-    # 發送 Telegram (文字 + 圓餅圖圖片)
-    tg_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "photo": pie_chart_url,
-        "caption": msg
-    }
-    requests.post(tg_url, data=payload)
-    print("✅ 結算完成並已推播至 Telegram")
+    # 傳送至 Telegram (傳送兩張圖：折線圖與圓餅圖+報表)
+    base_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    requests.post(base_url, data={"chat_id": TELEGRAM_CHAT_ID, "photo": line_url})
+    requests.post(base_url, data={"chat_id": TELEGRAM_CHAT_ID, "photo": pie_url, "caption": msg})
 
 if __name__ == "__main__":
     main()
