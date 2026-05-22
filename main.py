@@ -25,18 +25,23 @@ def calculate_current_assets():
     client = gspread.authorize(creds)
     sheet = client.open("Tranquil_Growth_DB")
     
-    # 智慧尋找表單分頁
+    # 智慧尋找表單分頁 (自動忽略空白、大小寫)
     form_ws = None
+    history_sheet = None
+    
     for ws in sheet.worksheets():
-        if "表單" in ws.title or "Form" in ws.title or "回覆" in ws.title:
+        title_clean = ws.title.strip().lower()
+        if "表單" in title_clean or "form" in title_clean or "回覆" in title_clean:
             form_ws = ws
-            break
+        elif "history" in title_clean or "歷史" in title_clean or "紀錄" in title_clean:
+            history_sheet = ws
             
     if form_ws is None:
-        raise ValueError("找不到表單分頁！")
+        raise ValueError("❌ 找不到表單回應分頁！")
+    if history_sheet is None:
+        raise ValueError("❌ 找不到 History 歷史紀錄分頁！請確認試算表內有一個名為 History 的分頁。")
         
     form_records = form_ws.get_all_records()
-    history_sheet = sheet.worksheet("History")
     
     inventory = {
         "台股": {}, "美股": {}, "基金": {}, 
