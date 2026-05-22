@@ -16,19 +16,22 @@ FINMIND_TOKEN = os.getenv("FINMIND_TOKEN")
 GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
 
 # ==========================================
-# 2. Google Sheets 動態資產結算核心
+# 2. Google Sheets 動態資產結算核心 (錯位自適應版)
 # ==========================================
 def calculate_current_assets():
+    """
+    自適應解析因複製產生的欄位錯位，
+    精準提取 B(類別)、C/D(代號)、E(模式)、F(數量) 進行流動資產結算。
+    """
     creds_dict = json.loads(GCP_CREDENTIALS_JSON)
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     sheet = client.open("Tranquil_Growth_DB")
     
-    # 智慧尋找表單分頁 (自動忽略空白、大小寫)
+    # 智慧模糊搜尋工作表
     form_ws = None
     history_sheet = None
-    
     for ws in sheet.worksheets():
         title_clean = ws.title.strip().lower()
         if "表單" in title_clean or "form" in title_clean or "回覆" in title_clean:
@@ -39,9 +42,15 @@ def calculate_current_assets():
     if form_ws is None:
         raise ValueError("❌ 找不到表單回應分頁！")
     if history_sheet is None:
-        raise ValueError("❌ 找不到 History 歷史紀錄分頁！請確認試算表內有一個名為 History 的分頁。")
+        raise ValueError("❌ 找不到 History 歷史紀錄分頁！")
         
-    form_records = form_ws.get_all_records()
+    # 讀取整張表所有格子 (包含無表頭的 F 欄)
+    all_rows = form_ws.get_all_values()
+    if not all_rows or len(all_rows) <= 1:
+        print("⚠️ 表單分頁中無任何數據列。")
+        return {}, history_sheet
+        
+    data_rows = all_rows[1:]
     
     inventory = {
         "台股": {}, "美股": {}, "基金": {}, 
@@ -49,29 +58,43 @@ def calculate_current_assets():
         "質押負債": {"Current_Debt": 0.0}
     }
     
-    symbol_overrides = {'6208': '006208', '403A': '00403A', '886': '00886', '895': '00895', '878': '00878', '685L': '00685L'}
+    symbol_overrides = {
+        '6208': '006208', '403A': '00403A', '886': '00886', 
+        '895': '00895', '878': '00878', '685L': '00685L'
+    }
     
-    for row in form_records:
-        cleaned_row = {str(k).strip(): str(v).strip() for k, v in row.items()}
+    print(f"🔄 開始動態解析 {len(data_rows)} 筆歷史異動...")
+    
+    for idx, row in enumerate(data_rows, start=2):
+        # 補足長度防範空列索引錯誤
+        while len(row) < 6:
+            row.append("")
+            
+        row_clean = [str(cell).strip() for cell in row]
         
-        asset_type, raw_symbol, mode, raw_amount = "", "", "", "0"
+        # 核心：破解複製規律的位置自適應映射
+        asset_type = row_clean[1]  # B欄：永遠是資產類別
+        mode = row_clean[4]        # E欄：永遠是異動模式/全部取代
+        raw_amount = row_clean[5]  # F欄：永遠是真正的數量/金額
         
-       # 終極防呆：超級模糊比對 (只要欄位包含這些字眼就強制命中)
-        for k, v in cleaned_row.items():
-            k_str = str(k).strip()
-            if "類別" in k_str or "資產" in k_str:
-                if "代號" not in k_str and "名稱" not in k_str:
-                    asset_type = str(v).strip()
-            if "代號" in k_str or "名稱" in k_str or "標的" in k_str or "股票" in k_str:
-                raw_symbol = str(v).strip()
-            if "模式" in k_str or "異動" in k_str or "交易" in k_str:
-                mode = str(v).strip()
-            if "數" in k_str or "金" in k_str or "量" in k_str or "額" in k_str:
-                raw_amount = str(v).strip()
-
-        if not asset_type: continue
-        
-        # 終極防呆：模糊比對下拉式選項 (容許只寫"現金"或"台股")
+        # 代號會根據文字或數字分裂在 C欄 或 D欄
+        if row_clean[2]:
+            raw_symbol = row_clean[2]
+        elif row_clean[3]:
+            raw_symbol = row_clean[3]
+        else:
+            raw_symbol = ""
+            
+        # 備用機制：萬一連 B/E/F 欄位順序都變了，自動啟動內容特徵掃描
+        if not any(x in asset_type for x in ["股", "金", "TWD", "USD", "質押", "負債"]):
+            for cell in row_clean:
+                if any(x in cell for x in ["台股", "美股", "基金", "現金", "質押"]): asset_type = cell
+                if any(x in cell for x in ["全部取代", "覆蓋", "買入", "賣出"]): mode = cell
+                
+        if not asset_type: 
+            continue
+            
+        # 規格化資產種類名稱
         if "台" in asset_type and "股" in asset_type: asset_type = "台股"
         elif "美" in asset_type and "股" in asset_type: asset_type = "美股"
         elif "基" in asset_type and "金" in asset_type: asset_type = "基金"
@@ -80,27 +103,33 @@ def calculate_current_assets():
         elif "質押" in asset_type or "負債" in asset_type: asset_type = "質押負債"
         
         if asset_type not in inventory: continue
-
+        
+        # 規格化數量/股數
         try:
-            amount = float(raw_amount.replace(',', ''))
+            amount_str = raw_amount.replace(",", "").replace("$", "")
+            amount = float(amount_str) if amount_str else 0.0
         except ValueError:
             continue
             
+        # 規格化股票代號
         symbol = symbol_overrides.get(raw_symbol, raw_symbol)
         if asset_type in ["現金_TWD", "現金_USD", "質押負債"] and not symbol:
             symbol = "TWD" if asset_type == "現金_TWD" else ("USD" if asset_type == "現金_USD" else "Current_Debt")
             
         if not symbol: continue
-            
+        
         if symbol not in inventory[asset_type]:
             inventory[asset_type][symbol] = 0.0
             
+        # 依照模式進行流動式權重堆疊計算
         if "買入" in mode or "存入" in mode or "+" in mode:
             inventory[asset_type][symbol] += amount
         elif "賣出" in mode or "提領" in mode or "-" in mode:
             inventory[asset_type][symbol] -= amount
         elif "取代" in mode or "覆蓋" in mode or "更新" in mode:
             inventory[asset_type][symbol] = amount
+            
+        print(f"✅ 解析命中 -> 列號:{idx} | 類別:{asset_type} | 代號:{symbol} | 數量:{amount}")
 
     return inventory, history_sheet
 
@@ -131,29 +160,29 @@ def get_tw_stock_price(symbol):
 
 def generate_pie_chart(tw_val, pledged_val, us_val):
     tw_spot = max(0, tw_val - pledged_val)
-    
     chart_config = {
         "type": "outlabeledPie",
         "data": {
             "labels": ["🇹🇼 現貨台股", "🦆 質押台股", "🇺🇸 現貨美股"],
             "datasets": [{"backgroundColor": ["#36a2eb", "#ff6384", "#ffce56"], "data": [tw_spot, pledged_val, us_val]}]
         },
-        "options": {"plugins": {"legend": {"display": False}, "outlabels": {"text": "%l %p", "color": "white", "stretch": 35, "font": {"minSize": 12}}}}
+        "options": {
+            "plugins": {
+                "legend": {"display": False},
+                "outlabels": {"text": "%l %p", "color": "white", "stretch": 35, "font": {"minSize": 12}}
+            }
+        }
     }
-    
-    # 防呆：如果全資產都是0，給一張灰色佔位圖，避免 QuickChart 算不出比例而壞掉
     if tw_spot == 0 and pledged_val == 0 and us_val == 0:
         chart_config["data"]["labels"] = ["尚無資產數據"]
         chart_config["data"]["datasets"][0]["data"] = [1]
         chart_config["data"]["datasets"][0]["backgroundColor"] = ["#cccccc"]
-        
     return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=400&h=250"
 
 def generate_line_chart(history_records, today_str, total_asset, net_asset):
     dates = []
     total_data = []
     net_data = []
-    
     for row in history_records[-14:]:
         d = str(row.get('Date', ''))[-5:]
         if d:
@@ -194,6 +223,7 @@ def main():
     cash_usd = inventory["現金_USD"].get("USD", 0)
     fund_value = sum(inventory["基金"].values())
 
+    # 結算台股與含積量
     for symbol, shares in inventory["台股"].items():
         if shares <= 0: continue
         price = get_tw_stock_price(symbol)
@@ -204,6 +234,7 @@ def main():
             tsmc_exposure_twd += (value * 0.55)
             price_006208 = price
 
+    # 結算美股與含積量 (TSM)
     for symbol, shares in inventory["美股"].items():
         if shares <= 0: continue
         price = get_us_stock_price(symbol)
@@ -222,7 +253,7 @@ def main():
     pledged_shares = min(total_006208_shares, 8000) if total_006208_shares > 0 else 0
     pledged_value = pledged_shares * price_006208
     
-    # 數學防呆：避免除以 0 導致 NaN 錯誤
+    # 計算風險指標與佔比
     maintenance_ratio = (pledged_value / debt) * 100 if debt > 0 else 0
     ratio_status = "安全 ✅" if maintenance_ratio > 160 else ("危險 ⚠️" if debt > 0 else "無借款 ✅")
 
@@ -231,6 +262,7 @@ def main():
     us_pct = (us_stock_value_twd/total_asset)*100 if total_asset > 0 else 0
     tsmc_pct = (tsmc_exposure_twd/net_asset)*100 if net_asset > 0 else 0
 
+    # 計算單日損益變化
     yesterday_net = float(str(history_records[-1].get('Net_Asset', 0)).replace(',', '')) if len(history_records) > 0 else 0
     daily_diff = net_asset - yesterday_net if yesterday_net else 0
     daily_pct = (daily_diff / yesterday_net * 100) if yesterday_net else 0
@@ -242,6 +274,7 @@ def main():
     bar_blocks = max(0, min(10, int(progress_pct / 10)))
     bar = "█" * bar_blocks + "░" * (10 - bar_blocks)
 
+    # 落庫保存今日正確歷史數據
     history_sheet.append_row([
         datetime.date.today().strftime("%Y-%m-%d"), 
         round(total_asset, 2), round(net_asset, 2), debt, round(tsmc_exposure_twd, 2)
