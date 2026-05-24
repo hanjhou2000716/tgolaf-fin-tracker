@@ -19,17 +19,12 @@ GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
 # 2. Google Sheets 動態資產結算核心 (AI 無敵掃描版)
 # ==========================================
 def calculate_current_assets():
-    """
-    自適應掃描整張表所有格子，不看固定欄位名稱，
-    智慧辨識 類別、模式、代號、數量 進行流動資產庫存結算。
-    """
     creds_dict = json.loads(GCP_CREDENTIALS_JSON)
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     sheet = client.open("Tranquil_Growth_DB")
     
-    # 智慧模糊搜尋表單與歷史分頁
     form_ws = None
     history_sheet = None
     for ws in sheet.worksheets():
@@ -59,7 +54,6 @@ def calculate_current_assets():
         '895': '00895', '878': '00878', '685L': '00685L'
     }
     
-    # 建立已知資產清單快取，協助特徵掃描
     known_symbols = [
         '6208', '006208', '403A', '00403A', '886', '00886', '895', '00895',
         '878', '00878', '3455', '8033', '2330', '3665', '685L', '00685L',
@@ -76,7 +70,6 @@ def calculate_current_assets():
         symbol = ""
         potential_numbers = []
         
-        # 內容特徵掃描演算法
         for cell in cells:
             c_upper = cell.upper()
             if any(x in cell for x in ["台股", "美股", "基金", "現金", "質押", "負債"]):
@@ -84,7 +77,7 @@ def calculate_current_assets():
             elif any(x in cell for x in ["買入", "存入", "賣出", "提領", "取代", "覆蓋", "更新"]):
                 mode = cell
             elif c_upper in known_symbols or any(char.isalpha() for char in c_upper):
-                if "/" not in cell and "-" not in cell: # 排除日期
+                if "/" not in cell and "-" not in cell:
                     symbol = cell
             else:
                 try:
@@ -93,7 +86,6 @@ def calculate_current_assets():
                 except ValueError:
                     pass
                     
-        # 錯位自適應校正
         if not symbol and len(potential_numbers) >= 2:
             symbol = potential_numbers[0]
             amount_str = potential_numbers[-1]
@@ -105,7 +97,6 @@ def calculate_current_assets():
         if not asset_type: continue
         if not mode: mode = "取代"
         
-        # 標準化類別
         if "台" in asset_type and "股" in asset_type: asset_type = "台股"
         elif "美" in asset_type and "股" in asset_type: asset_type = "美股"
         elif "基" in asset_type and "金" in asset_type: asset_type = "基金"
@@ -128,7 +119,6 @@ def calculate_current_assets():
         if symbol not in inventory[asset_type]:
             inventory[asset_type][symbol] = 0.0
             
-        # 執行權重流動運算
         if "買入" in mode or "存入" in mode or "+" in mode:
             inventory[asset_type][symbol] += amount
         elif "賣出" in mode or "提領" in mode or "-" in mode:
@@ -189,7 +179,6 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
     total_data = []
     net_data = []
     
-    # 過濾 History 中可能因為測試產生的 0 異常值
     for row in history_records[-14:]:
         d = str(row.get('Date', ''))[-5:]
         total = float(str(row.get('Total_Asset', 0)).replace(',', ''))
@@ -232,24 +221,30 @@ def main():
     cash_usd = inventory["現金_USD"].get("USD", 0)
     fund_value = sum(inventory["基金"].values())
 
-    # 結算台股與含積量
+    # 1. 結算台股與各標的含積量 (TWD)
     for symbol, shares in inventory["台股"].items():
         if shares <= 0: continue
         price = get_tw_stock_price(symbol)
         value = price * shares
         tw_stock_value += value
-        if symbol == '2330': tsmc_exposure_twd += value
-        if symbol == '006208': 
-            tsmc_exposure_twd += (value * 0.55)
+        
+        if symbol == '2330': 
+            tsmc_exposure_twd += (value * 1.0)
+        elif symbol == '006208': 
+            tsmc_exposure_twd += (value * 0.594)  # 更新為 59.4%
             price_006208 = price
+        elif symbol == '00685L':
+            tsmc_exposure_twd += (value * 0.728)  # 新增 00685L 含積量 72.8%
 
-    # 結算美股與含積量
+    # 2. 結算美股與各標的含積量 (TWD)
     for symbol, shares in inventory["美股"].items():
         if shares <= 0: continue
         price = get_us_stock_price(symbol)
         value = price * shares
         us_stock_value_usd += value
-        if symbol == 'TSM': tsmc_exposure_twd += (value * usd_rate)
+        
+        if symbol == 'TSM': 
+            tsmc_exposure_twd += (value * usd_rate * 1.0)
 
     us_stock_value_twd = us_stock_value_usd * usd_rate
     total_cash_twd = cash_twd + (cash_usd * usd_rate)
@@ -269,9 +264,10 @@ def main():
     tw_pct = ((tw_stock_value - pledged_value)/total_asset)*100 if total_asset > 0 else 0
     pledged_pct = (pledged_value/total_asset)*100 if total_asset > 0 else 0
     us_pct = (us_stock_value_twd/total_asset)*100 if total_asset > 0 else 0
-    tsmc_pct = (tsmc_exposure_twd/net_asset)*100 if net_asset > 0 else 0
+    
+    # 3. 算出最終曝險比例 (改為除以總資產 Total Assets)
+    tsmc_pct = (tsmc_exposure_twd / total_asset) * 100 if total_asset > 0 else 0
 
-    # 尋找上一筆大於0的有效歷史數據計算單日變化
     yesterday_net = 0
     for row in reversed(history_records):
         val = float(str(row.get('Net_Asset', 0)).replace(',', ''))
@@ -289,7 +285,6 @@ def main():
     bar_blocks = max(0, min(10, int(progress_pct / 10)))
     bar = "█" * bar_blocks + "░" * (10 - bar_blocks)
 
-    # 防呆：只有當計算出真實資產時，才將紀錄寫入 History
     if total_asset > 0:
         history_sheet.append_row([
             datetime.date.today().strftime("%Y-%m-%d"), 
@@ -299,7 +294,6 @@ def main():
     pie_url = generate_pie_chart(tw_stock_value, pledged_value, us_stock_value_twd)
     line_url = generate_line_chart(history_records, today_str, total_asset, net_asset)
 
-    # 建立包含歷史增率的 Telegram 模板
     msg = f"""
 🦎Tranquil Growth（{today_str} 盤後結算）
 ======================
