@@ -295,7 +295,7 @@ def main():
     line_url = generate_line_chart(history_records, today_str, total_asset, net_asset)
 
     msg = f"""
-🦎Tranquil Growth（{today_str} 盤後結算）
+🦎 Tranquil Growth（{today_str} 盤後結算）
 ======================
 💎【資產總覽】
 總資產 (Total)：${total_asset:,.0f}
