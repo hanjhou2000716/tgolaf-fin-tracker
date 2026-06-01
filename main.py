@@ -361,9 +361,9 @@ def main():
             final_month = (target_month - 1) % 12 + 1
             timeline_strs.append(f"- {target_year}-{final_month:02d}: {target//10000}萬 達標")
             
-    timeline_text = "\n".join(timeline_strs)
+  timeline_text = "\n".join(timeline_strs)
 
-   msg = f"""
+    msg = f"""
 {title_header}
 ======================
 💎【資產總覽】
