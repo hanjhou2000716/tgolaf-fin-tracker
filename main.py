@@ -176,14 +176,12 @@ def generate_pie_chart(tw_val, pledged_val, us_val):
     return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=400&h=250"
 
 def generate_line_chart(history_records, today_str, total_asset, net_asset):
-    # 🌟 同日數據平均收斂演算法
     daily_data = {}
     
-    # 1. 整理歷史紀錄，將同日期的數據放進同一個群組
     for row in history_records:
         date_str = str(row.get('Date', ''))
         if not date_str: continue
-        d_short = date_str[-5:]  # 取出 MM-DD
+        d_short = date_str[-5:]
         total = float(str(row.get('Total_Asset', 0)).replace(',', ''))
         net = float(str(row.get('Net_Asset', 0)).replace(',', ''))
         
@@ -193,13 +191,11 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
             daily_data[d_short]['total'].append(total)
             daily_data[d_short]['net'].append(net)
             
-    # 2. 加入當下最新結算的這一筆
     if today_str not in daily_data:
         daily_data[today_str] = {'total': [], 'net': []}
     daily_data[today_str]['total'].append(total_asset)
     daily_data[today_str]['net'].append(net_asset)
     
-    # 3. 計算每一天的平均值，並只抓取最近 14 個「不重複的日子」
     recent_days = list(daily_data.keys())[-14:]
     dates, total_data, net_data = [], [], []
     
@@ -227,11 +223,9 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
 # 4. 核心結算與通知發送主程序
 # ==========================================
 def main():
-    # 取得台灣時間 (UTC+8)
     tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
     today_str = tw_now.strftime("%m-%d")
     
-    # 自動判定排程：下午(12~20點)為台股盤後，其餘時間為美股盤後
     if 12 <= tw_now.hour <= 20:
         title_header = f"🇹🇼 PRStK | Growth（{today_str}）"
     else:
@@ -284,7 +278,6 @@ def main():
     us_pct = (us_stock_value_twd/total_asset)*100 if total_asset > 0 else 0
     tsmc_pct = (tsmc_exposure_twd / total_asset) * 100 if total_asset > 0 else 0
 
-    # 🌟 精準抓取「昨天」的淨資產 (避開今天稍早的同日紀錄)
     yesterday_net = 0
     for row in reversed(history_records):
         val = float(str(row.get('Net_Asset', 0)).replace(',', ''))
@@ -312,9 +305,6 @@ def main():
     pie_url = generate_pie_chart(tw_stock_value, pledged_value, us_stock_value_twd)
     line_url = generate_line_chart(history_records, today_str, total_asset, net_asset)
 
-    # ==========================================
-    # 🌟 🚀 動態歷史增率與時間軸推算演算法 (全區間逐級解鎖版)
-    # ==========================================
     valid_history = []
     for row in history_records:
         val = float(str(row.get('Net_Asset', 0)).replace(',', ''))
@@ -361,7 +351,7 @@ def main():
             final_month = (target_month - 1) % 12 + 1
             timeline_strs.append(f"- {target_year}-{final_month:02d}: {target//10000}萬 達標")
             
-  timeline_text = "\n".join(timeline_strs)
+    timeline_text = "\n".join(timeline_strs)
 
     msg = f"""
 {title_header}
