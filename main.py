@@ -2,6 +2,7 @@ import os
 import json
 import requests
 import datetime
+import math
 import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
@@ -16,7 +17,7 @@ FINMIND_TOKEN = os.getenv("FINMIND_TOKEN")
 GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
 
 # ==========================================
-# 2. Google Sheets 動態資產結算核心 (AI 無敵掃描版)
+# 2. Google Sheets 動態資產結算核心
 # ==========================================
 def calculate_current_assets():
     creds_dict = json.loads(GCP_CREDENTIALS_JSON)
@@ -175,22 +176,39 @@ def generate_pie_chart(tw_val, pledged_val, us_val):
     return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=400&h=250"
 
 def generate_line_chart(history_records, today_str, total_asset, net_asset):
-    dates = []
-    total_data = []
-    net_data = []
+    # 🌟 同日數據平均收斂演算法
+    daily_data = {}
     
-    for row in history_records[-14:]:
-        d = str(row.get('Date', ''))[-5:]
+    # 1. 整理歷史紀錄，將同日期的數據放進同一個群組
+    for row in history_records:
+        date_str = str(row.get('Date', ''))
+        if not date_str: continue
+        d_short = date_str[-5:]  # 取出 MM-DD
         total = float(str(row.get('Total_Asset', 0)).replace(',', ''))
         net = float(str(row.get('Net_Asset', 0)).replace(',', ''))
-        if d and total > 0:  
-            dates.append(d)
-            total_data.append(total)
-            net_data.append(net)
+        
+        if total > 0:
+            if d_short not in daily_data:
+                daily_data[d_short] = {'total': [], 'net': []}
+            daily_data[d_short]['total'].append(total)
+            daily_data[d_short]['net'].append(net)
             
-    dates.append(today_str)
-    total_data.append(total_asset)
-    net_data.append(net_asset)
+    # 2. 加入當下最新結算的這一筆
+    if today_str not in daily_data:
+        daily_data[today_str] = {'total': [], 'net': []}
+    daily_data[today_str]['total'].append(total_asset)
+    daily_data[today_str]['net'].append(net_asset)
+    
+    # 3. 計算每一天的平均值，並只抓取最近 14 個「不重複的日子」
+    recent_days = list(daily_data.keys())[-14:]
+    dates, total_data, net_data = [], [], []
+    
+    for d in recent_days:
+        dates.append(d)
+        avg_total = sum(daily_data[d]['total']) / len(daily_data[d]['total'])
+        avg_net = sum(daily_data[d]['net']) / len(daily_data[d]['net'])
+        total_data.append(round(avg_total, 2))
+        net_data.append(round(avg_net, 2))
     
     chart_config = {
         "type": "line",
@@ -209,8 +227,16 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
 # 4. 核心結算與通知發送主程序
 # ==========================================
 def main():
-    today_str = datetime.date.today().strftime("%m-%d")
+    # 取得台灣時間 (UTC+8)
+    tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    today_str = tw_now.strftime("%m-%d")
     
+    # 自動判定排程：下午(12~20點)為台股盤後，其餘時間為美股盤後
+    if 12 <= tw_now.hour <= 20:
+        title_header = f"🇹🇼 PRStK | Growth（{today_str}）"
+    else:
+        title_header = f"🇺🇲 PRStK | Growth（{today_str}）"
+        
     inventory, history_sheet = calculate_current_assets()
     try: history_records = history_sheet.get_all_records()
     except: history_records = []
@@ -221,30 +247,23 @@ def main():
     cash_usd = inventory["現金_USD"].get("USD", 0)
     fund_value = sum(inventory["基金"].values())
 
-    # 1. 結算台股與各標的含積量 (TWD)
     for symbol, shares in inventory["台股"].items():
         if shares <= 0: continue
         price = get_tw_stock_price(symbol)
         value = price * shares
         tw_stock_value += value
-        
-        if symbol == '2330': 
-            tsmc_exposure_twd += (value * 1.0)
+        if symbol == '2330': tsmc_exposure_twd += (value * 1.0)
         elif symbol == '006208': 
-            tsmc_exposure_twd += (value * 0.594)  # 更新為 59.4%
+            tsmc_exposure_twd += (value * 0.594)
             price_006208 = price
-        elif symbol == '00685L':
-            tsmc_exposure_twd += (value * 0.728)  # 新增 00685L 含積量 72.8%
+        elif symbol == '00685L': tsmc_exposure_twd += (value * 0.728)
 
-    # 2. 結算美股與各標的含積量 (TWD)
     for symbol, shares in inventory["美股"].items():
         if shares <= 0: continue
         price = get_us_stock_price(symbol)
         value = price * shares
         us_stock_value_usd += value
-        
-        if symbol == 'TSM': 
-            tsmc_exposure_twd += (value * usd_rate * 1.0)
+        if symbol == 'TSM': tsmc_exposure_twd += (value * usd_rate * 1.0)
 
     us_stock_value_twd = us_stock_value_usd * usd_rate
     total_cash_twd = cash_twd + (cash_usd * usd_rate)
@@ -257,21 +276,20 @@ def main():
     pledged_shares = min(total_006208_shares, 8000) if total_006208_shares > 0 else 0
     pledged_value = pledged_shares * price_006208
     
-    # 數據健康度與比例指標計算
     maintenance_ratio = (pledged_value / debt) * 100 if debt > 0 else 0
     ratio_status = "安全 ✅" if maintenance_ratio > 160 else ("危險 ⚠️" if debt > 0 else "無借款 ✅")
 
     tw_pct = ((tw_stock_value - pledged_value)/total_asset)*100 if total_asset > 0 else 0
     pledged_pct = (pledged_value/total_asset)*100 if total_asset > 0 else 0
     us_pct = (us_stock_value_twd/total_asset)*100 if total_asset > 0 else 0
-    
-    # 3. 算出最終曝險比例 (改為除以總資產 Total Assets)
     tsmc_pct = (tsmc_exposure_twd / total_asset) * 100 if total_asset > 0 else 0
 
+    # 🌟 精準抓取「昨天」的淨資產 (避開今天稍早的同日紀錄)
     yesterday_net = 0
     for row in reversed(history_records):
         val = float(str(row.get('Net_Asset', 0)).replace(',', ''))
-        if val > 0:
+        row_date = str(row.get('Date', ''))[-5:]
+        if val > 0 and row_date != today_str:
             yesterday_net = val
             break
 
@@ -294,8 +312,59 @@ def main():
     pie_url = generate_pie_chart(tw_stock_value, pledged_value, us_stock_value_twd)
     line_url = generate_line_chart(history_records, today_str, total_asset, net_asset)
 
-    msg = f"""
-🦎 Tranquil Growth（{today_str} 盤後結算）
+    # ==========================================
+    # 🌟 🚀 動態歷史增率與時間軸推算演算法 (全區間逐級解鎖版)
+    # ==========================================
+    valid_history = []
+    for row in history_records:
+        val = float(str(row.get('Net_Asset', 0)).replace(',', ''))
+        if val > 0: valid_history.append(val)
+
+    history_len = len(valid_history)
+
+    def get_growth_str(days, sim_text):
+        if history_len >= days:
+            past_net = valid_history[-days]
+            rate = ((net_asset - past_net) / past_net) * 100
+            s = "+" if rate >= 0 else ""
+            return f"{s}{rate:.1f}%(實)"
+        else:
+            return f"{sim_text}(模)"
+
+    m1_str = get_growth_str(30, "+10.7%")
+    m3_str = get_growth_str(90, "+215.9%")
+    y1_str = get_growth_str(365, "+83.1%")
+    y3_str = get_growth_str(1095, "+195.7%")
+
+    growth_text = f"🔺 近一月:{m1_str} | 近一季:{m3_str}\n🔺 近一年:{y1_str} | 近三年:{y3_str}"
+
+    if history_len >= 30:
+        past_30_net = valid_history[-30]
+        monthly_growth_rate = (net_asset - past_30_net) / past_30_net
+    else:
+        monthly_growth_rate = 0.015 
+
+    calc_rate = max(monthly_growth_rate, 0.001) 
+    safe_net_asset = max(net_asset, 1)          
+    
+    targets = [7000000, 8000000, 9000000, 10000000]
+    timeline_strs = ["- 2026-10: 🎖️ 成功嶺退伍日"]
+    today = datetime.date.today()
+    
+    for target in targets:
+        if safe_net_asset >= target:
+            timeline_strs.append(f"- 已達標: {target//10000}萬 ✅")
+        else:
+            months_needed = math.log(target / safe_net_asset) / math.log(1 + calc_rate)
+            target_month = today.month + int(months_needed)
+            target_year = today.year + (target_month - 1) // 12
+            final_month = (target_month - 1) % 12 + 1
+            timeline_strs.append(f"- {target_year}-{final_month:02d}: {target//10000}萬 達標")
+            
+    timeline_text = "\n".join(timeline_strs)
+
+   msg = f"""
+{title_header}
 ======================
 💎【資產總覽】
 總資產 (Total)：${total_asset:,.0f}
@@ -320,18 +389,13 @@ def main():
 質押維持率：{maintenance_ratio:.1f}% (狀態：{ratio_status})
 ======================
 🚀【歷史增率】
-🔺 近一月:+10.7%(模) | 近一季:+215.9%(模)
-🔺 近一年:+83.1%(模) | 近三年:+195.7%(模)
+{growth_text}
 ======================
 🎯【模型預測】
 • 千萬目標達成率：{progress_pct:.1f}%
  [{bar}] {progress_pct:.1f}%
 • 時間軸推算
-- 2026-10: 🎖️ 成功嶺退伍日
-- 2027-01: 700萬 達標
-- 2027-12: 800萬 達標
-- 2028-11: 900萬 達標
-- 2029-08: 1000萬 達標
+{timeline_text}
 ======================
 📝【資產異動登錄】
 🔗 表單捷徑：https://forms.gle/9ZEJawwNRGfiXQiV8
