@@ -205,6 +205,24 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
         avg_net = sum(daily_data[d]['net']) / len(daily_data[d]['net'])
         total_data.append(round(avg_total, 2))
         net_data.append(round(avg_net, 2))
+        
+    # ==========================================
+    # 🌟 動態 Y 軸自適應演算法 (以 20 萬為級距)
+    # ==========================================
+    all_vals = total_data + net_data
+    if all_vals:
+        min_val = min(all_vals)
+        max_val = max(all_vals)
+        # 無條件捨去與進位，精準切齊 20 萬的倍數
+        y_min = math.floor(min_val / 200000) * 200000
+        y_max = math.ceil(max_val / 200000) * 200000
+        
+        # 防呆：如果只有一天數據導致最大最小值一樣，強制拉開上下限
+        if y_min == y_max:
+            y_min -= 200000
+            y_max += 200000
+    else:
+        y_min, y_max = 0, 1000000
     
     chart_config = {
         "type": "line",
@@ -215,7 +233,18 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
                 {"label": "淨資產 (Net)", "data": net_data, "borderColor": "#ff6384", "fill": False, "tension": 0.1}
             ]
         },
-        "options": {"title": {"display": True, "text": "近期資產軌跡 (Total vs Net)"}}
+        "options": {
+            "title": {"display": True, "text": "近期資產軌跡 (Total vs Net)"},
+            "scales": {
+                "yAxes": [{
+                    "ticks": {
+                        "min": y_min,
+                        "max": y_max,
+                        "stepSize": 200000
+                    }
+                }]
+            }
+        }
     }
     return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=400&h=250"
 
