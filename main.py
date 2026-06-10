@@ -26,10 +26,9 @@ def calculate_current_assets():
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     
-    # 🌟 綁定你的最新專屬網址，永不迷路
-    sheet = client.open_by_key("1xMlc6zThljSx-HMmxHrFdgDylKq4NNab5HhSROrqHU8")
+    # 綁定最新試算表網址
+    sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1xMlc6zThljsX-HMmxHrFdgDylKq4NNab5HhSRQrqHU8/edit")
     
-    # 🌟 全域掃描：把所有叫「表單」或「異動」的分頁資料全部集合起來，防止漏讀
     data_rows = []
     history_sheet = None
     for ws in sheet.worksheets():
@@ -67,7 +66,7 @@ def calculate_current_assets():
         raw_cells = [str(c).strip() for c in row if str(c).strip() != ""]
         if not raw_cells: continue
         
-        # 🌟 單位自動淨化器：把 17300股 -> 17300, 1.5萬 -> 15000
+        # 單位自動淨化器
         cells = []
         for c in raw_cells:
             match = re.match(r'^([0-9,.]+)\s*(股|張|萬|元|塊)$', c)
@@ -171,13 +170,12 @@ def get_tw_stock_price(symbol):
     except:
         return 0
 
-def generate_pie_chart(tw_val, pledged_val, us_val):
-    tw_spot = max(0, tw_val - pledged_val)
+def generate_pie_chart(tw_free_val, pledged_val, us_val):
     chart_config = {
         "type": "outlabeledPie",
         "data": {
             "labels": ["🇹🇼 現貨台股", "🦆 擔保品市值", "🇺🇸 現貨美股"],
-            "datasets": [{"backgroundColor": ["#36a2eb", "#ff6384", "#ffce56"], "data": [tw_spot, pledged_val, us_val]}]
+            "datasets": [{"backgroundColor": ["#36a2eb", "#ff6384", "#ffce56"], "data": [tw_free_val, pledged_val, us_val]}]
         },
         "options": {
             "plugins": {
@@ -186,7 +184,7 @@ def generate_pie_chart(tw_val, pledged_val, us_val):
             }
         }
     }
-    if tw_spot == 0 and pledged_val == 0 and us_val == 0:
+    if tw_free_val == 0 and pledged_val == 0 and us_val == 0:
         chart_config["data"]["labels"] = ["尚無資產數據"]
         chart_config["data"]["datasets"][0]["data"] = [1]
         chart_config["data"]["datasets"][0]["backgroundColor"] = ["#cccccc"]
@@ -277,21 +275,43 @@ def main():
         
     usd_rate = get_usd_twd_rate()
     tw_stock_value, us_stock_value_usd, tsmc_exposure_twd, price_006208 = 0, 0, 0, 0
+    tw_free_value = 0  # 紀錄未質押的台股部位(供圓餅圖使用)
     cash_twd = inventory["現金_TWD"].get("TWD", 0)
     cash_usd = inventory["現金_USD"].get("USD", 0)
     fund_value = sum(inventory["基金"].values())
 
+    # 1. 結算一般台股 (未質押部位)
     for symbol, shares in inventory["台股"].items():
         if shares <= 0: continue
         price = get_tw_stock_price(symbol)
         value = price * shares
-        tw_stock_value += value
+        tw_free_value += value
+        tw_stock_value += value  # 疊加進台股總值
         if symbol == '2330': tsmc_exposure_twd += (value * 1.0)
         elif symbol == '006208': 
             tsmc_exposure_twd += (value * 0.594)
             price_006208 = price
         elif symbol == '00685L': tsmc_exposure_twd += (value * 0.728)
 
+    # 2. 結算擔保品 (加回總值與曝險)
+    pledged_value = 0
+    for symbol, shares in inventory["擔保品"].items():
+        if shares <= 0: continue
+        if symbol == '006208' and price_006208 > 0:
+            price = price_006208
+        else:
+            price = get_tw_stock_price(symbol)
+        
+        value = price * shares
+        pledged_value += value
+        tw_stock_value += value  # 🌟 擔保品市值加回台股總資產
+        
+        # 🌟 擔保品同樣具有台積電曝險，必須計入
+        if symbol == '2330': tsmc_exposure_twd += (value * 1.0)
+        elif symbol == '006208': tsmc_exposure_twd += (value * 0.594)
+        elif symbol == '00685L': tsmc_exposure_twd += (value * 0.728)
+
+    # 3. 結算美股
     for symbol, shares in inventory["美股"].items():
         if shares <= 0: continue
         price = get_us_stock_price(symbol)
@@ -303,24 +323,18 @@ def main():
     total_cash_twd = cash_twd + (cash_usd * usd_rate)
     debt = inventory["質押負債"].get("Current_Debt", 0)
     
+    # 4. 利息結算 (起算日：2026-06-08, 日息)
     loan_start_date = datetime.date(2026, 6, 8)
     days_passed = max(0, (tw_now.date() - loan_start_date).days)
     daily_rate = 0.033 / 365
     accumulated_interest = debt * daily_rate * days_passed
     total_debt_with_interest = debt + accumulated_interest
     
+    # 5. 總資產與淨資產結算 (此時 tw_stock_value 已經完整包含擔保品)
     total_asset = tw_stock_value + us_stock_value_twd + total_cash_twd + fund_value
     net_asset = total_asset - total_debt_with_interest
     
-    pledged_value = 0
-    for symbol, shares in inventory["擔保品"].items():
-        if shares <= 0: continue
-        if symbol == '006208' and price_006208 > 0:
-            price = price_006208
-        else:
-            price = get_tw_stock_price(symbol)
-        pledged_value += price * shares
-    
+    # 6. 維持率多階狀態判定
     if debt > 0:
         maintenance_ratio = (pledged_value / debt) * 100
         if maintenance_ratio >= 167:
@@ -333,9 +347,9 @@ def main():
         maintenance_ratio = 0
         ratio_status = "無借款 ✅"
 
-    tw_pct = ((tw_stock_value - pledged_value)/total_asset)*100 if total_asset > 0 else 0
-    debt_pct = (debt / total_asset)*100 if total_asset > 0 else 0
-    us_pct = (us_stock_value_twd/total_asset)*100 if total_asset > 0 else 0
+    tw_pct = (tw_stock_value / total_asset) * 100 if total_asset > 0 else 0
+    debt_pct = (debt / total_asset) * 100 if total_asset > 0 else 0
+    us_pct = (us_stock_value_twd / total_asset) * 100 if total_asset > 0 else 0
     tsmc_pct = (tsmc_exposure_twd / total_asset) * 100 if total_asset > 0 else 0
 
     yesterday_net = 0
@@ -362,7 +376,7 @@ def main():
             round(total_asset, 2), round(net_asset, 2), total_debt_with_interest, round(tsmc_exposure_twd, 2)
         ])
 
-    pie_url = generate_pie_chart(tw_stock_value, pledged_value, us_stock_value_twd)
+    pie_url = generate_pie_chart(tw_free_value, pledged_value, us_stock_value_twd)
     line_url = generate_line_chart(history_records, today_str, total_asset, net_asset)
 
     valid_history = []
