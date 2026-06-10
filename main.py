@@ -26,7 +26,6 @@ def calculate_current_assets():
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     
-    # 雷達鎖定：自動進入包含 PRStK 的試算表檔案
     available_sheets = client.openall()
     sheet = None
     for s in available_sheets:
@@ -42,8 +41,6 @@ def calculate_current_assets():
         seen_names = [s.title for s in available_sheets]
         raise ValueError(f"\n❌ 找不到檔案！機器人目前看得到的檔案：{seen_names}。")
         
-    print(f"✅ 雷達鎖定成功！正在打開試算表：{sheet.title}")
-    
     data_rows = []
     history_sheet = None
     for ws in sheet.worksheets():
@@ -58,7 +55,6 @@ def calculate_current_assets():
     if not data_rows:
         return {}, history_sheet
         
-    # 時序自動校正引擎
     def parse_date(row):
         if not row: return datetime.datetime.min
         ts_str = str(row[0]).strip()
@@ -250,10 +246,11 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
     
     for d in recent_days:
         dates.append(d)
-        avg_total = sum(daily_data[d]['total']) / len(daily_data[d]['total'])
-        avg_net = sum(daily_data[d]['net']) / len(daily_data[d]['net'])
-        total_data.append(round(avg_total, 2))
-        net_data.append(round(avg_net, 2))
+        # 🌟 核心修改：捨棄平均值計算，強制使用該日期的「最後一筆資料」
+        final_total = daily_data[d]['total'][-1]
+        final_net = daily_data[d]['net'][-1]
+        total_data.append(round(final_total, 2))
+        net_data.append(round(final_net, 2))
         
     all_vals = total_data + net_data
     if all_vals:
@@ -313,7 +310,6 @@ def main():
     cash_usd = inventory["現金_USD"].get("USD", 0)
     fund_value = sum(inventory["基金"].values())
 
-    # 1. 結算一般台股 (因為你的台股登記的是「總庫存」，此處已完整包含擔保品)
     for symbol, shares in inventory["台股"].items():
         if shares <= 0: continue
         price = get_tw_stock_price(symbol)
@@ -325,7 +321,6 @@ def main():
             price_006208 = price
         elif symbol == '00685L': tsmc_exposure_twd += (value * 0.728)
 
-    # 2. 結算擔保品市值 (僅用於計算维持率與拆分圓餅圖，絕對不再累加至總資產與曝險中)
     pledged_value = 0
     for symbol, shares in inventory["擔保品"].items():
         if shares <= 0: continue
@@ -335,7 +330,6 @@ def main():
             price = get_tw_stock_price(symbol)
         pledged_value += price * shares
 
-    # 3. 結算美股
     for symbol, shares in inventory["美股"].items():
         if shares <= 0: continue
         price = get_us_stock_price(symbol)
@@ -347,18 +341,15 @@ def main():
     total_cash_twd = cash_twd + (cash_usd * usd_rate)
     debt = inventory["質押負債"].get("Current_Debt", 0)
     
-    # 4. 利息結算
     loan_start_date = datetime.date(2026, 6, 8)
     days_passed = max(0, (tw_now.date() - loan_start_date).days)
     daily_rate = 0.033 / 365
     accumulated_interest = debt * daily_rate * days_passed
     total_debt_with_interest = debt + accumulated_interest
     
-    # 5. 精準結算總資產與淨資產 (完全對齊手算邏輯)
     total_asset = tw_stock_value + us_stock_value_twd + total_cash_twd + fund_value
     net_asset = total_asset - total_debt_with_interest
     
-    # 6. 維持率多階狀態判定
     if debt > 0:
         maintenance_ratio = (pledged_value / debt) * 100
         if maintenance_ratio >= 167:
@@ -371,7 +362,6 @@ def main():
         maintenance_ratio = 0
         ratio_status = "無借款 ✅"
 
-    # 圓餅圖拆分：真正的「現貨台股」等於「總台股市值 - 擔保品市值」
     tw_free_value = max(0, tw_stock_value - pledged_value)
 
     tw_free_pct = (tw_free_value / total_asset) * 100 if total_asset > 0 else 0
