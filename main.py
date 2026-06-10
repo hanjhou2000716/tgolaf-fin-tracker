@@ -22,20 +22,12 @@ GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
 # ==========================================
 def calculate_current_assets():
     creds_dict = json.loads(GCP_CREDENTIALS_JSON)
-    
-    # 🕵️‍♂️ 終極偵錯：印出 GitHub 到底是用哪個 Email 在嘗試開門
-    bot_email = creds_dict.get("client_email", "無法讀取 Email")
-    print("\n" + "🔥"*20)
-    print(f"🚨 [權限偵錯] GitHub 派出的機器人是：\n{bot_email}")
-    print("🔥"*20 + "\n")
-    
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     
-    # 🌟 放棄網址解析，直接用試算表的「身分證字號」綁定
-    sheet_id = "1xMlc6zThljsX-HMmxHrFdgDylKq4NNab5HhSRQrqHU8"
-    sheet = client.open_by_key(sheet_id)
+    # 🌟 既然已經確認給對權限了，我們直接用檔名叫機器人找，絕對不會迷路！
+    sheet = client.open("PRStK_Growth")
     
     data_rows = []
     history_sheet = None
