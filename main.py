@@ -41,6 +41,8 @@ def calculate_current_assets():
         seen_names = [s.title for s in available_sheets]
         raise ValueError(f"\n❌ 找不到檔案！機器人目前看得到的檔案：{seen_names}。")
         
+    print(f"✅ 雷達鎖定成功！正在打開試算表：{sheet.title}")
+    
     data_rows = []
     history_sheet = None
     for ws in sheet.worksheets():
@@ -200,12 +202,12 @@ def get_tw_stock_price(symbol):
     except:
         return 0
 
-def generate_pie_chart(tw_free_val, pledged_val, us_val):
+def generate_pie_chart(tw_free_val, debt_val, us_val):
     chart_config = {
         "type": "outlabeledPie",
         "data": {
-            "labels": ["🇹🇼 現貨台股", "🦆 擔保品市值", "🇺🇸 現貨美股"],
-            "datasets": [{"backgroundColor": ["#36a2eb", "#ff6384", "#ffce56"], "data": [tw_free_val, pledged_val, us_val]}]
+            "labels": ["🇹🇼 現貨台股", "🦆 質押投資", "🇺🇸 現貨美股"],
+            "datasets": [{"backgroundColor": ["#36a2eb", "#ff6384", "#ffce56"], "data": [tw_free_val, debt_val, us_val]}]
         },
         "options": {
             "plugins": {
@@ -214,7 +216,7 @@ def generate_pie_chart(tw_free_val, pledged_val, us_val):
             }
         }
     }
-    if tw_free_val == 0 and pledged_val == 0 and us_val == 0:
+    if tw_free_val <= 0 and debt_val <= 0 and us_val <= 0:
         chart_config["data"]["labels"] = ["尚無資產數據"]
         chart_config["data"]["datasets"][0]["data"] = [1]
         chart_config["data"]["datasets"][0]["backgroundColor"] = ["#cccccc"]
@@ -246,7 +248,6 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
     
     for d in recent_days:
         dates.append(d)
-        # 🌟 核心修改：捨棄平均值計算，強制使用該日期的「最後一筆資料」
         final_total = daily_data[d]['total'][-1]
         final_net = daily_data[d]['net'][-1]
         total_data.append(round(final_total, 2))
@@ -362,7 +363,8 @@ def main():
         maintenance_ratio = 0
         ratio_status = "無借款 ✅"
 
-    tw_free_value = max(0, tw_stock_value - pledged_value)
+    # 圓餅圖拆分：真正的「現貨台股」等於「總台股市值 - 質押借款金額」
+    tw_free_value = max(0, tw_stock_value - total_debt_with_interest)
 
     tw_free_pct = (tw_free_value / total_asset) * 100 if total_asset > 0 else 0
     debt_pct = (debt / total_asset) * 100 if total_asset > 0 else 0
@@ -393,7 +395,8 @@ def main():
             round(total_asset, 2), round(net_asset, 2), total_debt_with_interest, round(tsmc_exposure_twd, 2)
         ])
 
-    pie_url = generate_pie_chart(tw_free_value, pledged_value, us_stock_value_twd)
+    # 🌟 圓餅圖：代入「未質押現貨台股」、「含息借貸總額(質押投資)」、「現貨美股」
+    pie_url = generate_pie_chart(tw_free_value, total_debt_with_interest, us_stock_value_twd)
     line_url = generate_line_chart(history_records, today_str, total_asset, net_asset)
 
     valid_history = []
