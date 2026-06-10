@@ -27,7 +27,7 @@ def calculate_current_assets():
     client = gspread.authorize(creds)
     
     # 🌟 綁定你的最新專屬網址，永不迷路
-    sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1xMlc6zThljsX-HMmxHrFdgDylKq4NNab5HhSRQrqHU8/edit")
+    sheet = client.open_by_key("1xMlc6zThljSx-HMmxHrFdgDylKq4NNab5HhSROrqHU8")
     
     # 🌟 全域掃描：把所有叫「表單」或「異動」的分頁資料全部集合起來，防止漏讀
     data_rows = []
