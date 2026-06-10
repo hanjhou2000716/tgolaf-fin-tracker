@@ -47,7 +47,8 @@ def calculate_current_assets():
     inventory = {
         "台股": {}, "美股": {}, "基金": {}, 
         "現金_TWD": {"TWD": 0.0}, "現金_USD": {"USD": 0.0},
-        "質押負債": {"Current_Debt": 0.0}
+        "質押負債": {"Current_Debt": 0.0},
+        "擔保品": {}  # 新增獨立的擔保品追蹤區塊
     }
     
     symbol_overrides = {
@@ -73,7 +74,7 @@ def calculate_current_assets():
         
         for cell in cells:
             c_upper = cell.upper()
-            if any(x in cell for x in ["台股", "美股", "基金", "現金", "質押", "負債"]):
+            if any(x in cell for x in ["台股", "美股", "基金", "現金", "質押", "負債", "擔保"]):
                 asset_type = cell
             elif any(x in cell for x in ["買入", "存入", "賣出", "提領", "取代", "覆蓋", "更新"]):
                 mode = cell
@@ -104,6 +105,7 @@ def calculate_current_assets():
         elif "USD" in asset_type or "美金" in asset_type: asset_type = "現金_USD"
         elif "TWD" in asset_type or "台幣" in asset_type or "現金" in asset_type: asset_type = "現金_TWD"
         elif "質押" in asset_type or "負債" in asset_type: asset_type = "質押負債"
+        elif "擔保" in asset_type: asset_type = "擔保品"
         
         if asset_type not in inventory: continue
         
@@ -159,7 +161,7 @@ def generate_pie_chart(tw_val, pledged_val, us_val):
     chart_config = {
         "type": "outlabeledPie",
         "data": {
-            "labels": ["🇹🇼 現貨台股", "🦆 質押台股", "🇺🇸 現貨美股"],
+            "labels": ["🇹🇼 現貨台股", "🦆 擔保品市值", "🇺🇸 現貨美股"],
             "datasets": [{"backgroundColor": ["#36a2eb", "#ff6384", "#ffce56"], "data": [tw_spot, pledged_val, us_val]}]
         },
         "options": {
@@ -206,18 +208,13 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
         total_data.append(round(avg_total, 2))
         net_data.append(round(avg_net, 2))
         
-    # ==========================================
-    # 🌟 動態 Y 軸自適應演算法 (以 20 萬為級距)
-    # ==========================================
+    # 動態 Y 軸自適應演算法 (以 20 萬為級距)
     all_vals = total_data + net_data
     if all_vals:
         min_val = min(all_vals)
         max_val = max(all_vals)
-        # 無條件捨去與進位，精準切齊 20 萬的倍數
         y_min = math.floor(min_val / 200000) * 200000
         y_max = math.ceil(max_val / 200000) * 200000
-        
-        # 防呆：如果只有一天數據導致最大最小值一樣，強制拉開上下限
         if y_min == y_max:
             y_min -= 200000
             y_max += 200000
@@ -292,18 +289,44 @@ def main():
     total_cash_twd = cash_twd + (cash_usd * usd_rate)
     debt = inventory["質押負債"].get("Current_Debt", 0)
     
+    # 🌟 計算以日計息的利息 (起算日：2026-06-08, 利率 3.3%)
+    loan_start_date = datetime.date(2026, 6, 8)
+    days_passed = max(0, (tw_now.date() - loan_start_date).days)
+    daily_rate = 0.033 / 365
+    accumulated_interest = debt * daily_rate * days_passed
+    total_debt_with_interest = debt + accumulated_interest
+    
+    # 總資產與淨資產結算 (扣除含息總負債)
     total_asset = tw_stock_value + us_stock_value_twd + total_cash_twd + fund_value
-    net_asset = total_asset - debt
+    net_asset = total_asset - total_debt_with_interest
     
-    total_006208_shares = inventory["台股"].get("006208", 0)
-    pledged_shares = min(total_006208_shares, 8000) if total_006208_shares > 0 else 0
-    pledged_value = pledged_shares * price_006208
+    # 🌟 獨立計算擔保品市值
+    pledged_value = 0
+    for symbol, shares in inventory["擔保品"].items():
+        if shares <= 0: continue
+        if symbol == '006208' and price_006208 > 0:
+            price = price_006208
+        else:
+            price = get_tw_stock_price(symbol)
+        pledged_value += price * shares
     
-    maintenance_ratio = (pledged_value / debt) * 100 if debt > 0 else 0
-    ratio_status = "安全 ✅" if maintenance_ratio > 160 else ("危險 ⚠️" if debt > 0 else "無借款 ✅")
+    # 🌟 維持率多階狀態判定
+    if debt > 0:
+        maintenance_ratio = (pledged_value / debt) * 100
+        if maintenance_ratio >= 167:
+            ratio_status = "安全 ✅"
+        elif maintenance_ratio >= 130:
+            ratio_status = "警戒 ⚠️ (無法借新還舊)"
+        else:
+            ratio_status = "危險 🆘 (追繳風險)"
+    else:
+        maintenance_ratio = 0
+        ratio_status = "無借款 ✅"
 
     tw_pct = ((tw_stock_value - pledged_value)/total_asset)*100 if total_asset > 0 else 0
-    pledged_pct = (pledged_value/total_asset)*100 if total_asset > 0 else 0
+    
+    # 🦆 質押台股：改為質押借款金額 (不含利息) 佔總資產比例
+    debt_pct = (debt / total_asset)*100 if total_asset > 0 else 0
     us_pct = (us_stock_value_twd/total_asset)*100 if total_asset > 0 else 0
     tsmc_pct = (tsmc_exposure_twd / total_asset) * 100 if total_asset > 0 else 0
 
@@ -327,8 +350,8 @@ def main():
 
     if total_asset > 0:
         history_sheet.append_row([
-            datetime.date.today().strftime("%Y-%m-%d"), 
-            round(total_asset, 2), round(net_asset, 2), debt, round(tsmc_exposure_twd, 2)
+            tw_now.strftime("%Y-%m-%d"), 
+            round(total_asset, 2), round(net_asset, 2), total_debt_with_interest, round(tsmc_exposure_twd, 2)
         ])
 
     pie_url = generate_pie_chart(tw_stock_value, pledged_value, us_stock_value_twd)
@@ -368,15 +391,14 @@ def main():
     
     targets = [7000000, 8000000, 9000000, 10000000]
     timeline_strs = ["- 2026-10: 🎖️ 成功嶺退伍日"]
-    today = datetime.date.today()
     
     for target in targets:
         if safe_net_asset >= target:
             timeline_strs.append(f"- 已達標: {target//10000}萬 ✅")
         else:
             months_needed = math.log(target / safe_net_asset) / math.log(1 + calc_rate)
-            target_month = today.month + int(months_needed)
-            target_year = today.year + (target_month - 1) // 12
+            target_month = tw_now.date().month + int(months_needed)
+            target_year = tw_now.date().year + (target_month - 1) // 12
             final_month = (target_month - 1) % 12 + 1
             timeline_strs.append(f"- {target_year}-{final_month:02d}: {target//10000}萬 達標")
             
@@ -396,11 +418,11 @@ def main():
 🐣 基金現值：${fund_value:,.0f}
 💵 現金(TWD)：${cash_twd:,.0f}
 💴 現金(USD)：${cash_usd * usd_rate:,.0f} (約 ${cash_usd:,.0f} USD)
-💸 質押借款：-${debt:,.0f}
+💸 質押借款：-${total_debt_with_interest:,.0f} (內含利息 ${accumulated_interest:,.0f})
 ======================
 📑【資產板塊】
 🇹🇼 現貨台股：{tw_pct:.1f}%
-🦆 質押台股：{pledged_pct:.1f}%
+🦆 借款佔比：{debt_pct:.1f}%
 🇺🇲 現貨美股：{us_pct:.1f}%
 🐔 TSMC Exposure：{tsmc_pct:.1f}% 
 ======================
