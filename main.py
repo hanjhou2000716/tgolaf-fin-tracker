@@ -26,7 +26,7 @@ def calculate_current_assets():
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     
-    # 🌟 雷達鎖定：列出所有檔案，自動進入 PRStK_Growth
+    # 雷達鎖定：自動進入包含 PRStK 的試算表檔案
     available_sheets = client.openall()
     sheet = None
     for s in available_sheets:
@@ -58,13 +58,10 @@ def calculate_current_assets():
     if not data_rows:
         return {}, history_sheet
         
-    # ==========================================
-    # 🌟 時序自動校正引擎：防範舊分頁覆蓋新資料
-    # ==========================================
+    # 時序自動校正引擎
     def parse_date(row):
         if not row: return datetime.datetime.min
         ts_str = str(row[0]).strip()
-        # 精準解析 Google 表單的台灣時間戳記格式
         match = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:\s+(上午|下午|AM|PM)?\s*(\d{1,2}):(\d{1,2}):(\d{1,2}))?', ts_str, re.IGNORECASE)
         if match:
             y, m, d, ampm, h, mnt, s = match.groups()
@@ -79,7 +76,6 @@ def calculate_current_assets():
                 pass
         return datetime.datetime.min
 
-    # 將所有異動紀錄嚴格按照時間排序，確保最新資料永遠排在最後執行！
     data_rows.sort(key=parse_date)
 
     inventory = {
@@ -105,7 +101,6 @@ def calculate_current_assets():
         raw_cells = [str(c).strip() for c in row if str(c).strip() != ""]
         if not raw_cells: continue
         
-        # 單位自動淨化器
         cells = []
         for c in raw_cells:
             match = re.match(r'^([0-9,.]+)\s*(股|張|萬|元|塊)$', c)
@@ -314,16 +309,15 @@ def main():
         
     usd_rate = get_usd_twd_rate()
     tw_stock_value, us_stock_value_usd, tsmc_exposure_twd, price_006208 = 0, 0, 0, 0
-    tw_free_value = 0
     cash_twd = inventory["現金_TWD"].get("TWD", 0)
     cash_usd = inventory["現金_USD"].get("USD", 0)
     fund_value = sum(inventory["基金"].values())
 
+    # 1. 結算一般台股 (因為你的台股登記的是「總庫存」，此處已完整包含擔保品)
     for symbol, shares in inventory["台股"].items():
         if shares <= 0: continue
         price = get_tw_stock_price(symbol)
         value = price * shares
-        tw_free_value += value
         tw_stock_value += value 
         if symbol == '2330': tsmc_exposure_twd += (value * 1.0)
         elif symbol == '006208': 
@@ -331,6 +325,7 @@ def main():
             price_006208 = price
         elif symbol == '00685L': tsmc_exposure_twd += (value * 0.728)
 
+    # 2. 結算擔保品市值 (僅用於計算维持率與拆分圓餅圖，絕對不再累加至總資產與曝險中)
     pledged_value = 0
     for symbol, shares in inventory["擔保品"].items():
         if shares <= 0: continue
@@ -338,15 +333,9 @@ def main():
             price = price_006208
         else:
             price = get_tw_stock_price(symbol)
-        
-        value = price * shares
-        pledged_value += value
-        tw_stock_value += value 
-        
-        if symbol == '2330': tsmc_exposure_twd += (value * 1.0)
-        elif symbol == '006208': tsmc_exposure_twd += (value * 0.594)
-        elif symbol == '00685L': tsmc_exposure_twd += (value * 0.728)
+        pledged_value += price * shares
 
+    # 3. 結算美股
     for symbol, shares in inventory["美股"].items():
         if shares <= 0: continue
         price = get_us_stock_price(symbol)
@@ -358,15 +347,18 @@ def main():
     total_cash_twd = cash_twd + (cash_usd * usd_rate)
     debt = inventory["質押負債"].get("Current_Debt", 0)
     
+    # 4. 利息結算
     loan_start_date = datetime.date(2026, 6, 8)
     days_passed = max(0, (tw_now.date() - loan_start_date).days)
     daily_rate = 0.033 / 365
     accumulated_interest = debt * daily_rate * days_passed
     total_debt_with_interest = debt + accumulated_interest
     
+    # 5. 精準結算總資產與淨資產 (完全對齊手算邏輯)
     total_asset = tw_stock_value + us_stock_value_twd + total_cash_twd + fund_value
     net_asset = total_asset - total_debt_with_interest
     
+    # 6. 維持率多階狀態判定
     if debt > 0:
         maintenance_ratio = (pledged_value / debt) * 100
         if maintenance_ratio >= 167:
@@ -379,7 +371,10 @@ def main():
         maintenance_ratio = 0
         ratio_status = "無借款 ✅"
 
-    tw_pct = (tw_stock_value / total_asset) * 100 if total_asset > 0 else 0
+    # 圓餅圖拆分：真正的「現貨台股」等於「總台股市值 - 擔保品市值」
+    tw_free_value = max(0, tw_stock_value - pledged_value)
+
+    tw_free_pct = (tw_free_value / total_asset) * 100 if total_asset > 0 else 0
     debt_pct = (debt / total_asset) * 100 if total_asset > 0 else 0
     us_pct = (us_stock_value_twd / total_asset) * 100 if total_asset > 0 else 0
     tsmc_pct = (tsmc_exposure_twd / total_asset) * 100 if total_asset > 0 else 0
@@ -475,7 +470,7 @@ def main():
 💸 質押借款：-${total_debt_with_interest:,.0f} (內含利息 ${accumulated_interest:,.0f})
 ======================
 📑【資產板塊】
-🇹🇼 現貨台股：{tw_pct:.1f}%
+🇹🇼 現貨台股：{tw_free_pct:.1f}%
 🦆 借款佔比：{debt_pct:.1f}%
 🇺🇲 現貨美股：{us_pct:.1f}%
 🐔 TSMC Exposure：{tsmc_pct:.1f}% 
