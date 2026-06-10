@@ -22,12 +22,20 @@ GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
 # ==========================================
 def calculate_current_assets():
     creds_dict = json.loads(GCP_CREDENTIALS_JSON)
+    
+    # 🕵️‍♂️ 終極偵錯：印出 GitHub 到底是用哪個 Email 在嘗試開門
+    bot_email = creds_dict.get("client_email", "無法讀取 Email")
+    print("\n" + "🔥"*20)
+    print(f"🚨 [權限偵錯] GitHub 派出的機器人是：\n{bot_email}")
+    print("🔥"*20 + "\n")
+    
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     
-    # 綁定最新試算表網址
-    sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1xMlc6zThljsX-HMmxHrFdgDylKq4NNab5HhSRQrqHU8/edit")
+    # 🌟 放棄網址解析，直接用試算表的「身分證字號」綁定
+    sheet_id = "1xMlc6zThljsX-HMmxHrFdgDylKq4NNab5HhSRQrqHU8"
+    sheet = client.open_by_key(sheet_id)
     
     data_rows = []
     history_sheet = None
@@ -66,7 +74,6 @@ def calculate_current_assets():
         raw_cells = [str(c).strip() for c in row if str(c).strip() != ""]
         if not raw_cells: continue
         
-        # 單位自動淨化器
         cells = []
         for c in raw_cells:
             match = re.match(r'^([0-9,.]+)\s*(股|張|萬|元|塊)$', c)
@@ -275,25 +282,23 @@ def main():
         
     usd_rate = get_usd_twd_rate()
     tw_stock_value, us_stock_value_usd, tsmc_exposure_twd, price_006208 = 0, 0, 0, 0
-    tw_free_value = 0  # 紀錄未質押的台股部位(供圓餅圖使用)
+    tw_free_value = 0
     cash_twd = inventory["現金_TWD"].get("TWD", 0)
     cash_usd = inventory["現金_USD"].get("USD", 0)
     fund_value = sum(inventory["基金"].values())
 
-    # 1. 結算一般台股 (未質押部位)
     for symbol, shares in inventory["台股"].items():
         if shares <= 0: continue
         price = get_tw_stock_price(symbol)
         value = price * shares
         tw_free_value += value
-        tw_stock_value += value  # 疊加進台股總值
+        tw_stock_value += value 
         if symbol == '2330': tsmc_exposure_twd += (value * 1.0)
         elif symbol == '006208': 
             tsmc_exposure_twd += (value * 0.594)
             price_006208 = price
         elif symbol == '00685L': tsmc_exposure_twd += (value * 0.728)
 
-    # 2. 結算擔保品 (加回總值與曝險)
     pledged_value = 0
     for symbol, shares in inventory["擔保品"].items():
         if shares <= 0: continue
@@ -304,14 +309,12 @@ def main():
         
         value = price * shares
         pledged_value += value
-        tw_stock_value += value  # 🌟 擔保品市值加回台股總資產
+        tw_stock_value += value 
         
-        # 🌟 擔保品同樣具有台積電曝險，必須計入
         if symbol == '2330': tsmc_exposure_twd += (value * 1.0)
         elif symbol == '006208': tsmc_exposure_twd += (value * 0.594)
         elif symbol == '00685L': tsmc_exposure_twd += (value * 0.728)
 
-    # 3. 結算美股
     for symbol, shares in inventory["美股"].items():
         if shares <= 0: continue
         price = get_us_stock_price(symbol)
@@ -323,18 +326,15 @@ def main():
     total_cash_twd = cash_twd + (cash_usd * usd_rate)
     debt = inventory["質押負債"].get("Current_Debt", 0)
     
-    # 4. 利息結算 (起算日：2026-06-08, 日息)
     loan_start_date = datetime.date(2026, 6, 8)
     days_passed = max(0, (tw_now.date() - loan_start_date).days)
     daily_rate = 0.033 / 365
     accumulated_interest = debt * daily_rate * days_passed
     total_debt_with_interest = debt + accumulated_interest
     
-    # 5. 總資產與淨資產結算 (此時 tw_stock_value 已經完整包含擔保品)
     total_asset = tw_stock_value + us_stock_value_twd + total_cash_twd + fund_value
     net_asset = total_asset - total_debt_with_interest
     
-    # 6. 維持率多階狀態判定
     if debt > 0:
         maintenance_ratio = (pledged_value / debt) * 100
         if maintenance_ratio >= 167:
