@@ -24,7 +24,7 @@ def calculate_current_assets():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
-    sheet = client.open("https://docs.google.com/spreadsheets/d/1xMlc6zThljSx-HMmxHrFdgDylKq4NNab5HhSROrqHU8/edit?gid=1075279610#gid=1075279610")
+    sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1xMlc6zThljSx-HMmxHrFdgDylKq4NNab5HhSROrqHU8/edit?gid=1075279610#gid=1075279610")
     
     form_ws = None
     history_sheet = None
