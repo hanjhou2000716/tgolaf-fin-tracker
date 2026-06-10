@@ -3,6 +3,7 @@ import json
 import requests
 import datetime
 import math
+import re
 import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
@@ -24,31 +25,30 @@ def calculate_current_assets():
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
-    sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1xMlc6zThljSx-HMmxHrFdgDylKq4NNab5HhSROrqHU8/edit?gid=1075279610#gid=1075279610")
     
-    form_ws = None
+    # 🌟 綁定你的最新專屬網址，永不迷路
+    sheet = client.open_by_url("https://docs.google.com/spreadsheets/d/1xMlc6zThljsX-HMmxHrFdgDylKq4NNab5HhSRQrqHU8/edit")
+    
+    # 🌟 全域掃描：把所有叫「表單」或「異動」的分頁資料全部集合起來，防止漏讀
+    data_rows = []
     history_sheet = None
     for ws in sheet.worksheets():
         title_clean = ws.title.strip().lower()
-        if "表單" in title_clean or "form" in title_clean or "回覆" in title_clean:
-            form_ws = ws
-        elif "history" in title_clean or "歷史" in title_clean or "紀錄" in title_clean:
+        if "history" in title_clean or "歷史" in title_clean or "紀錄" in title_clean:
             history_sheet = ws
-            
-    if form_ws is None: raise ValueError("❌ 找不到表單回應分頁！")
-    if history_sheet is None: raise ValueError("❌ 找不到 History 歷史紀錄分頁！")
-        
-    all_rows = form_ws.get_all_values()
-    if not all_rows or len(all_rows) <= 1:
+        elif "表單" in title_clean or "form" in title_clean or "回覆" in title_clean or "異動" in title_clean:
+            rows = ws.get_all_values()
+            if len(rows) > 1:
+                data_rows.extend(rows[1:])
+                
+    if not data_rows:
         return {}, history_sheet
         
-    data_rows = all_rows[1:]
-    
     inventory = {
         "台股": {}, "美股": {}, "基金": {}, 
         "現金_TWD": {"TWD": 0.0}, "現金_USD": {"USD": 0.0},
         "質押負債": {"Current_Debt": 0.0},
-        "擔保品": {}  # 新增獨立的擔保品追蹤區塊
+        "擔保品": {}  
     }
     
     symbol_overrides = {
@@ -64,8 +64,23 @@ def calculate_current_assets():
     ]
     
     for row in data_rows:
-        cells = [str(c).strip() for c in row if str(c).strip() != ""]
-        if not cells: continue
+        raw_cells = [str(c).strip() for c in row if str(c).strip() != ""]
+        if not raw_cells: continue
+        
+        # 🌟 單位自動淨化器：把 17300股 -> 17300, 1.5萬 -> 15000
+        cells = []
+        for c in raw_cells:
+            match = re.match(r'^([0-9,.]+)\s*(股|張|萬|元|塊)$', c)
+            if match:
+                num_part = match.group(1).replace(',', '')
+                unit = match.group(2)
+                if unit == '萬':
+                    try: cells.append(str(float(num_part) * 10000))
+                    except: cells.append(c)
+                else:
+                    cells.append(num_part)
+            else:
+                cells.append(c)
         
         asset_type = ""
         mode = ""
@@ -208,7 +223,6 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
         total_data.append(round(avg_total, 2))
         net_data.append(round(avg_net, 2))
         
-    # 動態 Y 軸自適應演算法 (以 20 萬為級距)
     all_vals = total_data + net_data
     if all_vals:
         min_val = min(all_vals)
@@ -289,18 +303,15 @@ def main():
     total_cash_twd = cash_twd + (cash_usd * usd_rate)
     debt = inventory["質押負債"].get("Current_Debt", 0)
     
-    # 🌟 計算以日計息的利息 (起算日：2026-06-08, 利率 3.3%)
     loan_start_date = datetime.date(2026, 6, 8)
     days_passed = max(0, (tw_now.date() - loan_start_date).days)
     daily_rate = 0.033 / 365
     accumulated_interest = debt * daily_rate * days_passed
     total_debt_with_interest = debt + accumulated_interest
     
-    # 總資產與淨資產結算 (扣除含息總負債)
     total_asset = tw_stock_value + us_stock_value_twd + total_cash_twd + fund_value
     net_asset = total_asset - total_debt_with_interest
     
-    # 🌟 獨立計算擔保品市值
     pledged_value = 0
     for symbol, shares in inventory["擔保品"].items():
         if shares <= 0: continue
@@ -310,7 +321,6 @@ def main():
             price = get_tw_stock_price(symbol)
         pledged_value += price * shares
     
-    # 🌟 維持率多階狀態判定
     if debt > 0:
         maintenance_ratio = (pledged_value / debt) * 100
         if maintenance_ratio >= 167:
@@ -324,8 +334,6 @@ def main():
         ratio_status = "無借款 ✅"
 
     tw_pct = ((tw_stock_value - pledged_value)/total_asset)*100 if total_asset > 0 else 0
-    
-    # 🦆 質押台股：改為質押借款金額 (不含利息) 佔總資產比例
     debt_pct = (debt / total_asset)*100 if total_asset > 0 else 0
     us_pct = (us_stock_value_twd/total_asset)*100 if total_asset > 0 else 0
     tsmc_pct = (tsmc_exposure_twd / total_asset) * 100 if total_asset > 0 else 0
