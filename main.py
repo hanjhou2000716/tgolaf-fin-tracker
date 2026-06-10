@@ -26,27 +26,21 @@ def calculate_current_assets():
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     
-    # 🌟 終極雷達鎖定：列出機器人手上有鑰匙的所有檔案，只要檔名有 PRStK 就自動打開！
+    # 🌟 雷達鎖定：列出所有檔案，自動進入 PRStK_Growth
     available_sheets = client.openall()
     sheet = None
-    
-    # 優先找檔名包含 PRStK 的
     for s in available_sheets:
         if "PRStK" in s.title:
             sheet = s
             break
-            
-    # 如果沒找到，退而求其次找包含 Growth 的
     if not sheet:
         for s in available_sheets:
             if "Growth" in s.title or "資產" in s.title:
                 sheet = s
                 break
-                
-    # 萬一真的沒找到，印出機器人目前到底看得到哪些檔案，直接抓出內鬼！
     if not sheet:
         seen_names = [s.title for s in available_sheets]
-        raise ValueError(f"\n❌ 找不到檔案！機器人目前只看得到這些檔案：{seen_names}。\n如果裡面沒有你的試算表，代表共用權限沒開成功喔！")
+        raise ValueError(f"\n❌ 找不到檔案！機器人目前看得到的檔案：{seen_names}。")
         
     print(f"✅ 雷達鎖定成功！正在打開試算表：{sheet.title}")
     
@@ -64,6 +58,30 @@ def calculate_current_assets():
     if not data_rows:
         return {}, history_sheet
         
+    # ==========================================
+    # 🌟 時序自動校正引擎：防範舊分頁覆蓋新資料
+    # ==========================================
+    def parse_date(row):
+        if not row: return datetime.datetime.min
+        ts_str = str(row[0]).strip()
+        # 精準解析 Google 表單的台灣時間戳記格式
+        match = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:\s+(上午|下午|AM|PM)?\s*(\d{1,2}):(\d{1,2}):(\d{1,2}))?', ts_str, re.IGNORECASE)
+        if match:
+            y, m, d, ampm, h, mnt, s = match.groups()
+            h = int(h) if h else 0
+            mnt = int(mnt) if mnt else 0
+            s = int(s) if s else 0
+            if ampm in ['下午', 'PM', 'pm'] and h < 12: h += 12
+            if ampm in ['上午', 'AM', 'am'] and h == 12: h = 0
+            try:
+                return datetime.datetime(int(y), int(m), int(d), h, mnt, s)
+            except:
+                pass
+        return datetime.datetime.min
+
+    # 將所有異動紀錄嚴格按照時間排序，確保最新資料永遠排在最後執行！
+    data_rows.sort(key=parse_date)
+
     inventory = {
         "台股": {}, "美股": {}, "基金": {}, 
         "現金_TWD": {"TWD": 0.0}, "現金_USD": {"USD": 0.0},
@@ -87,7 +105,7 @@ def calculate_current_assets():
         raw_cells = [str(c).strip() for c in row if str(c).strip() != ""]
         if not raw_cells: continue
         
-        # 🌟 自動淨化「股、萬、張」等單位
+        # 單位自動淨化器
         cells = []
         for c in raw_cells:
             match = re.match(r'^([0-9,.]+)\s*(股|張|萬|元|塊)$', c)
@@ -301,7 +319,6 @@ def main():
     cash_usd = inventory["現金_USD"].get("USD", 0)
     fund_value = sum(inventory["基金"].values())
 
-    # 結算一般台股
     for symbol, shares in inventory["台股"].items():
         if shares <= 0: continue
         price = get_tw_stock_price(symbol)
@@ -314,7 +331,6 @@ def main():
             price_006208 = price
         elif symbol == '00685L': tsmc_exposure_twd += (value * 0.728)
 
-    # 結算擔保品 (加回總資產與曝險)
     pledged_value = 0
     for symbol, shares in inventory["擔保品"].items():
         if shares <= 0: continue
@@ -331,7 +347,6 @@ def main():
         elif symbol == '006208': tsmc_exposure_twd += (value * 0.594)
         elif symbol == '00685L': tsmc_exposure_twd += (value * 0.728)
 
-    # 結算美股
     for symbol, shares in inventory["美股"].items():
         if shares <= 0: continue
         price = get_us_stock_price(symbol)
@@ -343,18 +358,15 @@ def main():
     total_cash_twd = cash_twd + (cash_usd * usd_rate)
     debt = inventory["質押負債"].get("Current_Debt", 0)
     
-    # 結算借款與利息
     loan_start_date = datetime.date(2026, 6, 8)
     days_passed = max(0, (tw_now.date() - loan_start_date).days)
     daily_rate = 0.033 / 365
     accumulated_interest = debt * daily_rate * days_passed
     total_debt_with_interest = debt + accumulated_interest
     
-    # 計算總資產與淨資產
     total_asset = tw_stock_value + us_stock_value_twd + total_cash_twd + fund_value
     net_asset = total_asset - total_debt_with_interest
     
-    # 多階段維持率
     if debt > 0:
         maintenance_ratio = (pledged_value / debt) * 100
         if maintenance_ratio >= 167:
