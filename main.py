@@ -243,7 +243,7 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
     daily_data[today_str]['total'].append(total_asset)
     daily_data[today_str]['net'].append(net_asset)
     
-    recent_days = list(daily_data.keys())[-14:]
+    recent_days = list(daily_data.keys())[-30:]
     dates, total_data, net_data = [], [], []
     
     for d in recent_days:
