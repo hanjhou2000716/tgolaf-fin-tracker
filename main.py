@@ -26,6 +26,7 @@ def calculate_current_assets():
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     
+    # 雷達自動鎖定 PRStK 試算表
     available_sheets = client.openall()
     sheet = None
     for s in available_sheets:
@@ -57,6 +58,7 @@ def calculate_current_assets():
     if not data_rows:
         return {}, history_sheet
         
+    # 時序自動校正
     def parse_date(row):
         if not row: return datetime.datetime.min
         ts_str = str(row[0]).strip()
@@ -243,6 +245,7 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
     daily_data[today_str]['total'].append(total_asset)
     daily_data[today_str]['net'].append(net_asset)
     
+    # 🌟 已依據前次更新，鎖定近一個月（30個點）軌跡
     recent_days = list(daily_data.keys())[-30:]
     dates, total_data, net_data = [], [], []
     
@@ -307,10 +310,13 @@ def main():
         
     usd_rate = get_usd_twd_rate()
     tw_stock_value, us_stock_value_usd, tsmc_exposure_twd, price_006208 = 0, 0, 0, 0
+    leveraged_etf_value = 0  # 🌟 用來儲存 00685L 正2 ETF 的當前總市值
+    
     cash_twd = inventory["現金_TWD"].get("TWD", 0)
     cash_usd = inventory["現金_USD"].get("USD", 0)
     fund_value = sum(inventory["基金"].values())
 
+    # 結算一般台股
     for symbol, shares in inventory["台股"].items():
         if shares <= 0: continue
         price = get_tw_stock_price(symbol)
@@ -320,8 +326,11 @@ def main():
         elif symbol == '006208': 
             tsmc_exposure_twd += (value * 0.594)
             price_006208 = price
-        elif symbol == '00685L': tsmc_exposure_twd += (value * 0.728)
+        elif symbol == '00685L': 
+            tsmc_exposure_twd += (value * 0.728)
+            leveraged_etf_value += value  # 累計正2市值
 
+    # 結算擔保品
     pledged_value = 0
     for symbol, shares in inventory["擔保品"].items():
         if shares <= 0: continue
@@ -329,8 +338,17 @@ def main():
             price = price_006208
         else:
             price = get_tw_stock_price(symbol)
-        pledged_value += price * shares
+        value = price * shares
+        pledged_value += value
+        tw_stock_value += value 
+        
+        if symbol == '2330': tsmc_exposure_twd += (value * 1.0)
+        elif symbol == '006208': tsmc_exposure_twd += (value * 0.594)
+        elif symbol == '00685L': 
+            tsmc_exposure_twd += (value * 0.728)
+            leveraged_etf_value += value  # 擔保品若有正2也同步納入
 
+    # 結算美股
     for symbol, shares in inventory["美股"].items():
         if shares <= 0: continue
         price = get_us_stock_price(symbol)
@@ -342,15 +360,24 @@ def main():
     total_cash_twd = cash_twd + (cash_usd * usd_rate)
     debt = inventory["質押負債"].get("Current_Debt", 0)
     
+    # 利息與含息總負債結算 (起算日：2026-06-08)
     loan_start_date = datetime.date(2026, 6, 8)
     days_passed = max(0, (tw_now.date() - loan_start_date).days)
     daily_rate = 0.033 / 365
     accumulated_interest = debt * daily_rate * days_passed
     total_debt_with_interest = debt + accumulated_interest
     
+    # 結算總資產與淨資產
     total_asset = tw_stock_value + us_stock_value_twd + total_cash_twd + fund_value
     net_asset = total_asset - total_debt_with_interest
     
+    # 🌟 1. 實質槓桿率 (納入正2隱含曝險)
+    effective_leverage = (total_asset + leveraged_etf_value) / net_asset if net_asset > 0 else 0
+    
+    # 🌟 2. 資產負債比 (含本息負債佔總資產比)
+    debt_ratio = (total_debt_with_interest / total_asset) * 100 if total_asset > 0 else 0
+    
+    # 🌟 3. 質押維持率多階狀態判定 (擔保品市值 ÷ 借款本金 × 100)
     if debt > 0:
         maintenance_ratio = (pledged_value / debt) * 100
         if maintenance_ratio >= 167:
@@ -363,12 +390,8 @@ def main():
         maintenance_ratio = 0
         ratio_status = "無借款 ✅"
 
-    # 圓餅圖拆分：真正的「現貨台股」等於「總台股市值 - 質押借款金額」
+    # 圓餅圖拆分比例
     tw_free_value = max(0, tw_stock_value - total_debt_with_interest)
-
-    tw_free_pct = (tw_free_value / total_asset) * 100 if total_asset > 0 else 0
-    debt_pct = (debt / total_asset) * 100 if total_asset > 0 else 0
-    us_pct = (us_stock_value_twd / total_asset) * 100 if total_asset > 0 else 0
     tsmc_pct = (tsmc_exposure_twd / total_asset) * 100 if total_asset > 0 else 0
 
     yesterday_net = 0
@@ -395,7 +418,6 @@ def main():
             round(total_asset, 2), round(net_asset, 2), total_debt_with_interest, round(tsmc_exposure_twd, 2)
         ])
 
-    # 🌟 圓餅圖：代入「未質押現貨台股」、「含息借貸總額(質押投資)」、「現貨美股」
     pie_url = generate_pie_chart(tw_free_value, total_debt_with_interest, us_stock_value_twd)
     line_url = generate_line_chart(history_records, today_str, total_asset, net_asset)
 
@@ -431,18 +453,24 @@ def main():
     calc_rate = max(monthly_growth_rate, 0.001) 
     safe_net_asset = max(net_asset, 1)          
     
-    targets = [7000000, 8000000, 9000000, 10000000]
+    # 🌟 4. 全新進化時間軸推算 (850萬、1000萬、100萬美元動態換算)
+    usd_one_million_twd = 1000000 * usd_rate
+    targets = [
+        (8500000, "850萬 達標"),
+        (10000000, "1000萬 達標"),
+        (usd_one_million_twd, "100萬鎂 達標")
+    ]
     timeline_strs = ["- 2026-10: 🎖️ 成功嶺退伍日"]
     
-    for target in targets:
-        if safe_net_asset >= target:
-            timeline_strs.append(f"- 已達標: {target//10000}萬 ✅")
+    for target_val, target_label in targets:
+        if safe_net_asset >= target_val:
+            timeline_strs.append(f"- 已達標: {target_label} ✅")
         else:
-            months_needed = math.log(target / safe_net_asset) / math.log(1 + calc_rate)
+            months_needed = math.log(target_val / safe_net_asset) / math.log(1 + calc_rate)
             target_month = tw_now.date().month + int(months_needed)
             target_year = tw_now.date().year + (target_month - 1) // 12
             final_month = (target_month - 1) % 12 + 1
-            timeline_strs.append(f"- {target_year}-{final_month:02d}: {target//10000}萬 達標")
+            timeline_strs.append(f"- {target_year}-{final_month:02d}: {target_label}")
             
     timeline_text = "\n".join(timeline_strs)
 
@@ -462,14 +490,10 @@ def main():
 💴 現金(USD)：${cash_usd * usd_rate:,.0f} (約 ${cash_usd:,.0f} USD)
 💸 質押借款：-${total_debt_with_interest:,.0f} (內含利息 ${accumulated_interest:,.0f})
 ======================
-📑【資產板塊】
-🇹🇼 現貨台股：{tw_free_pct:.1f}%
-🦆 借款佔比：{debt_pct:.1f}%
-🇺🇲 現貨美股：{us_pct:.1f}%
-🐔 TSMC Exposure：{tsmc_pct:.1f}% 
-======================
-🛡️【風險盾牌】
-質押維持率：{maintenance_ratio:.1f}% (狀態：{ratio_status})
+🛡️【風險指標監控 】
+• 實質槓桿率：{effective_leverage:.2f} 倍 (包含正2曝險)
+• 資產負債比：{debt_ratio:.1f}%
+• 質押維持率：{maintenance_ratio:.1f}% (狀態：{ratio_status})
 ======================
 🚀【歷史增率】
 {growth_text}
