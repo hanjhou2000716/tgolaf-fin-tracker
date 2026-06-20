@@ -390,7 +390,7 @@ def main():
     daily_pct = (daily_diff / yesterday_net * 100) if yesterday_net else 0
     sign = "+" if daily_diff >= 0 else ""
     emoji = "📈" if daily_diff >= 0 else "📉"
-    daily_str = f"• ⚡ 單日變化：{emoji}{sign}{daily_pct:.1f}% ({sign}${daily_diff:,.0f})" if yesterday_net else "• ⚡ 單日變化：-- (首日累積數據中)"
+    daily_str = f"⚡ 單日變化：{emoji}{sign}{daily_pct:.1f}% ({sign}${daily_diff:,.0f})" if yesterday_net else "⚡ 單日變化：-- (首日累積數據中)"
 
     progress_pct = (net_asset / 10000000) * 100 if net_asset > 0 else 0
     bar_blocks = max(0, min(10, int(progress_pct / 10)))
