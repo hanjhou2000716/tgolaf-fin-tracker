@@ -390,7 +390,7 @@ def main():
     daily_pct = (daily_diff / yesterday_net * 100) if yesterday_net else 0
     sign = "+" if daily_diff >= 0 else ""
     emoji = "📈" if daily_diff >= 0 else "📉"
-    daily_str = f"單日變化：{emoji}{sign}{daily_pct:.1f}% ({sign}${daily_diff:,.0f})" if yesterday_net else "單日變化：-- (首日累積數據中)"
+   daily_str = f"• ⚡ 單日變化：{emoji}{sign}{daily_pct:.1f}% ({sign}${daily_diff:,.0f})" if yesterday_net else "• ⚡ 單日變化：-- (首日累積數據中)"
 
     progress_pct = (net_asset / 10000000) * 100 if net_asset > 0 else 0
     bar_blocks = max(0, min(10, int(progress_pct / 10)))
@@ -462,9 +462,9 @@ def main():
     msg = f"""
 {title_header}
 ======================
-💎【資產總覽】
-總資產 (Total)：${total_asset:,.0f}
-淨資產 (Net)：${net_asset:,.0f}
+📊【 資產總覽 】
+💰 總資產 (Total)：${total_asset:,.0f}
+🟢 淨資產 (Net)：${net_asset:,.0f}
 {daily_str}
 ======================
 📂【資產明細】
@@ -481,18 +481,18 @@ def main():
 🇺🇲 現貨美股：{us_pct:.1f}%
 🐔 TSMC Exposure：{tsmc_pct:.1f}% 
 ======================
-🛡️【風險指標監控 】
-• 實質槓桿率：{effective_leverage:.2f} 倍 (包含正2曝險)
-• 資產負債比：{debt_ratio:.1f}%
-• 質押維持率：{maintenance_ratio:.1f}% (狀態：{ratio_status})
+🛡️【 風險指標監控 】
+⚙️ 實質槓桿率：{effective_leverage:.2f} 倍 (包含正2曝險)
+🕸️ 資產負債比：{debt_ratio:.1f}%
+🦾 質押維持率：{maintenance_ratio:.1f}% (狀態：{ratio_status})
 ======================
 🚀【歷史增率】
 {growth_text}
 ======================
 🎯【模型預測】
-• 千萬目標達成率：{progress_pct:.1f}%
+千萬目標達成率：{progress_pct:.1f}%
  [{bar}] {progress_pct:.1f}%
-• 時間軸推算
+時間軸推算
 {timeline_text}
 ======================
 📝【資產異動登錄】
