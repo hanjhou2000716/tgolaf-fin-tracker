@@ -438,26 +438,36 @@ def main():
     safe_net_asset = max(net_asset, 1)          
     
     # === 時間軸推算 (新增 850萬 與 100萬鎂 目標) ===
+    # === 時間軸推算 (依時間自動排序) ===
     targets = [
         {"name": "850萬", "value": 8500000},
         {"name": "1000萬", "value": 10000000},
         {"name": "100萬鎂", "value": 1000000 * usd_rate}
     ]
-    timeline_strs = ["- 2026-10: 🎖️ 成功嶺退伍日"]
+    
+    # 改用字典結構儲存，方便後續用年份與月份排序
+    timeline_events = [
+        {"year": 2026, "month": 10, "text": "- 2026-10: 🎖️ 成功嶺退伍日"}
+    ]
     
     for t in targets:
         target_val = t["value"]
         target_name = t["name"]
         if safe_net_asset >= target_val:
-            timeline_strs.append(f"- 已達標: {target_name} ✅")
+            # 已經達標的項目，設定 year 和 month 為 0，讓它排在最上面
+            timeline_events.append({"year": 0, "month": 0, "text": f"- 已達標: {target_name} ✅"})
         else:
             months_needed = math.log(target_val / safe_net_asset) / math.log(1 + calc_rate)
             target_month = tw_now.date().month + int(months_needed)
             target_year = tw_now.date().year + (target_month - 1) // 12
             final_month = (target_month - 1) % 12 + 1
-            timeline_strs.append(f"- {target_year}-{final_month:02d}: {target_name} 達標")
+            timeline_events.append({"year": target_year, "month": final_month, "text": f"- {target_year}-{final_month:02d}: {target_name} 達標"})
             
-    timeline_text = "\n".join(timeline_strs)
+    # 依照 year 和 month 進行遞增排序
+    timeline_events.sort(key=lambda x: (x["year"], x["month"]))
+    
+    # 抽取文字組合成最終字串
+    timeline_text = "\n".join([event["text"] for event in timeline_events])
 
     msg = f"""
 {title_header}
@@ -481,7 +491,7 @@ def main():
 🇺🇲 現貨美股：{us_pct:.1f}%
 🐔 TSMC Exposure：{tsmc_pct:.1f}% 
 ======================
-🛡️【 風險指標監控 】
+🛡️【 風險監控 】
 ⚙️ 實質槓桿率：{effective_leverage:.2f} 倍 (包含正2曝險)
 🕸️ 資產負債比：{debt_ratio:.1f}%
 🦾 質押維持率：{maintenance_ratio:.1f}% (狀態：{ratio_status})
@@ -495,8 +505,9 @@ def main():
 時間軸推算
 {timeline_text}
 ======================
-📝【資產異動登錄】
-🔗 表單捷徑：https://forms.gle/9ZEJawwNRGfiXQiV8
+🔗 【快速連結】
+📝 Growth 表單捷徑：https://forms.gle/9ZEJawwNRGfiXQiV8
+📈 Skynet Monitoring：https://5972x4.csb.app/
 """
 
     base_tg_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
