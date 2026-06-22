@@ -434,14 +434,20 @@ def main():
 
     growth_text = f"🔺 近一月:{m1_str} | 近一季:{m3_str}\n🔺 近一年:{y1_str} | 近三年:{y3_str}"
 
-    if history_len >= 30:
-        past_30_net = valid_history[-30]
-        monthly_growth_rate = (net_asset - past_30_net) / past_30_net
+   # === 模型預測增率計算優化 ===
+    if history_len >= 2:
+        # 使用「所有歷史數據」來計算平均月增率，比單看近30天的點對點更平滑抗震
+        first_net = valid_history[0]
+        total_growth_rate = (net_asset - first_net) / first_net
+        # 依實際紀錄天數，換算成「平均月增率」
+        monthly_growth_rate = total_growth_rate / (history_len / 30)
     else:
         monthly_growth_rate = 0.015 
 
-    calc_rate = max(monthly_growth_rate, 0.001) 
-    safe_net_asset = max(net_asset, 1)          
+    # 設定長期預測的「保底月增率」為 1.5% (約等同年化 19.5%)。
+    # 當遇到市場大跌導致當下增率為負時，改用長期平均期望值推算，避免時間軸失真到百年後
+    calc_rate = max(monthly_growth_rate, 0.015) 
+    safe_net_asset = max(net_asset, 1)        
     
     # === 時間軸推算 (新增 850萬 與 100萬鎂 目標) ===
     # === 時間軸推算 (依時間自動排序) ===
