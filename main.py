@@ -345,8 +345,14 @@ def main():
     us_stock_value_twd = us_stock_value_usd * usd_rate
     total_cash_twd = cash_twd + (cash_usd * usd_rate)
     
-    # 完美對接手動輸入的本息，取消程式內部的利率推算
-    total_debt_with_interest = inventory["質押負債"].get("Current_Debt", 0)
+    debt = inventory["質押負債"].get("Current_Debt", 0)
+    
+    # 恢復自動計算每日利息 (年利率 3.3%，從 6/10 開始計息)
+    loan_start_date = datetime.date(2026, 6, 10) 
+    days_passed = max(0, (tw_now.date() - loan_start_date).days)
+    daily_rate = 0.033 / 365
+    accumulated_interest = debt * daily_rate * days_passed
+    total_debt_with_interest = debt + accumulated_interest
     
     total_asset = tw_stock_value + us_stock_value_twd + total_cash_twd + fund_value
     net_asset = total_asset - total_debt_with_interest
@@ -483,7 +489,7 @@ def main():
 🐣 基金現值：${fund_value:,.0f}
 💵 現金(TWD)：${cash_twd:,.0f}
 💴 現金(USD)：${cash_usd * usd_rate:,.0f} (約 ${cash_usd:,.0f} USD)
-💸 質押借款：-${total_debt_with_interest:,.0f}
+💸 質押借款：-${total_debt_with_interest:,.0f} (內含利息 ${accumulated_interest:,.0f})
 ======================
 📑【資產板塊】
 🇹🇼 現貨台股：{tw_free_pct:.1f}%
