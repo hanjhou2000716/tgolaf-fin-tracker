@@ -411,16 +411,47 @@ def main():
     pie_url = generate_pie_chart(tw_free_value, total_debt_with_interest, us_stock_value_twd)
     line_url = generate_line_chart(history_records, today_str, total_asset, net_asset)
 
-    valid_history = []
+  # === 1. 建立以「真實日期」為基準的歷史字典 ===
+    daily_net_history = {}
     for row in history_records:
+        date_str = str(row.get('Date', ''))[:10]  # 提取 YYYY-MM-DD
         val = float(str(row.get('Net_Asset', 0)).replace(',', ''))
-        if val > 0: valid_history.append(val)
+        # 確保同一天有多筆紀錄時，會不斷覆蓋，只保留該日「最後一筆」
+        if val > 0 and len(date_str) == 10:
+            daily_net_history[date_str] = val
+            
+    # 將今天的最新淨資產也加入字典
+    tw_now_date_str = tw_now.strftime("%Y-%m-%d")
+    daily_net_history[tw_now_date_str] = net_asset
 
-    history_len = len(valid_history)
+    # 將日期進行排序
+    sorted_dates = sorted(daily_net_history.keys())
 
-    def get_growth_str(days, sim_text):
-        if history_len >= days:
-            past_net = valid_history[-days]
+    # === 2. 歷史增率文字產生器 ===
+    def get_growth_str(target_days, sim_text):
+        if not sorted_dates:
+            return f"{sim_text}(模)"
+            
+        target_date_obj = tw_now.date() - datetime.timedelta(days=target_days)
+        
+        # 尋找距離目標天數「最近」的歷史紀錄
+        closest_date = None
+        min_diff = 9999
+        for d_str in sorted_dates:
+            try:
+                d_obj = datetime.datetime.strptime(d_str, "%Y-%m-%d").date()
+                diff = abs((d_obj - target_date_obj).days)
+                if diff < min_diff:
+                    min_diff = diff
+                    closest_date = d_str
+            except:
+                continue
+                
+        # 容許誤差防呆：例如找30天前的數據，容許往前/往後找最多7天，超過就判定無真實數據
+        tolerance = max(7, target_days * 0.2) 
+        
+        if closest_date and min_diff <= tolerance:
+            past_net = daily_net_history[closest_date]
             rate = ((net_asset - past_net) / past_net) * 100
             s = "+" if rate >= 0 else ""
             return f"{s}{rate:.1f}%(實)"
@@ -434,18 +465,23 @@ def main():
 
     growth_text = f"🔺 近一月:{m1_str} | 近一季:{m3_str}\n🔺 近一年:{y1_str} | 近三年:{y3_str}"
 
-   # === 模型預測增率計算優化 ===
-    if history_len >= 2:
-        # 使用「所有歷史數據」來計算平均月增率，比單看近30天的點對點更平滑抗震
-        first_net = valid_history[0]
-        total_growth_rate = (net_asset - first_net) / first_net
-        # 依實際紀錄天數，換算成「平均月增率」
-        monthly_growth_rate = total_growth_rate / (history_len / 30)
+    # === 3. 模型預測增率計算優化 (基於真實日期跨度) ===
+    if len(sorted_dates) >= 2:
+        first_date_str = sorted_dates[0]
+        first_net = daily_net_history[first_date_str]
+        first_date_obj = datetime.datetime.strptime(first_date_str, "%Y-%m-%d").date()
+        total_days_recorded = (tw_now.date() - first_date_obj).days
+        
+        # 只要紀錄超過 1 天，就用總時間跨度換算出真實的平均「月增率」
+        if total_days_recorded >= 1:
+            total_growth_rate = (net_asset - first_net) / first_net
+            monthly_growth_rate = total_growth_rate / (total_days_recorded / 30)
+        else:
+            monthly_growth_rate = 0.015
     else:
         monthly_growth_rate = 0.015 
 
-    # 設定長期預測的「保底月增率」為 1.5% (約等同年化 19.5%)。
-    # 當遇到市場大跌導致當下增率為負時，改用長期平均期望值推算，避免時間軸失真到百年後
+    # 保底月增率 1.5%，避免市場劇烈波動讓時間軸推演失真
     calc_rate = max(monthly_growth_rate, 0.015) 
     safe_net_asset = max(net_asset, 1)        
     
