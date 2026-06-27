@@ -76,10 +76,12 @@ def calculate_current_assets():
 
     data_rows.sort(key=parse_date)
 
+    # 加入 History 陣列來紀錄歷史水位
     inventory = {
         "台股": {}, "美股": {}, "基金": {}, 
         "現金_TWD": {"TWD": 0.0}, "現金_USD": {"USD": 0.0},
-        "質押負債": {"Current_Debt": 0.0},
+        "質押負債": {"Current_Debt": 0.0, "History": []},
+        "質押利率": {"Rate": 3.3, "History": []},
         "擔保品": {}  
     }
     
@@ -92,16 +94,17 @@ def calculate_current_assets():
         '6208', '006208', '403A', '00403A', '886', '00886', '895', '00895',
         '878', '00878', '3455', '8033', '2330', '3665', '685L', '00685L',
         'QQQM', 'NVDA', 'SPYG', 'TSM', 'VOO', 'VTI', 'TSLA', 'AAPL', 'QQQ',
-        'FUND', 'TWD', 'USD', 'CURRENT_DEBT'
+        'FUND', 'TWD', 'USD', 'CURRENT_DEBT', 'RATE'
     ]
     
     for row in data_rows:
+        row_date = parse_date(row).date() # 抓取該筆紀錄的真實日期
         raw_cells = [str(c).strip() for c in row if str(c).strip() != ""]
         if not raw_cells: continue
         
         cells = []
         for c in raw_cells:
-            match = re.match(r'^([0-9,.]+)\s*(股|張|萬|元|塊)$', c)
+            match = re.match(r'^([0-9,.]+)\s*(股|張|萬|元|塊|%)$', c)
             if match:
                 num_part = match.group(1).replace(',', '')
                 unit = match.group(2)
@@ -120,7 +123,8 @@ def calculate_current_assets():
         
         for cell in cells:
             c_upper = cell.upper()
-            if any(x in cell for x in ["台股", "美股", "基金", "現金", "質押", "負債", "擔保"]):
+            # 支援辨識「利率」
+            if any(x in cell for x in ["台股", "美股", "基金", "現金", "質押", "負債", "擔保", "利率"]):
                 asset_type = cell
             elif any(x in cell for x in ["買入", "存入", "賣出", "提領", "取代", "覆蓋", "更新"]):
                 mode = cell
@@ -150,6 +154,7 @@ def calculate_current_assets():
         elif "基" in asset_type and "金" in asset_type: asset_type = "基金"
         elif "USD" in asset_type or "美金" in asset_type: asset_type = "現金_USD"
         elif "TWD" in asset_type or "台幣" in asset_type or "現金" in asset_type: asset_type = "現金_TWD"
+        elif "利率" in asset_type: asset_type = "質押利率"
         elif "質押" in asset_type or "負債" in asset_type: asset_type = "質押負債"
         elif "擔保" in asset_type: asset_type = "擔保品"
         
@@ -161,11 +166,14 @@ def calculate_current_assets():
             continue
             
         symbol = symbol_overrides.get(symbol, symbol)
-        if asset_type in ["現金_TWD", "現金_USD", "質押負債"] and not symbol:
-            symbol = "TWD" if asset_type == "現金_TWD" else ("USD" if asset_type == "現金_USD" else "Current_Debt")
+        if asset_type in ["現金_TWD", "現金_USD", "質押負債", "質押利率"] and not symbol:
+            if asset_type == "現金_TWD": symbol = "TWD"
+            elif asset_type == "現金_USD": symbol = "USD"
+            elif asset_type == "質押負債": symbol = "Current_Debt"
+            elif asset_type == "質押利率": symbol = "Rate"
             
         if not symbol: continue
-        if symbol not in inventory[asset_type]:
+        if symbol not in inventory[asset_type] and symbol not in ["History"]:
             inventory[asset_type][symbol] = 0.0
             
         if "買入" in mode or "存入" in mode or "+" in mode:
@@ -174,6 +182,12 @@ def calculate_current_assets():
             inventory[asset_type][symbol] -= amount
         elif "取代" in mode or "覆蓋" in mode or "更新" in mode:
             inventory[asset_type][symbol] = amount
+
+        # 紀錄歷史變更軌跡，供逐日計息使用
+        if asset_type == "質押負債":
+            inventory["質押負債"]["History"].append((row_date, inventory["質押負債"]["Current_Debt"]))
+        elif asset_type == "質押利率":
+            inventory["質押利率"]["History"].append((row_date, inventory["質押利率"]["Rate"]))
 
     return inventory, history_sheet
 
@@ -307,14 +321,14 @@ def main():
         
     usd_rate = get_usd_twd_rate()
     tw_stock_value, us_stock_value_usd, tsmc_exposure_twd, price_006208 = 0, 0, 0, 0
-    leveraged_etf_value = 0  # 紀錄 00685L 現值
+    leveraged_etf_value = 0  
     
     cash_twd = inventory["現金_TWD"].get("TWD", 0)
     cash_usd = inventory["現金_USD"].get("USD", 0)
-    fund_value = sum(inventory["基金"].values())
+    fund_value = sum(v for k, v in inventory["基金"].items() if k != "History")
 
     for symbol, shares in inventory["台股"].items():
-        if shares <= 0: continue
+        if symbol == "History" or shares <= 0: continue
         price = get_tw_stock_price(symbol)
         value = price * shares
         tw_stock_value += value 
@@ -328,7 +342,7 @@ def main():
 
     pledged_value = 0
     for symbol, shares in inventory["擔保品"].items():
-        if shares <= 0: continue
+        if symbol == "History" or shares <= 0: continue
         if symbol == '006208' and price_006208 > 0:
             price = price_006208
         else:
@@ -336,7 +350,7 @@ def main():
         pledged_value += price * shares
 
     for symbol, shares in inventory["美股"].items():
-        if shares <= 0: continue
+        if symbol == "History" or shares <= 0: continue
         price = get_us_stock_price(symbol)
         value = price * shares
         us_stock_value_usd += value
@@ -345,40 +359,54 @@ def main():
     us_stock_value_twd = us_stock_value_usd * usd_rate
     total_cash_twd = cash_twd + (cash_usd * usd_rate)
     
+    # === 動態逐日計息引擎 ===
     debt = inventory["質押負債"].get("Current_Debt", 0)
-    
-    # 恢復自動計算每日利息 (年利率 3.3%，從 6/10 開始計息)
+    debt_history = inventory["質押負債"].get("History", [])
+    rate_history = inventory["質押利率"].get("History", [])
+
+    def get_value_on_date(history_list, target_date, default_val):
+        val = default_val
+        for d, v in history_list:
+            if d <= target_date: val = v
+        return val
+
     loan_start_date = datetime.date(2026, 6, 10) 
-    days_passed = max(0, (tw_now.date() - loan_start_date).days)
-    daily_rate = 0.033 / 365
-    accumulated_interest = debt * daily_rate * days_passed
-    total_debt_with_interest = debt + accumulated_interest
+    end_date = tw_now.date()
+    days_passed = max(0, (end_date - loan_start_date).days)
     
+    accumulated_interest = 0
+    initial_debt = debt_history[0][1] if debt_history else debt
+    
+    for i in range(days_passed):
+        current_date = loan_start_date + datetime.timedelta(days=i)
+        daily_debt = get_value_on_date(debt_history, current_date, initial_debt)
+        daily_annual_rate = get_value_on_date(rate_history, current_date, 3.3) 
+        
+        daily_rate = (daily_annual_rate / 100) / 365
+        accumulated_interest += daily_debt * daily_rate
+
+    total_debt_with_interest = debt + accumulated_interest
     total_asset = tw_stock_value + us_stock_value_twd + total_cash_twd + fund_value
     net_asset = total_asset - total_debt_with_interest
     
-    # 風險指標 1: 實質槓桿率 (總資產 + 正2 ETF現值) / 淨資產
     effective_leverage = ((total_asset + leveraged_etf_value) / net_asset) if net_asset > 0 else 0
-    
-    # 風險指標 2: 資產負債比 (總負債 / 總資產) * 100%
     debt_ratio = ((total_debt_with_interest / total_asset) * 100) if total_asset > 0 else 0
     
-    # 風險指標 3: 質押維持率 (設質股票總市值 / 總借款本息) * 100%
     if total_debt_with_interest > 0:
         maintenance_ratio = (pledged_value / total_debt_with_interest) * 100
-        if maintenance_ratio >= 167:
-            ratio_status = "安全 ✅"
+        if maintenance_ratio >= 190:
+            ratio_status = "安全 🟢"
+        elif maintenance_ratio >= 150:
+            ratio_status = "注意 🟡"
         elif maintenance_ratio >= 130:
-            ratio_status = "警戒 ⚠️ (無法借新還舊)"
+            ratio_status = "警戒 🔴"
         else:
-            ratio_status = "危險 🆘 (追繳風險)"
+            ratio_status = "危險 🆘 (斷頭風險)"
     else:
         maintenance_ratio = 0
         ratio_status = "無借款 ✅"
 
-    # 圓餅圖拆分：真正的「現貨台股」等於「總台股市值 - 質押借款金額」
     tw_free_value = max(0, tw_stock_value - total_debt_with_interest)
-
     tw_free_pct = (tw_free_value / total_asset) * 100 if total_asset > 0 else 0
     debt_pct = (total_debt_with_interest / total_asset) * 100 if total_asset > 0 else 0
     us_pct = (us_stock_value_twd / total_asset) * 100 if total_asset > 0 else 0
@@ -411,20 +439,16 @@ def main():
     pie_url = generate_pie_chart(tw_free_value, total_debt_with_interest, us_stock_value_twd)
     line_url = generate_line_chart(history_records, today_str, total_asset, net_asset)
 
-  # === 1. 建立以「真實日期」為基準的歷史字典 ===
+    # === 1. 建立以「真實日期」為基準的歷史字典 ===
     daily_net_history = {}
     for row in history_records:
-        date_str = str(row.get('Date', ''))[:10]  # 提取 YYYY-MM-DD
+        date_str = str(row.get('Date', ''))[:10]  
         val = float(str(row.get('Net_Asset', 0)).replace(',', ''))
-        # 確保同一天有多筆紀錄時，會不斷覆蓋，只保留該日「最後一筆」
         if val > 0 and len(date_str) == 10:
             daily_net_history[date_str] = val
             
-    # 將今天的最新淨資產也加入字典
     tw_now_date_str = tw_now.strftime("%Y-%m-%d")
     daily_net_history[tw_now_date_str] = net_asset
-
-    # 將日期進行排序
     sorted_dates = sorted(daily_net_history.keys())
 
     # === 2. 歷史增率文字產生器 ===
@@ -433,8 +457,6 @@ def main():
             return f"{sim_text}(模)"
             
         target_date_obj = tw_now.date() - datetime.timedelta(days=target_days)
-        
-        # 尋找距離目標天數「最近」的歷史紀錄
         closest_date = None
         min_diff = 9999
         for d_str in sorted_dates:
@@ -447,9 +469,7 @@ def main():
             except:
                 continue
                 
-        # 容許誤差防呆：例如找30天前的數據，容許往前/往後找最多7天，超過就判定無真實數據
         tolerance = max(7, target_days * 0.2) 
-        
         if closest_date and min_diff <= tolerance:
             past_net = daily_net_history[closest_date]
             rate = ((net_asset - past_net) / past_net) * 100
@@ -465,14 +485,13 @@ def main():
 
     growth_text = f"🔺 近一月:{m1_str} | 近一季:{m3_str}\n🔺 近一年:{y1_str} | 近三年:{y3_str}"
 
-    # === 3. 模型預測增率計算優化 (基於真實日期跨度) ===
+    # === 3. 模型預測增率計算優化 ===
     if len(sorted_dates) >= 2:
         first_date_str = sorted_dates[0]
         first_net = daily_net_history[first_date_str]
         first_date_obj = datetime.datetime.strptime(first_date_str, "%Y-%m-%d").date()
         total_days_recorded = (tw_now.date() - first_date_obj).days
         
-        # 只要紀錄超過 1 天，就用總時間跨度換算出真實的平均「月增率」
         if total_days_recorded >= 1:
             total_growth_rate = (net_asset - first_net) / first_net
             monthly_growth_rate = total_growth_rate / (total_days_recorded / 30)
@@ -481,19 +500,16 @@ def main():
     else:
         monthly_growth_rate = 0.015 
 
-    # 保底月增率 1.5%，避免市場劇烈波動讓時間軸推演失真
     calc_rate = max(monthly_growth_rate, 0.015) 
-    safe_net_asset = max(net_asset, 1)        
+    safe_net_asset = max(net_asset, 1)          
     
-    # === 時間軸推算 (新增 850萬 與 100萬鎂 目標) ===
-    # === 時間軸推算 (依時間自動排序) ===
+    # === 時間軸推算 (自動排序) ===
     targets = [
         {"name": "850萬", "value": 8500000},
         {"name": "1000萬", "value": 10000000},
         {"name": "100萬鎂", "value": 1000000 * usd_rate}
     ]
     
-    # 改用字典結構儲存，方便後續用年份與月份排序
     timeline_events = [
         {"year": 2026, "month": 10, "text": "- 2026-10: 🎖️ 成功嶺退伍日"}
     ]
@@ -502,7 +518,6 @@ def main():
         target_val = t["value"]
         target_name = t["name"]
         if safe_net_asset >= target_val:
-            # 已經達標的項目，設定 year 和 month 為 0，讓它排在最上面
             timeline_events.append({"year": 0, "month": 0, "text": f"- 已達標: {target_name} ✅"})
         else:
             months_needed = math.log(target_val / safe_net_asset) / math.log(1 + calc_rate)
@@ -511,10 +526,7 @@ def main():
             final_month = (target_month - 1) % 12 + 1
             timeline_events.append({"year": target_year, "month": final_month, "text": f"- {target_year}-{final_month:02d}: {target_name} 達標"})
             
-    # 依照 year 和 month 進行遞增排序
     timeline_events.sort(key=lambda x: (x["year"], x["month"]))
-    
-    # 抽取文字組合成最終字串
     timeline_text = "\n".join([event["text"] for event in timeline_events])
 
     msg = f"""
@@ -539,7 +551,7 @@ def main():
 🇺🇲 現貨美股：{us_pct:.1f}%
 🐔 TSMC Exposure：{tsmc_pct:.1f}% 
 ======================
-🛡️【 風險監控 】
+🛡️【 風險指標監控 】
 ⚙️ 實質槓桿率：{effective_leverage:.2f} 倍 (包含正2曝險)
 🕸️ 資產負債比：{debt_ratio:.1f}%
 🦾 質押維持率：{maintenance_ratio:.1f}% (狀態：{ratio_status})
