@@ -336,8 +336,8 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
             "datasets": [
                 {"label": "總資產", "data": total_data, "borderColor": "#36a2eb", "fill": False, "tension": 0.1, "yAxisID": "yAxes1"},
                 {"label": "淨資產", "data": net_data, "borderColor": "#ff6384", "fill": False, "tension": 0.1, "yAxisID": "yAxes1"},
-                {"label": "總資產月線", "data": total_20ma_data, "borderColor": "rgba(255, 206, 86, 0.8)", "borderWidth": 2, "borderDash": [5, 5], "fill": False, "pointRadius": 0, "yAxisID": "yAxes1"},
-                {"label": "淨資產月線", "data": net_20ma_data, "borderColor": "rgba(255, 206, 86, 0.8)", "borderWidth": 2, "borderDash": [5, 5], "fill": False, "pointRadius": 0, "yAxisID": "yAxes1"},
+                {"label": "總資產月線", "data": total_20ma_data, "borderColor": "#DAA520", "borderWidth": 2, "borderDash": [5, 5], "fill": False, "pointRadius": 0, "yAxisID": "yAxes1"},
+                {"label": "淨資產月線", "data": net_20ma_data, "borderColor": "#DAA520", "borderWidth": 2, "borderDash": [5, 5], "fill": False, "pointRadius": 0, "yAxisID": "yAxes1"},
                 {"label": "加權月線", "data": twii_ma_data, "borderColor": "#9966ff", "borderWidth": 2, "fill": False, "pointRadius": 0, "yAxisID": "yAxes2"}
             ]
         },
