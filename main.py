@@ -257,16 +257,53 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
     daily_data[today_str]['total'].append(total_asset)
     daily_data[today_str]['net'].append(net_asset)
     
-    recent_days = list(daily_data.keys())[-30:]
-    dates, total_data, net_data = [], [], []
+    unique_dates = list(daily_data.keys())
     
+    # === 1. 計算資產 20MA 月線 ===
+    historical_totals = [daily_data[d]['total'][-1] for d in unique_dates]
+    historical_nets = [daily_data[d]['net'][-1] for d in unique_dates]
+    
+    total_ma_map = {}
+    net_ma_map = {}
+    for i, d in enumerate(unique_dates):
+        start = max(0, i - 19)
+        t_win = historical_totals[start:i+1]
+        n_win = historical_nets[start:i+1]
+        total_ma_map[d] = sum(t_win) / len(t_win)
+        net_ma_map[d] = sum(n_win) / len(n_win)
+    
+    # === 2. 抓取台股加權指數 20MA ===
+    twii_map = {}
+    try:
+        twii_hist = yf.Ticker("^TWII").history(period="3mo")
+        twii_hist['20MA'] = twii_hist['Close'].rolling(window=20).mean()
+        for idx, row in twii_hist.iterrows():
+            if not math.isnan(row['20MA']):
+                twii_map[idx.strftime("%m-%d")] = row['20MA']
+    except Exception as e:
+        print("大盤資料抓取錯誤:", e)
+        
+    recent_days = unique_dates[-30:]
+    dates, total_data, net_data = [], [], []
+    total_20ma_data, net_20ma_data, twii_ma_data = [], [], []
+    
+    last_twii_ma = None
     for d in recent_days:
         dates.append(d)
-        final_total = daily_data[d]['total'][-1]
-        final_net = daily_data[d]['net'][-1]
-        total_data.append(round(final_total, 2))
-        net_data.append(round(final_net, 2))
+        total_data.append(round(daily_data[d]['total'][-1], 2))
+        net_data.append(round(daily_data[d]['net'][-1], 2))
+        total_20ma_data.append(round(total_ma_map[d], 2))
+        net_20ma_data.append(round(net_ma_map[d], 2))
         
+        # 遇到假日沒有大盤數據時，自動沿用前一個交易日的月線
+        if d in twii_map:
+            last_twii_ma = twii_map[d]
+        elif last_twii_ma is None and twii_map:
+            last_twii_ma = list(twii_map.values())[-1]
+        
+        twii_ma_data.append(round(last_twii_ma, 2) if last_twii_ma else None)
+        
+    # === 3. 設定主 Y 軸範圍 (資產) ===
     all_vals = total_data + net_data
     if all_vals:
         min_val = min(all_vals)
@@ -278,26 +315,56 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
             y_max += 200000
     else:
         y_min, y_max = 0, 1000000
+        
+    # === 4. 設定次 Y 軸範圍 (大盤) -> 為了將紫線壓在底部 ===
+    valid_twii = [x for x in twii_ma_data if x is not None and x > 0]
+    if valid_twii:
+        t_min = min(valid_twii)
+        t_max = max(valid_twii)
+        t_span = t_max - t_min if t_max > t_min else 1000
+        # 故意將最大值設非常高，把紫線壓縮在圖表底部的 1/3
+        twii_y_max = math.ceil(t_max + t_span * 3.5)
+        twii_y_min = math.floor(t_min - t_span * 0.5)
+    else:
+        twii_y_min, twii_y_max = 10000, 30000
     
+    # === 5. QuickChart 設定組合 ===
     chart_config = {
         "type": "line",
         "data": {
             "labels": dates,
             "datasets": [
-                {"label": "總資產 (Total)", "data": total_data, "borderColor": "#36a2eb", "fill": False, "tension": 0.1},
-                {"label": "淨資產 (Net)", "data": net_data, "borderColor": "#ff6384", "fill": False, "tension": 0.1}
+                {"label": "總資產", "data": total_data, "borderColor": "#36a2eb", "fill": False, "tension": 0.1, "yAxisID": "yAxes1"},
+                {"label": "淨資產", "data": net_data, "borderColor": "#ff6384", "fill": False, "tension": 0.1, "yAxisID": "yAxes1"},
+                {"label": "總資產月線", "data": total_20ma_data, "borderColor": "rgba(255, 206, 86, 0.8)", "borderWidth": 2, "borderDash": [5, 5], "fill": False, "pointRadius": 0, "yAxisID": "yAxes1"},
+                {"label": "淨資產月線", "data": net_20ma_data, "borderColor": "rgba(255, 206, 86, 0.8)", "borderWidth": 2, "borderDash": [5, 5], "fill": False, "pointRadius": 0, "yAxisID": "yAxes1"},
+                {"label": "加權月線", "data": twii_ma_data, "borderColor": "#9966ff", "borderWidth": 2, "fill": False, "pointRadius": 0, "yAxisID": "yAxes2"}
             ]
         },
         "options": {
-            "title": {"display": True, "text": "近期資產軌跡 (Total vs Net)"},
+            "title": {"display": True, "text": "近期資產軌跡 (含月線 20MA)"},
             "scales": {
-                "yAxes": [{
-                    "ticks": {
-                        "min": y_min,
-                        "max": y_max,
-                        "stepSize": 200000
+                "yAxes": [
+                    {
+                        "id": "yAxes1",
+                        "position": "left",
+                        "ticks": {
+                            "min": y_min,
+                            "max": y_max,
+                            "stepSize": 200000
+                        }
+                    },
+                    {
+                        "id": "yAxes2",
+                        "position": "right",
+                        "display": False, # 隱藏右側數字軸，保持圖面乾淨
+                        "gridLines": {"drawOnChartArea": False},
+                        "ticks": {
+                            "min": twii_y_min,
+                            "max": twii_y_max
+                        }
                     }
-                }]
+                ]
             }
         }
     }
