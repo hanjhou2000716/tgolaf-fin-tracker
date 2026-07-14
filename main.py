@@ -460,6 +460,19 @@ def main():
     invested_assets = tw_stock_value + us_stock_value_twd + fund_value
     # 終極 Beta 槓桿率：(投資部位 + 正2額外曝險) / 淨自有本金
     effective_leverage = ((invested_assets + leveraged_etf_value) / net_asset) if net_asset > 0 else 0
+     # === 半凱利 (Half-Kelly) 邊界計算 ===
+    expected_excess_return = 0.08  # 預期超額年化報酬
+    market_volatility = 0.18       # 市場年化波動度
+    half_kelly_limit = expected_excess_return / (2 * (market_volatility ** 2))
+    
+    # 計算曝險容量使用率與燈號
+    kelly_utilization = (effective_leverage / half_kelly_limit) * 100 if half_kelly_limit > 0 else 0
+    if kelly_utilization > 100:
+        kelly_status = "🔴"
+    elif kelly_utilization > 80:
+        kelly_status = "🟡"
+    else:
+        kelly_status = "🟢"
     debt_ratio = ((total_debt_with_interest / total_asset) * 100) if total_asset > 0 else 0
     
     if total_debt_with_interest > 0:
@@ -623,6 +636,7 @@ def main():
 ======================
 🛡️【 風險指標監控 】
 ⚙️ 總資產Beta：{effective_leverage:.2f} 倍 (含正2&質押曝險)
+⚖️ 凱利安全邊界：{half_kelly_limit:.2f} 倍 (容量: {kelly_utilization:.1f}% {kelly_status})
 🕸️ 資產負債比：{debt_ratio:.1f}%
 🦾 質押維持率：{maintenance_ratio:.1f}% (狀態：{ratio_status})
 ======================
@@ -636,7 +650,7 @@ def main():
 {timeline_text}
 ======================
 🔗 【快速連結】
-📝 Growth 表單捷徑：https://forms.gle/9ZEJawwNRGfiXQiV8
+📝 Growth 表單：https://forms.gle/9ZEJawwNRGfiXQiV8
 📈 Skynet Monitoring：https://5972x4.csb.app/
 """
 
