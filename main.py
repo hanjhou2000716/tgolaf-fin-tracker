@@ -456,7 +456,10 @@ def main():
     total_asset = tw_stock_value + us_stock_value_twd + total_cash_twd + fund_value
     net_asset = total_asset - total_debt_with_interest
     
-    effective_leverage = ((total_asset + leveraged_etf_value) / net_asset) if net_asset > 0 else 0
+    # 計算真正投入市場的曝險部位 (排除現金)
+    invested_assets = tw_stock_value + us_stock_value_twd + fund_value
+    # 終極 Beta 槓桿率：(投資部位 + 正2額外曝險) / 淨自有本金
+    effective_leverage = ((invested_assets + leveraged_etf_value) / net_asset) if net_asset > 0 else 0
     debt_ratio = ((total_debt_with_interest / total_asset) * 100) if total_asset > 0 else 0
     
     if total_debt_with_interest > 0:
@@ -619,7 +622,7 @@ def main():
 🐔 TSMC Exposure：{tsmc_pct:.1f}% 
 ======================
 🛡️【 風險指標監控 】
-⚙️ 實質槓桿率：{effective_leverage:.2f} 倍 (包含正2曝險)
+⚙️ 總資產Beta：{effective_leverage:.2f} 倍 (含正2&質押曝險)
 🕸️ 資產負債比：{debt_ratio:.1f}%
 🦾 質押維持率：{maintenance_ratio:.1f}% (狀態：{ratio_status})
 ======================
