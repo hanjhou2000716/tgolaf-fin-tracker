@@ -620,7 +620,7 @@ def main():
 🟢 淨資產 (Net)：${net_asset:,.0f}
 {daily_str}
 ======================
-📂【資產明細】
+📂【 資產明細 】
 🇹🇼 台股現值：${tw_stock_value:,.0f}
 🇺🇸 美股現值：${us_stock_value_twd:,.0f} (約 ${us_stock_value_usd:,.0f} USD)
 🐣 基金現值：${fund_value:,.0f}
@@ -628,28 +628,28 @@ def main():
 💴 現金(USD)：${cash_usd * usd_rate:,.0f} (約 ${cash_usd:,.0f} USD)
 💸 質押借款：-${total_debt_with_interest:,.0f} (內含利息 ${accumulated_interest:,.0f})
 ======================
-📑【資產板塊】
+📑【 資產板塊 】
 🇹🇼 現貨台股：{tw_free_pct:.1f}%
 🦆 借款佔比：{debt_pct:.1f}%
 🇺🇲 現貨美股：{us_pct:.1f}%
 🐔 TSMC Exposure：{tsmc_pct:.1f}% 
 ======================
-🛡️【 風險指標監控 】
+🛡️【 風險監控 】
 ⚙️ 總資產Beta：{effective_leverage:.2f} 倍 (含正2&質押曝險)
 ⚖️ 凱利安全邊界：{half_kelly_limit:.2f} 倍 (容量: {kelly_utilization:.1f}% {kelly_status})
 🕸️ 資產負債比：{debt_ratio:.1f}%
 🦾 質押維持率：{maintenance_ratio:.1f}% (狀態：{ratio_status})
 ======================
-🚀【歷史增率】
+🚀【 歷史增率 】
 {growth_text}
 ======================
-🎯【模型預測】
+🎯【 模型預測 】
 千萬目標達成率：{progress_pct:.1f}%
  [{bar}] {progress_pct:.1f}%
 時間軸推算
 {timeline_text}
 ======================
-🔗 【快速連結】
+🔗 【 快速連結 】
 📝 Growth 表單：https://forms.gle/9ZEJawwNRGfiXQiV8
 📈 Skynet Monitoring：https://5972x4.csb.app/
 """
