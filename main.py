@@ -272,10 +272,11 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
         total_ma_map[d] = sum(t_win) / len(t_win)
         net_ma_map[d] = sum(n_win) / len(n_win)
     
-    # === 2. 抓取台股加權指數 20MA ===
+    # === 2. 抓取大盤 (改為：加權股價報酬指數) 20MA ===
     twii_map = {}
     try:
-        twii_hist = yf.Ticker("^TWII").history(period="3mo")
+        # yfinance 的 ^TWII 不含息。這裡改抓 020039.TW (元大加權N) 來完美重現「加權報酬指數」的含息走勢
+        twii_hist = yf.Ticker("020039.TW").history(period="3mo")
         twii_hist['20MA'] = twii_hist['Close'].rolling(window=20).mean()
         for idx, row in twii_hist.iterrows():
             if not math.isnan(row['20MA']):
@@ -295,16 +296,38 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
         total_20ma_data.append(round(total_ma_map[d], 2))
         net_20ma_data.append(round(net_ma_map[d], 2))
         
-        # 遇到假日沒有大盤數據時，自動沿用前一個交易日的月線
         if d in twii_map:
             last_twii_ma = twii_map[d]
         elif last_twii_ma is None and twii_map:
             last_twii_ma = list(twii_map.values())[-1]
+            
+        twii_ma_data.append(last_twii_ma)
         
-        twii_ma_data.append(round(last_twii_ma, 2) if last_twii_ma else None)
+    # === 3. 起點錨定 (Normalization) 解決紫線跳動問題 ===
+    normalized_twii_ma = []
+    base_net = None
+    base_twii = None
+    
+    for i in range(len(dates)):
+        if net_data[i] is not None and twii_ma_data[i] is not None:
+            # 將大盤的第一個點，強制錨定在「第一天淨資產數值的 95%」位置
+            # 讓它永遠穩定貼齊在淨資產紅線的下方，且漲跌幅比例完全保真！
+            base_net = net_data[i] * 0.95 
+            base_twii = twii_ma_data[i]
+            break
+            
+    if base_net and base_twii:
+        scale_ratio = base_net / base_twii
+        for val in twii_ma_data:
+            if val is not None:
+                normalized_twii_ma.append(round(val * scale_ratio, 2))
+            else:
+                normalized_twii_ma.append(None)
+    else:
+        normalized_twii_ma = [round(x, 2) if x else None for x in twii_ma_data]
         
-    # === 3. 設定主 Y 軸範圍 (資產) ===
-    all_vals = total_data + net_data
+    # === 4. 設定統一的 主 Y 軸範圍 ===
+    all_vals = total_data + net_data + [x for x in normalized_twii_ma if x is not None]
     if all_vals:
         min_val = min(all_vals)
         max_val = max(all_vals)
@@ -315,56 +338,30 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
             y_max += 200000
     else:
         y_min, y_max = 0, 1000000
-        
-    # === 4. 設定次 Y 軸範圍 (大盤) -> 為了將紫線壓在底部 ===
-    valid_twii = [x for x in twii_ma_data if x is not None and x > 0]
-    if valid_twii:
-        t_min = min(valid_twii)
-        t_max = max(valid_twii)
-        t_span = t_max - t_min if t_max > t_min else 1000
-        # 故意將最大值設非常高，把紫線壓縮在圖表底部的 1/3
-        twii_y_max = math.ceil(t_max + t_span * 3.5)
-        twii_y_min = math.floor(t_min - t_span * 0.5)
-    else:
-        twii_y_min, twii_y_max = 10000, 30000
     
-    # === 5. QuickChart 設定組合 ===
+    # === 5. QuickChart 設定組合 (廢除雙 Y 軸，畫面更純粹) ===
     chart_config = {
         "type": "line",
         "data": {
             "labels": dates,
             "datasets": [
-                {"label": "總資產", "data": total_data, "borderColor": "#36a2eb", "fill": False, "tension": 0.1, "yAxisID": "yAxes1"},
-                {"label": "淨資產", "data": net_data, "borderColor": "#ff6384", "fill": False, "tension": 0.1, "yAxisID": "yAxes1"},
-                {"label": "總資產月線", "data": total_20ma_data, "borderColor": "#DAA520", "borderWidth": 2, "borderDash": [5, 5], "fill": False, "pointRadius": 0, "yAxisID": "yAxes1"},
-                {"label": "淨資產月線", "data": net_20ma_data, "borderColor": "#DAA520", "borderWidth": 2, "borderDash": [5, 5], "fill": False, "pointRadius": 0, "yAxisID": "yAxes1"},
-                {"label": "加權月線", "data": twii_ma_data, "borderColor": "#9966ff", "borderWidth": 2, "fill": False, "pointRadius": 0, "yAxisID": "yAxes2"}
+                {"label": "總資產", "data": total_data, "borderColor": "#36a2eb", "fill": False, "tension": 0.1},
+                {"label": "淨資產", "data": net_data, "borderColor": "#ff6384", "fill": False, "tension": 0.1},
+                {"label": "總資產月線", "data": total_20ma_data, "borderColor": "#DAA520", "borderWidth": 2, "borderDash": [5, 5], "fill": False, "pointRadius": 0},
+                {"label": "淨資產月線", "data": net_20ma_data, "borderColor": "#DAA520", "borderWidth": 2, "borderDash": [5, 5], "fill": False, "pointRadius": 0},
+                {"label": "大盤報酬月線", "data": normalized_twii_ma, "borderColor": "#9966ff", "borderWidth": 2, "fill": False, "pointRadius": 0}
             ]
         },
         "options": {
             "title": {"display": True, "text": "近期資產軌跡 (含月線 20MA)"},
             "scales": {
-                "yAxes": [
-                    {
-                        "id": "yAxes1",
-                        "position": "left",
-                        "ticks": {
-                            "min": y_min,
-                            "max": y_max,
-                            "stepSize": 200000
-                        }
-                    },
-                    {
-                        "id": "yAxes2",
-                        "position": "right",
-                        "display": False, # 隱藏右側數字軸，保持圖面乾淨
-                        "gridLines": {"drawOnChartArea": False},
-                        "ticks": {
-                            "min": twii_y_min,
-                            "max": twii_y_max
-                        }
+                "yAxes": [{
+                    "ticks": {
+                        "min": y_min,
+                        "max": y_max,
+                        "stepSize": 200000
                     }
-                ]
+                }]
             }
         }
     }
