@@ -206,36 +206,6 @@ def get_us_stock_price(symbol):
     except:
         return 0
 
-def get_tw_stock_price(symbol):
-    url = "https://api.finmindtrade.com/api/v4/data"
-    start_date = (datetime.date.today() - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
-    parameter = {"dataset": "TaiwanStockPrice", "data_id": str(symbol), "start_date": start_date, "token": FINMIND_TOKEN}
-    try:
-        data = requests.get(url, params=parameter).json()
-        return data["data"][-1]["close"] if data["msg"] == "success" else 0
-    except:
-        return 0
-
-def generate_pie_chart(tw_free_val, debt_val, us_val):
-    chart_config = {
-        "type": "outlabeledPie",
-        "data": {
-            "labels": ["🇹🇼 現貨台股", "🦆 質押投資", "🇺🇸 現貨美股"],
-            "datasets": [{"backgroundColor": ["#36a2eb", "#ff6384", "#ffce56"], "data": [tw_free_val, debt_val, us_val]}]
-        },
-        "options": {
-            "plugins": {
-                "legend": {"display": False},
-                "outlabels": {"text": "%l %p", "color": "white", "stretch": 35, "font": {"minSize": 12}}
-            }
-        }
-    }
-    if tw_free_val <= 0 and debt_val <= 0 and us_val <= 0:
-        chart_config["data"]["labels"] = ["尚無資產數據"]
-        chart_config["data"]["datasets"][0]["data"] = [1]
-        chart_config["data"]["datasets"][0]["backgroundColor"] = ["#cccccc"]
-    return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=400&h=250"
-
 def generate_line_chart(history_records, today_str, total_asset, net_asset):
     daily_data = {}
     
@@ -272,11 +242,13 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
         total_ma_map[d] = sum(t_win) / len(t_win)
         net_ma_map[d] = sum(n_win) / len(n_win)
     
-    # === 2. 抓取大盤 (改為：加權股價報酬指數) 20MA ===
+    # === 2. 抓取大盤 (改抓 0050.TW，yfinance 會自動還原權息，完美等同含息報酬指數) ===
     twii_map = {}
     try:
-        # yfinance 的 ^TWII 不含息。這裡改抓 020039.TW (元大加權N) 來完美重現「加權報酬指數」的含息走勢
-        twii_hist = yf.Ticker("020039.TW").history(period="3mo")
+        twii_hist = yf.Ticker("0050.TW").history(period="3mo")
+        if twii_hist.empty: # 雙重防呆：如果 0050 也出錯，退回抓大盤
+            twii_hist = yf.Ticker("^TWII").history(period="3mo")
+            
         twii_hist['20MA'] = twii_hist['Close'].rolling(window=20).mean()
         for idx, row in twii_hist.iterrows():
             if not math.isnan(row['20MA']):
@@ -288,7 +260,16 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
     dates, total_data, net_data = [], [], []
     total_20ma_data, net_20ma_data, twii_ma_data = [], [], []
     
+    # 初始化防呆：避免第一天是假日導致抓不到初始值
     last_twii_ma = None
+    if twii_map:
+        for d in recent_days:
+            if d in twii_map:
+                last_twii_ma = twii_map[d]
+                break
+        if not last_twii_ma:
+            last_twii_ma = list(twii_map.values())[-1]
+            
     for d in recent_days:
         dates.append(d)
         total_data.append(round(daily_data[d]['total'][-1], 2))
@@ -298,8 +279,6 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
         
         if d in twii_map:
             last_twii_ma = twii_map[d]
-        elif last_twii_ma is None and twii_map:
-            last_twii_ma = list(twii_map.values())[-1]
             
         twii_ma_data.append(last_twii_ma)
         
@@ -310,8 +289,7 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
     
     for i in range(len(dates)):
         if net_data[i] is not None and twii_ma_data[i] is not None:
-            # 將大盤的第一個點，強制錨定在「第一天淨資產數值的 95%」位置
-            # 讓它永遠穩定貼齊在淨資產紅線的下方，且漲跌幅比例完全保真！
+            # 強制將紫線的起點，錨定在淨資產紅線的 95% 高度
             base_net = net_data[i] * 0.95 
             base_twii = twii_ma_data[i]
             break
@@ -324,7 +302,7 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
             else:
                 normalized_twii_ma.append(None)
     else:
-        normalized_twii_ma = [round(x, 2) if x else None for x in twii_ma_data]
+        normalized_twii_ma = [None] * len(twii_ma_data)
         
     # === 4. 設定統一的 主 Y 軸範圍 ===
     all_vals = total_data + net_data + [x for x in normalized_twii_ma if x is not None]
@@ -339,7 +317,7 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
     else:
         y_min, y_max = 0, 1000000
     
-    # === 5. QuickChart 設定組合 (廢除雙 Y 軸，畫面更純粹) ===
+    # === 5. QuickChart 設定組合 ===
     chart_config = {
         "type": "line",
         "data": {
@@ -349,7 +327,7 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
                 {"label": "淨資產", "data": net_data, "borderColor": "#ff6384", "fill": False, "tension": 0.1},
                 {"label": "總資產月線", "data": total_20ma_data, "borderColor": "#DAA520", "borderWidth": 2, "borderDash": [5, 5], "fill": False, "pointRadius": 0},
                 {"label": "淨資產月線", "data": net_20ma_data, "borderColor": "#DAA520", "borderWidth": 2, "borderDash": [5, 5], "fill": False, "pointRadius": 0},
-                {"label": "大盤報酬月線", "data": normalized_twii_ma, "borderColor": "#9966ff", "borderWidth": 2, "fill": False, "pointRadius": 0}
+                {"label": "加權報酬月線", "data": normalized_twii_ma, "borderColor": "#9966ff", "borderWidth": 2, "fill": False, "pointRadius": 0}
             ]
         },
         "options": {
@@ -366,7 +344,6 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
         }
     }
     return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=400&h=250"
-
 # ==========================================
 # 4. 核心結算與通知發送主程序
 # ==========================================
