@@ -199,7 +199,6 @@ def get_usd_twd_rate():
         return yf.Ticker("TWD=X").history(period="1d")['Close'].iloc[-1]
     except:
         return 32.3
-
 def get_us_stock_price(symbol):
     try:
         return yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1]
@@ -214,6 +213,25 @@ def get_tw_stock_price(symbol):
         return data["data"][-1]["close"] if data["msg"] == "success" else 0
     except:
         return 0
+def generate_pie_chart(tw_free_val, debt_val, us_val):
+    chart_config = {
+        "type": "outlabeledPie",
+        "data": {
+            "labels": ["🇹🇼 現貨台股", "🦆 質押投資", "🇺🇸 現貨美股"],
+            "datasets": [{"backgroundColor": ["#36a2eb", "#ff6384", "#ffce56"], "data": [tw_free_val, debt_val, us_val]}]
+        },
+        "options": {
+            "plugins": {
+                "legend": {"display": False},
+                "outlabels": {"text": "%l %p", "color": "white", "stretch": 35, "font": {"minSize": 12}}
+            }
+        }
+    }
+    if tw_free_val <= 0 and debt_val <= 0 and us_val <= 0:
+        chart_config["data"]["labels"] = ["尚無資產數據"]
+        chart_config["data"]["datasets"][0]["data"] = [1]
+        chart_config["data"]["datasets"][0]["backgroundColor"] = ["#cccccc"]
+    return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=400&h=250"
         
 def generate_line_chart(history_records, today_str, total_asset, net_asset):
     daily_data = {}
