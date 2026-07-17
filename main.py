@@ -205,7 +205,16 @@ def get_us_stock_price(symbol):
         return yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1]
     except:
         return 0
-
+def get_tw_stock_price(symbol):
+    url = "https://api.finmindtrade.com/api/v4/data"
+    start_date = (datetime.date.today() - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+    parameter = {"dataset": "TaiwanStockPrice", "data_id": str(symbol), "start_date": start_date, "token": FINMIND_TOKEN}
+    try:
+        data = requests.get(url, params=parameter).json()
+        return data["data"][-1]["close"] if data["msg"] == "success" else 0
+    except:
+        return 0
+        
 def generate_line_chart(history_records, today_str, total_asset, net_asset):
     daily_data = {}
     
