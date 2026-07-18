@@ -612,45 +612,48 @@ def main():
             <div class="s-diff">{emoji} {daily_str_plain}</div>
         </div>
 
-        <!-- 區塊 1: 資產與現金 (補回 基金、台幣、美金) -->
-        <div class="section-title">📂 資產與現金明細</div>
+        <!-- 區塊 1: 資產與現金明細 (完美 2x3 網格) -->
+        <div class="section-title">📂 資產明細</div>
         <div class="grid">
-            <div class="card"><div class="c-title">🇹🇼 台股現值</div><div class="c-val">${tw_stock_value:,.0f}</div><span class="c-sub">佔比 {tw_free_pct:.1f}%</span></div>
+            <div class="card"><div class="c-title">🇹🇼 台股現值</div><div class="c-val">${tw_stock_value:,.0f}</div></div>
             <div class="card"><div class="c-title">🇺🇸 美股現值</div><div class="c-val">${us_stock_value_twd:,.0f}</div><span class="c-sub">約 ${us_stock_value_usd:,.0f} USD</span></div>
-            <div class="card"><div class="c-title">🐣 基金現值</div><div class="c-val">${fund_value:,.0f}</div></div>
-            <div class="card"><div class="c-title">🐔 TSMC 曝險</div><div class="c-val">{tsmc_pct:.1f}%</div></div>
             <div class="card"><div class="c-title">💵 現金 (TWD)</div><div class="c-val">${cash_twd:,.0f}</div></div>
             <div class="card"><div class="c-title">💴 現金 (USD)</div><div class="c-val">${cash_usd * usd_rate:,.0f}</div><span class="c-sub">約 ${cash_usd:,.0f} USD</span></div>
+            <div class="card"><div class="c-title">🐣 基金現值</div><div class="c-val">${fund_value:,.0f}</div></div>
+            <div class="card"><div class="c-title">💸 質押借款</div><div class="c-val" style="color:#ef4444">-${total_debt_with_interest:,.0f}</div><span class="c-sub">內含利息 ${accumulated_interest:,.0f}</span></div>
         </div>
 
-        <!-- 區塊 2: 風險與槓桿 (補回 利息金額、凱利容量) -->
-        <div class="section-title">🛡️ 風險與槓桿監控</div>
+        <!-- 區塊 2: 風險與槓桿監控 (完美 2x2 網格) -->
+        <div class="section-title">🛡️ 風險監控</div>
         <div class="grid">
-            <div class="card"><div class="c-title">💸 質押借款</div><div class="c-val" style="color:#ef4444">-${total_debt_with_interest:,.0f}</div><span class="c-sub">內含利息 ${accumulated_interest:,.0f}</span></div>
-            <div class="card"><div class="c-title">🦾 維持率</div><div class="c-val" style="color:{ratio_color}">{maintenance_ratio:.1f}%</div><span class="c-sub">{ratio_status}</span></div>
-            <div class="card"><div class="c-title">⚙️ 曝險 Beta</div><div class="c-val">{effective_leverage:.2f}x</div><span class="c-sub">安全邊界 {half_kelly_limit:.2f}x</span></div>
-            <div class="card"><div class="c-title">⚖️ 凱利安全容量</div><div class="c-val">{kelly_utilization:.1f}%</div><span class="c-sub">狀態 {kelly_status}</span></div>
+            <div class="card"><div class="c-title">⚖️ 總資產Beta</div><div class="c-val">{effective_leverage:.2f}x</div><span class="c-sub">凱利邊界: {half_kelly_limit:.2f}x</span></div>
+            <div class="card"><div class="c-title">🐔 TSMC Exposure</div><div class="c-val">{tsmc_pct:.1f}%</div></div>
+            <div class="card"><div class="c-title">🕸️ 資產負債比</div><div class="c-val">{debt_ratio:.1f}%</div></div>
+            <div class="card"><div class="c-title">🦾 質押維持率</div><div class="c-val" style="color:{ratio_color}">{maintenance_ratio:.1f}%</div><span class="c-sub">狀態: {ratio_status}</span></div>
         </div>
 
         <!-- 區塊 3: 歷史與目標 -->
-        <div class="section-title">🚀 成長軌跡與目標</div>
+        <div class="section-title">🚀 歷史增率</div>
         <div class="card" style="margin-bottom:12px;">
-            <div class="c-title">📈 歷史增率</div>
             <div class="badge-container">
                 <div class="badge">1月: {m1_str}</div> <div class="badge">1季: {m3_str}</div>
                 <div class="badge">1年: {y1_str}</div> <div class="badge">3年: {y3_str}</div>
             </div>
         </div>
+        
+        <div class="section-title">🎯 模型預測</div>
         <div class="card" style="margin-bottom:20px;">
-            <div class="c-title">🎯 千萬進度 ({progress_pct:.1f}%)</div>
+            <div class="c-title">千萬目標達成率 ({progress_pct:.1f}%)</div>
             <div style="font-family:monospace; color:#3b82f6; font-size:16px; margin: 5px 0 10px 0;">{bar_str}</div>
+            <div class="c-title" style="margin-top: 10px;">時間軸推算</div>
             <ul style="padding:0; margin:0; list-style:none; font-size:14px; font-weight:500; color:#1e293b;">{timeline_html}</ul>
         </div>
 
         <!-- 區塊 4: 圖表分析 -->
         <div class="section-title">📊 視覺化分析</div>
         <div class="chart-card"><img src="{line_url}"></div>
-        <div class="chart-card"><img src="{pie_url}"></div>
+        <!-- 增加底部 margin 確保不會因為渲染邊距被切掉 -->
+        <div class="chart-card" style="margin-bottom: 40px;"><img src="{pie_url}"></div>
     </body>
     </html>
     """
@@ -664,10 +667,10 @@ def main():
     hti = Html2Image(custom_flags=['--no-sandbox', '--disable-gpu', '--hide-scrollbars'])
     
     try:
-        # 高度設定 1750px，確保能完整包覆所有新增的卡片與圖表
-        hti.screenshot(html_file='dashboard.html', save_as='dashboard.png', size=(540, 1750))
+        # 將畫布高度大幅加長至 2100px，保證兩張圖表能完美呈現
+        hti.screenshot(html_file='dashboard.html', save_as='dashboard.png', size=(540, 2100))
     except Exception as e:
-        print("新版 screenshot 失敗，嘗試回退:", e)
+        print("screenshot 失敗:", e)
         pass
 
     keyboard = {
@@ -681,7 +684,7 @@ def main():
     with open("dashboard.png", "rb") as f:
         requests.post(msg_url, data={
             "chat_id": TELEGRAM_CHAT_ID, 
-            "caption": "✅ **日報結算完畢！**\n已為您送上最新的完整版 Growth 儀表板。",
+            "caption": "✅ **日報結算完畢！**\n為您送上最新的 Growth 儀表板。",
             "parse_mode": "Markdown",
             "reply_markup": json.dumps(keyboard) 
         }, files={"photo": f})
