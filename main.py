@@ -667,8 +667,8 @@ def main():
     hti = Html2Image(custom_flags=['--no-sandbox', '--disable-gpu', '--hide-scrollbars'])
     
     try:
-        # 將畫布高度大幅加長至 2100px，保證兩張圖表能完美呈現
-        hti.screenshot(html_file='dashboard.html', save_as='dashboard.png', size=(540, 2100))
+        # 將畫布高度大幅加長至 3500px，確保兩張圖表絕對能完整呈現不被切斷
+        hti.screenshot(html_file='dashboard.html', save_as='dashboard.png', size=(540, 3500))
     except Exception as e:
         print("screenshot 失敗:", e)
         pass
