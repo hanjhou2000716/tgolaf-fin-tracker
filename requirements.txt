@@ -4,3 +4,4 @@ google-auth
 yfinance
 finmind
 pandas
+html2image
