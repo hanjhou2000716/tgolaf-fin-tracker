@@ -8,6 +8,7 @@ import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
 import urllib.parse
+from html2image import Html2Image
 
 # ==========================================
 # 1. 環境變數與金鑰設定
@@ -550,49 +551,128 @@ def main():
             timeline_events.append({"year": target_year, "month": final_month, "text": f"- {target_year}-{final_month:02d}: {target_name} 達標"})
             
     timeline_events.sort(key=lambda x: (x["year"], x["month"]))
-    timeline_text = "\n".join([event["text"] for event in timeline_events])
+    timeline_text = "<br>".join([event["text"] for event in timeline_events])
 
-    # === 重構訊息格式 (支援 HTML 排版，讓視覺更像圖卡) ===
-    # 提醒：Telegram 圖片 caption 限制 1024 字元，因此我們將最長的主文獨立發送
-    msg_html = f"""
-{title_header}
-──────────────────
-📊 <b>【 資產總覽 】</b>
-💰 總資產 (Total)：<code>${total_asset:,.0f}</code>
-🟢 淨資產 (Net)：<code>${net_asset:,.0f}</code>
-{daily_str}
+    tw_color = "#ef4444" if daily_diff >= 0 else "#10b981"
+    tw_arrow = "▲" if daily_diff >= 0 else "▼"
+    ratio_color = "#ef4444" if maintenance_ratio < 150 else "#10b981"
+    
+    time_str = tw_now.strftime("%Y/%m/%d %H:%M CST")
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html lang="zh-TW">
+    <head>
+        <meta charset="UTF-8">
+        <style>
+            body {{
+                font-family: 'Helvetica Neue', Arial, 'Microsoft JhengHei', sans-serif;
+                margin: 0; padding: 0; width: 500px;
+                background-color: #0f172a;
+            }}
+            .header {{
+                padding: 20px; color: white;
+            }}
+            .header h1 {{ margin: 0; font-size: 22px; font-weight: bold; }}
+            .header p {{ margin: 5px 0 0 0; font-size: 13px; color: #94a3b8; }}
+            
+            .container {{
+                background-color: #f8fafc;
+                border-radius: 16px 16px 0 0;
+                padding: 20px;
+            }}
+            .summary-box {{
+                background: linear-gradient(135deg, #c2410c, #ea580c);
+                color: white; padding: 15px; border-radius: 10px;
+                margin-bottom: 20px; font-size: 15px; line-height: 1.6;
+                box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            }}
+            .grid {{
+                display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+                margin-bottom: 12px;
+            }}
+            .card {{
+                background: white; padding: 12px 15px; border-radius: 10px;
+                border: 1px solid #e2e8f0;
+                box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+            }}
+            .card-title {{ font-size: 13px; color: #64748b; margin-bottom: 6px; }}
+            .card-value {{ font-size: 18px; font-weight: bold; color: #0f172a; }}
+            .card-sub {{ font-size: 12px; margin-top: 5px; color: #94a3b8; }}
+            
+            .full-card {{ grid-column: 1 / -1; }}
+            .text-up {{ color: #ef4444; }}
+            .text-down {{ color: #10b981; }}
+            
+            .chart-img {{ width: 100%; border-radius: 8px; margin-top: 10px; }}
+        </style>
+    </head>
+    <body>
+        <div class="header">
+            <h1>{title_header.replace('<b>', '').replace('</b>', '')} 儀表板</h1>
+            <p>{time_str}</p>
+        </div>
+        <div class="container">
+            <div class="summary-box">
+                總資產：${total_asset:,.0f}、淨資產：${net_asset:,.0f}<br>
+                單日變化：{daily_pct:.1f}% ({sign}${daily_diff:,.0f})，{growth_text.replace(chr(10), '，').replace('🔺 ', '')}
+            </div>
+            
+            <div class="grid">
+                <div class="card">
+                    <div class="card-title">台股市值</div>
+                    <div class="card-value">${tw_stock_value:,.0f}</div>
+                    <div class="card-sub text-up">佔比 {tw_free_pct:.1f}%</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">美股市值</div>
+                    <div class="card-value">${us_stock_value_twd:,.0f}</div>
+                    <div class="card-sub text-up">佔比 {us_pct:.1f}%</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">質押借款</div>
+                    <div class="card-value" style="color:#3b82f6">-${total_debt_with_interest:,.0f}</div>
+                    <div class="card-sub">負債比 {debt_ratio:.1f}%</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">質押維持率</div>
+                    <div class="card-value" style="color:{ratio_color}">{maintenance_ratio:.1f}%</div>
+                    <div class="card-sub">{ratio_status}</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">曝險 Beta</div>
+                    <div class="card-value">{effective_leverage:.2f}x</div>
+                    <div class="card-sub">半凱利邊界 {half_kelly_limit:.2f}x</div>
+                </div>
+                <div class="card">
+                    <div class="card-title">千萬目標達成率</div>
+                    <div class="card-value">{progress_pct:.1f}%</div>
+                    <div class="card-sub">{bar}</div>
+                </div>
+                
+                <div class="card full-card">
+                    <div class="card-title">時間軸推算</div>
+                    <div class="card-sub" style="font-size:13px; color:#334155; line-height: 1.6;">
+                        {timeline_text}
+                    </div>
+                </div>
+                
+                <!-- 嵌入兩張圖表 -->
+                <div class="card full-card" style="padding:0; border:none; background:transparent; box-shadow:none;">
+                    <img src="{line_url}" class="chart-img">
+                    <img src="{pie_url}" class="chart-img">
+                </div>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
 
-📂 <b>【 資產明細 】</b>
-🇹🇼 台股現值：<code>${tw_stock_value:,.0f}</code>
-🇺🇸 美股現值：<code>${us_stock_value_twd:,.0f}</code> (約 ${us_stock_value_usd:,.0f} USD)
-🐣 基金現值：<code>${fund_value:,.0f}</code>
-💵 現金(TWD)：<code>${cash_twd:,.0f}</code>
-💴 現金(USD)：<code>${cash_usd * usd_rate:,.0f}</code> (約 ${cash_usd:,.0f} USD)
-💸 質押借款：<code>-${total_debt_with_interest:,.0f}</code> (內含利息 ${accumulated_interest:,.0f})
+    hti = Html2Image(custom_flags=['--no-sandbox', '--disable-gpu'])
+    # 設定截圖尺寸，寬度固定 500px，高度設定長一點讓他自己適應
+    image_filename = 'dashboard.png'
+    hti.snapshot(html_str=html_content, save_as=image_filename, size=(500, 1150))
 
-📑 <b>【 資產板塊 】</b>
-🇹🇼 現貨台股：<code>{tw_free_pct:.1f}%</code>
-🦆 借款佔比：<code>{debt_pct:.1f}%</code>
-🇺🇲 現貨美股：<code>{us_pct:.1f}%</code>
-🐔 TSMC 曝險：<code>{tsmc_pct:.1f}%</code> 
-
-🛡️ <b>【 風險監控 】</b>
-⚙️ 總資產Beta：<code>{effective_leverage:.2f} 倍</code>
-⚖️ 凱利安全邊界：<code>{half_kelly_limit:.2f} 倍</code> (容量: {kelly_utilization:.1f}% {kelly_status})
-🕸️ 資產負債比：<code>{debt_ratio:.1f}%</code>
-🦾 質押維持率：<code>{maintenance_ratio:.1f}%</code> (狀態：{ratio_status})
-
-🚀 <b>【 歷史增率 】</b>
-{growth_text}
-
-🎯 <b>【 模型預測 】</b>
-千萬目標達成率：<code>{progress_pct:.1f}%</code>
-<code>[{bar}]</code>
-<b>時間軸推算：</b>
-{timeline_text}
-"""
-
-    # === 建立 Inline Keyboard (互動式按鈕) ===
     keyboard = {
         "inline_keyboard": [
             [
@@ -604,23 +684,19 @@ def main():
         ]
     }
 
-    # === 發送順序調整 ===
-    base_tg_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/"
+    base_tg_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     
-    # 1. 發送兩張統計圖 (使用 MediaGroup 以相簿形式發送，版面更簡潔)
-    media_group = [
-        {"type": "photo", "media": line_url},
-        {"type": "photo", "media": pie_url}
-    ]
-    requests.post(base_tg_url + "sendMediaGroup", json={"chat_id": TELEGRAM_CHAT_ID, "media": media_group})
-    
-    # 2. 發送排版過的數據主文與互動按鈕
-    requests.post(base_tg_url + "sendMessage", json={
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": msg_html,
-        "parse_mode": "HTML",
-        "reply_markup": keyboard
-    })
+    with open(image_filename, "rb") as photo:
+        requests.post(
+            base_tg_url, 
+            data={
+                "chat_id": TELEGRAM_CHAT_ID, 
+                "caption": f"✅ <b>日報結算完畢！</b>\n為您送上最新的 Growth 儀表板。",
+                "parse_mode": "HTML",
+                "reply_markup": json.dumps(keyboard) # 傳送檔案時按鈕必須轉為 JSON 字串
+            },
+            files={"photo": photo}
+        )
 
 if __name__ == "__main__":
     main()
