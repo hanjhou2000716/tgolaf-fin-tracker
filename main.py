@@ -194,9 +194,8 @@ def calculate_current_assets():
 # ==========================================
 def get_usd_twd_rate():
     try:
-        # 使用直接呼叫 API + 偽裝成 Chrome 瀏覽器，繞過 GitHub IP 封鎖
         url = "https://query1.finance.yahoo.com/v8/finance/chart/TWD=X?interval=1d&range=1d"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         res = requests.get(url, headers=headers, timeout=5)
         return float(res.json()['chart']['result'][0]['meta']['regularMarketPrice'])
     except:
@@ -205,9 +204,8 @@ def get_usd_twd_rate():
 
 def get_us_stock_price(symbol):
     try:
-        # 使用直接呼叫 API + 偽裝成 Chrome 瀏覽器
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d"
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
         res = requests.get(url, headers=headers, timeout=5)
         return float(res.json()['chart']['result'][0]['meta']['regularMarketPrice'])
     except:
@@ -222,6 +220,7 @@ def get_tw_stock_price(symbol):
         data = requests.get(url, params=parameter).json()
         return data["data"][-1]["close"] if data["msg"] == "success" else 0
     except: return 0
+
 def generate_pie_chart(tw_free_val, debt_val, us_val):
     chart_config = {
         "type": "outlabeledPie",
@@ -449,13 +448,13 @@ def main():
     
     if total_debt_with_interest > 0:
         maintenance_ratio = (pledged_value / total_debt_with_interest) * 100
-        if maintenance_ratio >= 190: ratio_status = "安全 🟢"
-        elif maintenance_ratio >= 150: ratio_status = "注意 🟡"
-        elif maintenance_ratio >= 130: ratio_status = "警戒 🔴"
-        else: ratio_status = "危險 🆘"
+        if maintenance_ratio >= 190: ratio_status = "🟢 安全"
+        elif maintenance_ratio >= 150: ratio_status = "🟡 注意"
+        elif maintenance_ratio >= 130: ratio_status = "🔴 警戒"
+        else: ratio_status = "🆘 危險"
     else:
         maintenance_ratio = 0
-        ratio_status = "無借款 ✅"
+        ratio_status = "✅ 無借款"
 
     tw_free_value = max(0, tw_stock_value - total_debt_with_interest)
     tw_free_pct = (tw_free_value / total_asset) * 100 if total_asset > 0 else 0
@@ -564,147 +563,128 @@ def main():
     ratio_color = "#ef4444" if maintenance_ratio < 150 else "#10b981"
     
     # ==========================================
-    # 5. HTML UI 渲染 (四個獨立區塊)
-    # 引入 Google Fonts (Noto Sans TC) 來盡量避免亂碼
+    # 5. 組合單一無縫長截圖 HTML (補回所有遺失資料)
     # ==========================================
-    base_css = """
+    timeline_html = "".join([f'<li style="margin-bottom:8px; display:flex; align-items:center;"><span style="color:#3b82f6; margin-right:10px;">➜</span>{t["text"]}</li>' for t in timeline_events])
+    
+    html_content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <meta charset="UTF-8">
+    <style>
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700;900&display=swap');
-        body { font-family: 'Noto Sans TC', 'Microsoft JhengHei', sans-serif; background-color: #f1f5f9; margin: 0; padding: 20px; box-sizing: border-box; }
-        .card { background: white; border-radius: 16px; padding: 20px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1); margin-bottom: 0; }
-        .title { font-size: 14px; color: #64748b; font-weight: 700; margin-bottom: 8px; }
-        .val { font-size: 22px; font-weight: 900; color: #0f172a; }
-        .sub { font-size: 13px; color: #94a3b8; margin-top: 4px; }
-    """
-
-    # 圖卡 1：頂部 Header 與 總資產摘要 (高對比度)
-    html_1 = f"""
-    <!DOCTYPE html><html><head><meta charset="UTF-8"><style>{base_css}
-        body {{ background-color: #0f172a; padding: 20px; }}
-        .header {{ color: white; margin-bottom: 20px; }}
+        body {{ font-family: 'Noto Sans TC', sans-serif; background-color: #f1f5f9; margin: 0; padding: 20px; box-sizing: border-box; width: 540px; }}
+        .header {{ background-color: #0f172a; color: white; padding: 25px; border-radius: 16px 16px 0 0; margin-bottom: -10px; }}
         .header h1 {{ margin: 0; font-size: 26px; font-weight: 900; }}
         .header p {{ margin: 5px 0 0 0; font-size: 14px; color: #94a3b8; }}
-        .summary-box {{ background: linear-gradient(135deg, #f97316, #ea580c); color: white; padding: 25px; border-radius: 16px; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); }}
-        .s-val {{ font-size: 28px; font-weight: 900; margin: 10px 0; }}
+        
+        .summary-box {{ background: linear-gradient(135deg, #f97316, #ea580c); color: white; padding: 25px; border-radius: 16px; position: relative; z-index: 10; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); margin-bottom: 20px; }}
+        .s-val {{ font-size: 32px; font-weight: 900; margin: 10px 0; }}
         .s-diff {{ font-size: 16px; background: rgba(0,0,0,0.2); display: inline-block; padding: 5px 12px; border-radius: 20px; font-weight: 700; }}
-    </style></head><body>
+        
+        .section-title {{ font-size: 18px; font-weight: 900; color: #334155; margin: 25px 0 15px 5px; border-left: 4px solid #3b82f6; padding-left: 10px; }}
+        .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }}
+        .card {{ background: white; border-radius: 12px; padding: 15px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; }}
+        
+        .c-title {{ font-size: 13px; color: #64748b; font-weight: 700; margin-bottom: 6px; }}
+        .c-val {{ font-size: 20px; font-weight: 900; color: #0f172a; }}
+        .c-sub {{ font-size: 12px; color: #94a3b8; margin-top: 4px; font-weight: 500; display: block; }}
+        
+        .badge-container {{ display: flex; flex-wrap: wrap; gap: 8px; }}
+        .badge {{ background: #f8fafc; padding: 8px 12px; border-radius: 8px; font-weight: 700; color: #475569; font-size: 14px; border: 1px solid #e2e8f0; width: 45%; }}
+        
+        .chart-card {{ background: white; border-radius: 12px; padding: 15px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); text-align: center; margin-bottom: 15px; }}
+        .chart-card img {{ width: 100%; border-radius: 8px; }}
+    </style>
+    </head>
+    <body>
+        <!-- Header -->
         <div class="header">
             <h1>{header_text}</h1>
             <p>{time_str}</p>
         </div>
+        
+        <!-- Summary -->
         <div class="summary-box">
             <div style="font-size: 16px; font-weight:700;">💰 總資產：${total_asset:,.0f}</div>
             <div class="s-val">🟢 淨額：${net_asset:,.0f}</div>
             <div class="s-diff">{emoji} {daily_str_plain}</div>
         </div>
-    </body></html>
-    """
 
-    # 圖卡 2：資產明細與風險網格 (清晰的白底卡片)
-    html_2 = f"""
-    <!DOCTYPE html><html><head><meta charset="UTF-8"><style>{base_css}
-        .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
-    </style></head><body>
+        <!-- 區塊 1: 資產與現金 (補回 基金、台幣、美金) -->
+        <div class="section-title">📂 資產與現金明細</div>
         <div class="grid">
-            <div class="card"><div class="title">🇹🇼 台股現值</div><div class="val">${tw_stock_value:,.0f}</div><div class="sub">佔比 {tw_free_pct:.1f}%</div></div>
-            <div class="card"><div class="title">🇺🇸 美股現值</div><div class="val">${us_stock_value_twd:,.0f}</div><div class="sub">佔比 {us_pct:.1f}%</div></div>
-            <div class="card"><div class="title">💸 質押借款</div><div class="val" style="color:#3b82f6">-${total_debt_with_interest:,.0f}</div><div class="sub">負債比 {debt_ratio:.1f}%</div></div>
-            <div class="card"><div class="title">🦾 維持率</div><div class="val" style="color:{ratio_color}">{maintenance_ratio:.1f}%</div><div class="sub">{ratio_status}</div></div>
-            <div class="card"><div class="title">⚙️ 曝險 Beta</div><div class="val">{effective_leverage:.2f}x</div><div class="sub">安全邊界 {half_kelly_limit:.2f}x</div></div>
-            <div class="card"><div class="title">🎯 千萬進度</div><div class="val">{progress_pct:.1f}%</div><div class="sub" style="letter-spacing:2px; font-family:monospace; color:#3b82f6;">{bar_str}</div></div>
+            <div class="card"><div class="c-title">🇹🇼 台股現值</div><div class="c-val">${tw_stock_value:,.0f}</div><span class="c-sub">佔比 {tw_free_pct:.1f}%</span></div>
+            <div class="card"><div class="c-title">🇺🇸 美股現值</div><div class="c-val">${us_stock_value_twd:,.0f}</div><span class="c-sub">約 ${us_stock_value_usd:,.0f} USD</span></div>
+            <div class="card"><div class="c-title">🐣 基金現值</div><div class="c-val">${fund_value:,.0f}</div></div>
+            <div class="card"><div class="c-title">🐔 TSMC 曝險</div><div class="c-val">{tsmc_pct:.1f}%</div></div>
+            <div class="card"><div class="c-title">💵 現金 (TWD)</div><div class="c-val">${cash_twd:,.0f}</div></div>
+            <div class="card"><div class="c-title">💴 現金 (USD)</div><div class="c-val">${cash_usd * usd_rate:,.0f}</div><span class="c-sub">約 ${cash_usd:,.0f} USD</span></div>
         </div>
-    </body></html>
-    """
 
-    # 圖卡 3：歷史與預測
-    timeline_html = "".join([f'<li style="margin-bottom:8px; display:flex; align-items:center;"><span style="color:#3b82f6; margin-right:10px;">➜</span>{t["text"]}</li>' for t in timeline_events])
-    html_3 = f"""
-    <!DOCTYPE html><html><head><meta charset="UTF-8"><style>{base_css}
-        .card {{ margin-bottom: 16px; }}
-        ul {{ padding: 0; margin: 0; list-style: none; font-size: 15px; color: #1e293b; font-weight: 500; }}
-        .badge {{ background: #f1f5f9; padding: 6px 12px; border-radius: 8px; display: inline-block; margin: 4px 4px 0 0; font-weight: 700; color: #475569; font-size: 14px; border: 1px solid #e2e8f0;}}
-    </style></head><body>
-        <div class="card">
-            <div class="title">🚀 歷史增率</div>
-            <div class="badge">1月: {m1_str}</div> <div class="badge">1季: {m3_str}</div><br>
-            <div class="badge">1年: {y1_str}</div> <div class="badge">3年: {y3_str}</div>
+        <!-- 區塊 2: 風險與槓桿 (補回 利息金額、凱利容量) -->
+        <div class="section-title">🛡️ 風險與槓桿監控</div>
+        <div class="grid">
+            <div class="card"><div class="c-title">💸 質押借款</div><div class="c-val" style="color:#ef4444">-${total_debt_with_interest:,.0f}</div><span class="c-sub">內含利息 ${accumulated_interest:,.0f}</span></div>
+            <div class="card"><div class="c-title">🦾 維持率</div><div class="c-val" style="color:{ratio_color}">{maintenance_ratio:.1f}%</div><span class="c-sub">{ratio_status}</span></div>
+            <div class="card"><div class="c-title">⚙️ 曝險 Beta</div><div class="c-val">{effective_leverage:.2f}x</div><span class="c-sub">安全邊界 {half_kelly_limit:.2f}x</span></div>
+            <div class="card"><div class="c-title">⚖️ 凱利安全容量</div><div class="c-val">{kelly_utilization:.1f}%</div><span class="c-sub">狀態 {kelly_status}</span></div>
         </div>
-        <div class="card">
-            <div class="title">⏳ 目標推算</div>
-            <ul>{timeline_html}</ul>
-        </div>
-    </body></html>
-    """
 
-    # 圖卡 4：圖表組合
-    html_4 = f"""
-    <!DOCTYPE html><html><head><meta charset="UTF-8"><style>{base_css}
-        .card {{ padding: 10px; display: flex; flex-direction: column; align-items: center; gap: 15px; }}
-        img {{ width: 100%; border-radius: 12px; }}
-    </style></head><body>
-        <div class="card">
-            <img src="{line_url}">
-            <img src="{pie_url}">
+        <!-- 區塊 3: 歷史與目標 -->
+        <div class="section-title">🚀 成長軌跡與目標</div>
+        <div class="card" style="margin-bottom:12px;">
+            <div class="c-title">📈 歷史增率</div>
+            <div class="badge-container">
+                <div class="badge">1月: {m1_str}</div> <div class="badge">1季: {m3_str}</div>
+                <div class="badge">1年: {y1_str}</div> <div class="badge">3年: {y3_str}</div>
+            </div>
         </div>
-    </body></html>
+        <div class="card" style="margin-bottom:20px;">
+            <div class="c-title">🎯 千萬進度 ({progress_pct:.1f}%)</div>
+            <div style="font-family:monospace; color:#3b82f6; font-size:16px; margin: 5px 0 10px 0;">{bar_str}</div>
+            <ul style="padding:0; margin:0; list-style:none; font-size:14px; font-weight:500; color:#1e293b;">{timeline_html}</ul>
+        </div>
+
+        <!-- 區塊 4: 圖表分析 -->
+        <div class="section-title">📊 視覺化分析</div>
+        <div class="chart-card"><img src="{line_url}"></div>
+        <div class="chart-card"><img src="{pie_url}"></div>
+    </body>
+    </html>
     """
 
     # ==========================================
-    # 6. 使用 html2image 生成圖片
+    # 6. 單次截圖與 Telegram 發送 (還原為傳送單張圖片)
     # ==========================================
+    with open('dashboard.html', 'w', encoding='utf-8') as f: 
+        f.write(html_content)
+
     hti = Html2Image(custom_flags=['--no-sandbox', '--disable-gpu', '--hide-scrollbars'])
     
-    # 分別寫入檔案
-    with open('t1.html', 'w', encoding='utf-8') as f: f.write(html_1)
-    with open('t2.html', 'w', encoding='utf-8') as f: f.write(html_2)
-    with open('t3.html', 'w', encoding='utf-8') as f: f.write(html_3)
-    with open('t4.html', 'w', encoding='utf-8') as f: f.write(html_4)
-
-    # 雙重相容機制：安全調用 screenshot (舊版與新版皆通用的底層寫法)
     try:
-        hti.screenshot(html_file='t1.html', save_as='img1.png', size=(540, 230))
-        hti.screenshot(html_file='t2.html', save_as='img2.png', size=(540, 340))
-        hti.screenshot(html_file='t3.html', save_as='img3.png', size=(540, 310))
-        hti.screenshot(html_file='t4.html', save_as='img4.png', size=(540, 680))
+        # 高度設定 1750px，確保能完整包覆所有新增的卡片與圖表
+        hti.screenshot(html_file='dashboard.html', save_as='dashboard.png', size=(540, 1750))
     except Exception as e:
-        print("截圖發生例外狀況:", e)
-        # 若仍有錯誤，至少傳送純文字備案
+        print("新版 screenshot 失敗，嘗試回退:", e)
         pass
 
-    # ==========================================
-    # 7. Telegram MediaGroup (相簿) 發送
-    # ==========================================
-    media_group = [
-        {"type": "photo", "media": "attach://img1.png"},
-        {"type": "photo", "media": "attach://img2.png"},
-        {"type": "photo", "media": "attach://img3.png"},
-        {"type": "photo", "media": "attach://img4.png"}
-    ]
-    
-    files = {
-        "img1.png": open("img1.png", "rb"),
-        "img2.png": open("img2.png", "rb"),
-        "img3.png": open("img3.png", "rb"),
-        "img4.png": open("img4.png", "rb")
-    }
-
-    # 1. 發送 4 張圖片組合的相簿
-    mg_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMediaGroup"
-    requests.post(mg_url, data={"chat_id": TELEGRAM_CHAT_ID, "media": json.dumps(media_group)}, files=files)
-
-    # 2. 隨後發送帶有按鈕的獨立訊息
     keyboard = {
         "inline_keyboard": [
             [{"text": "📝 Growth 填寫表單", "url": "https://forms.gle/9ZEJawwNRGfiXQiV8"}],
             [{"text": "📈 Skynet 儀表板", "url": "https://5972x4.csb.app/"}]
         ]
     }
-    msg_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(msg_url, data={
-        "chat_id": TELEGRAM_CHAT_ID, 
-        "text": "✅ <b>日報結算完畢！</b>\n已為您送上最新的 Growth 儀表板。點擊下方按鈕進行操作：",
-        "parse_mode": "HTML",
-        "reply_markup": json.dumps(keyboard) 
-    })
+    
+    msg_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    with open("dashboard.png", "rb") as f:
+        requests.post(msg_url, data={
+            "chat_id": TELEGRAM_CHAT_ID, 
+            "caption": "✅ **日報結算完畢！**\n已為您送上最新的完整版 Growth 儀表板。",
+            "parse_mode": "Markdown",
+            "reply_markup": json.dumps(keyboard) 
+        }, files={"photo": f})
 
 if __name__ == "__main__":
     main()
