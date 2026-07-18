@@ -76,7 +76,6 @@ def calculate_current_assets():
 
     data_rows.sort(key=parse_date)
 
-    # 加入 History 陣列來紀錄歷史水位
     inventory = {
         "台股": {}, "美股": {}, "基金": {}, 
         "現金_TWD": {"TWD": 0.0}, "現金_USD": {"USD": 0.0},
@@ -98,7 +97,7 @@ def calculate_current_assets():
     ]
     
     for row in data_rows:
-        row_date = parse_date(row).date() # 抓取該筆紀錄的真實日期
+        row_date = parse_date(row).date()
         raw_cells = [str(c).strip() for c in row if str(c).strip() != ""]
         if not raw_cells: continue
         
@@ -123,7 +122,6 @@ def calculate_current_assets():
         
         for cell in cells:
             c_upper = cell.upper()
-            # 支援辨識「利率」
             if any(x in cell for x in ["台股", "美股", "基金", "現金", "質押", "負債", "擔保", "利率"]):
                 asset_type = cell
             elif any(x in cell for x in ["買入", "存入", "賣出", "提領", "取代", "覆蓋", "更新"]):
@@ -183,7 +181,6 @@ def calculate_current_assets():
         elif "取代" in mode or "覆蓋" in mode or "更新" in mode:
             inventory[asset_type][symbol] = amount
 
-        # 紀錄歷史變更軌跡，供逐日計息使用
         if asset_type == "質押負債":
             inventory["質押負債"]["History"].append((row_date, inventory["質押負債"]["Current_Debt"]))
         elif asset_type == "質押利率":
@@ -192,18 +189,14 @@ def calculate_current_assets():
     return inventory, history_sheet
 
 # ==========================================
-# 3. 金融市場報價與 QuickChart 繪圖模組
+# 3. 金融市場報價與 QuickChart 繪圖模組 (保持不變)
 # ==========================================
 def get_usd_twd_rate():
-    try:
-        return yf.Ticker("TWD=X").history(period="1d")['Close'].iloc[-1]
-    except:
-        return 32.3
+    try: return yf.Ticker("TWD=X").history(period="1d")['Close'].iloc[-1]
+    except: return 32.3
 def get_us_stock_price(symbol):
-    try:
-        return yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1]
-    except:
-        return 0
+    try: return yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1]
+    except: return 0
 def get_tw_stock_price(symbol):
     url = "https://api.finmindtrade.com/api/v4/data"
     start_date = (datetime.date.today() - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
@@ -211,8 +204,7 @@ def get_tw_stock_price(symbol):
     try:
         data = requests.get(url, params=parameter).json()
         return data["data"][-1]["close"] if data["msg"] == "success" else 0
-    except:
-        return 0
+    except: return 0
 def generate_pie_chart(tw_free_val, debt_val, us_val):
     chart_config = {
         "type": "outlabeledPie",
@@ -235,14 +227,12 @@ def generate_pie_chart(tw_free_val, debt_val, us_val):
         
 def generate_line_chart(history_records, today_str, total_asset, net_asset):
     daily_data = {}
-    
     for row in history_records:
         date_str = str(row.get('Date', ''))
         if not date_str: continue
         d_short = date_str[-5:]
         total = float(str(row.get('Total_Asset', 0)).replace(',', ''))
         net = float(str(row.get('Net_Asset', 0)).replace(',', ''))
-        
         if total > 0:
             if d_short not in daily_data:
                 daily_data[d_short] = {'total': [], 'net': []}
@@ -255,13 +245,10 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
     daily_data[today_str]['net'].append(net_asset)
     
     unique_dates = list(daily_data.keys())
-    
-    # === 1. 計算資產 20MA 月線 ===
     historical_totals = [daily_data[d]['total'][-1] for d in unique_dates]
     historical_nets = [daily_data[d]['net'][-1] for d in unique_dates]
     
-    total_ma_map = {}
-    net_ma_map = {}
+    total_ma_map, net_ma_map = {}, {}
     for i, d in enumerate(unique_dates):
         start = max(0, i - 19)
         t_win = historical_totals[start:i+1]
@@ -269,13 +256,10 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
         total_ma_map[d] = sum(t_win) / len(t_win)
         net_ma_map[d] = sum(n_win) / len(n_win)
     
-    # === 2. 抓取大盤 (改抓 0050.TW，yfinance 會自動還原權息，完美等同含息報酬指數) ===
     twii_map = {}
     try:
         twii_hist = yf.Ticker("0050.TW").history(period="3mo")
-        if twii_hist.empty: # 雙重防呆：如果 0050 也出錯，退回抓大盤
-            twii_hist = yf.Ticker("^TWII").history(period="3mo")
-            
+        if twii_hist.empty: twii_hist = yf.Ticker("^TWII").history(period="3mo")
         twii_hist['20MA'] = twii_hist['Close'].rolling(window=20).mean()
         for idx, row in twii_hist.iterrows():
             if not math.isnan(row['20MA']):
@@ -287,15 +271,13 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
     dates, total_data, net_data = [], [], []
     total_20ma_data, net_20ma_data, twii_ma_data = [], [], []
     
-    # 初始化防呆：避免第一天是假日導致抓不到初始值
     last_twii_ma = None
     if twii_map:
         for d in recent_days:
             if d in twii_map:
                 last_twii_ma = twii_map[d]
                 break
-        if not last_twii_ma:
-            last_twii_ma = list(twii_map.values())[-1]
+        if not last_twii_ma: last_twii_ma = list(twii_map.values())[-1]
             
     for d in recent_days:
         dates.append(d)
@@ -303,20 +285,12 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
         net_data.append(round(daily_data[d]['net'][-1], 2))
         total_20ma_data.append(round(total_ma_map[d], 2))
         net_20ma_data.append(round(net_ma_map[d], 2))
-        
-        if d in twii_map:
-            last_twii_ma = twii_map[d]
-            
+        if d in twii_map: last_twii_ma = twii_map[d]
         twii_ma_data.append(last_twii_ma)
         
-    # === 3. 起點錨定 (Normalization) 解決紫線跳動問題 ===
-    normalized_twii_ma = []
-    base_net = None
-    base_twii = None
-    
+    normalized_twii_ma, base_net, base_twii = [], None, None
     for i in range(len(dates)):
         if net_data[i] is not None and twii_ma_data[i] is not None:
-            # 強制將紫線的起點，錨定在淨資產紅線的 95% 高度
             base_net = net_data[i] * 0.95 
             base_twii = twii_ma_data[i]
             break
@@ -324,27 +298,20 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
     if base_net and base_twii:
         scale_ratio = base_net / base_twii
         for val in twii_ma_data:
-            if val is not None:
-                normalized_twii_ma.append(round(val * scale_ratio, 2))
-            else:
-                normalized_twii_ma.append(None)
+            if val is not None: normalized_twii_ma.append(round(val * scale_ratio, 2))
+            else: normalized_twii_ma.append(None)
     else:
         normalized_twii_ma = [None] * len(twii_ma_data)
         
-    # === 4. 設定統一的 主 Y 軸範圍 ===
     all_vals = total_data + net_data + [x for x in normalized_twii_ma if x is not None]
     if all_vals:
-        min_val = min(all_vals)
-        max_val = max(all_vals)
+        min_val, max_val = min(all_vals), max(all_vals)
         y_min = math.floor(min_val / 200000) * 200000
         y_max = math.ceil(max_val / 200000) * 200000
-        if y_min == y_max:
-            y_min -= 200000
-            y_max += 200000
+        if y_min == y_max: y_min -= 200000; y_max += 200000
     else:
         y_min, y_max = 0, 1000000
     
-    # === 5. QuickChart 設定組合 ===
     chart_config = {
         "type": "line",
         "data": {
@@ -359,29 +326,22 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
         },
         "options": {
             "title": {"display": True, "text": "近期資產軌跡 (含月線 20MA)"},
-            "scales": {
-                "yAxes": [{
-                    "ticks": {
-                        "min": y_min,
-                        "max": y_max,
-                        "stepSize": 200000
-                    }
-                }]
-            }
+            "scales": {"yAxes": [{"ticks": {"min": y_min, "max": y_max, "stepSize": 200000}}]}
         }
     }
     return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=400&h=250"
+
 # ==========================================
-# 4. 核心結算與通知發送主程序
+# 4. 核心結算與通知發送主程序 (加入Telegram按鈕與HTML排版)
 # ==========================================
 def main():
     tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
     today_str = tw_now.strftime("%m-%d")
     
     if 12 <= tw_now.hour <= 20:
-        title_header = f"🇹🇼 PRStK | Growth（{today_str}）"
+        title_header = f"🇹🇼 <b>PRStK | Growth（{today_str}）</b>"
     else:
-        title_header = f"🇺🇲 PRStK | Growth（{today_str}）"
+        title_header = f"🇺🇲 <b>PRStK | Growth（{today_str}）</b>"
         
     inventory, history_sheet = calculate_current_assets()
     try: history_records = history_sheet.get_all_records()
@@ -427,7 +387,6 @@ def main():
     us_stock_value_twd = us_stock_value_usd * usd_rate
     total_cash_twd = cash_twd + (cash_usd * usd_rate)
     
-    # === 動態逐日計息引擎 ===
     debt = inventory["質押負債"].get("Current_Debt", 0)
     debt_history = inventory["質押負債"].get("History", [])
     rate_history = inventory["質押利率"].get("History", [])
@@ -449,7 +408,6 @@ def main():
         current_date = loan_start_date + datetime.timedelta(days=i)
         daily_debt = get_value_on_date(debt_history, current_date, initial_debt)
         daily_annual_rate = get_value_on_date(rate_history, current_date, 3.3) 
-        
         daily_rate = (daily_annual_rate / 100) / 365
         accumulated_interest += daily_debt * daily_rate
 
@@ -457,35 +415,25 @@ def main():
     total_asset = tw_stock_value + us_stock_value_twd + total_cash_twd + fund_value
     net_asset = total_asset - total_debt_with_interest
     
-    # 計算真正投入市場的曝險部位 (排除現金)
     invested_assets = tw_stock_value + us_stock_value_twd + fund_value
-    # 終極 Beta 槓桿率：(投資部位 + 正2額外曝險) / 淨自有本金
     effective_leverage = ((invested_assets + leveraged_etf_value) / net_asset) if net_asset > 0 else 0
-     # === 半凱利 (Half-Kelly) 邊界計算 ===
-    expected_excess_return = 0.08  # 預期超額年化報酬
-    market_volatility = 0.18       # 市場年化波動度
+    
+    expected_excess_return = 0.08  
+    market_volatility = 0.18       
     half_kelly_limit = expected_excess_return / (2 * (market_volatility ** 2))
     
-    # 計算曝險容量使用率與燈號
     kelly_utilization = (effective_leverage / half_kelly_limit) * 100 if half_kelly_limit > 0 else 0
-    if kelly_utilization > 100:
-        kelly_status = "🔴"
-    elif kelly_utilization > 80:
-        kelly_status = "🟡"
-    else:
-        kelly_status = "🟢"
+    if kelly_utilization > 100: kelly_status = "🔴"
+    elif kelly_utilization > 80: kelly_status = "🟡"
+    else: kelly_status = "🟢"
     debt_ratio = ((total_debt_with_interest / total_asset) * 100) if total_asset > 0 else 0
     
     if total_debt_with_interest > 0:
         maintenance_ratio = (pledged_value / total_debt_with_interest) * 100
-        if maintenance_ratio >= 190:
-            ratio_status = "安全 🟢"
-        elif maintenance_ratio >= 150:
-            ratio_status = "注意 🟡"
-        elif maintenance_ratio >= 130:
-            ratio_status = "警戒 🔴"
-        else:
-            ratio_status = "危險 🆘 (斷頭風險)"
+        if maintenance_ratio >= 190: ratio_status = "安全 🟢"
+        elif maintenance_ratio >= 150: ratio_status = "注意 🟡"
+        elif maintenance_ratio >= 130: ratio_status = "警戒 🔴"
+        else: ratio_status = "危險 🆘 (斷頭風險)"
     else:
         maintenance_ratio = 0
         ratio_status = "無借款 ✅"
@@ -508,7 +456,7 @@ def main():
     daily_pct = (daily_diff / yesterday_net * 100) if yesterday_net else 0
     sign = "+" if daily_diff >= 0 else ""
     emoji = "📈" if daily_diff >= 0 else "📉"
-    daily_str = f"⚡ 單日變化：{emoji}{sign}{daily_pct:.1f}% ({sign}${daily_diff:,.0f})" if yesterday_net else "⚡ 單日變化：-- (首日累積數據中)"
+    daily_str = f"⚡ <b>單日變化：</b>{emoji}{sign}{daily_pct:.1f}% ({sign}${daily_diff:,.0f})" if yesterday_net else "⚡ <b>單日變化：</b>-- (首日累積數據中)"
 
     progress_pct = (net_asset / 10000000) * 100 if net_asset > 0 else 0
     bar_blocks = max(0, min(10, int(progress_pct / 10)))
@@ -523,7 +471,6 @@ def main():
     pie_url = generate_pie_chart(tw_free_value, total_debt_with_interest, us_stock_value_twd)
     line_url = generate_line_chart(history_records, today_str, total_asset, net_asset)
 
-    # === 1. 建立以「真實日期」為基準的歷史字典 ===
     daily_net_history = {}
     for row in history_records:
         date_str = str(row.get('Date', ''))[:10]  
@@ -535,11 +482,8 @@ def main():
     daily_net_history[tw_now_date_str] = net_asset
     sorted_dates = sorted(daily_net_history.keys())
 
-    # === 2. 歷史增率文字產生器 ===
     def get_growth_str(target_days, sim_text):
-        if not sorted_dates:
-            return f"{sim_text}(模)"
-            
+        if not sorted_dates: return f"{sim_text}(模)"
         target_date_obj = tw_now.date() - datetime.timedelta(days=target_days)
         closest_date = None
         min_diff = 9999
@@ -550,8 +494,7 @@ def main():
                 if diff < min_diff:
                     min_diff = diff
                     closest_date = d_str
-            except:
-                continue
+            except: continue
                 
         tolerance = max(7, target_days * 0.2) 
         if closest_date and min_diff <= tolerance:
@@ -567,9 +510,8 @@ def main():
     y1_str = get_growth_str(365, "+83.1%")
     y3_str = get_growth_str(1095, "+195.7%")
 
-    growth_text = f"🔺 近一月:{m1_str} | 近一季:{m3_str}\n🔺 近一年:{y1_str} | 近三年:{y3_str}"
+    growth_text = f"🔺 近一月: {m1_str} | 近一季: {m3_str}\n🔺 近一年: {y1_str} | 近三年: {y3_str}"
 
-    # === 3. 模型預測增率計算優化 ===
     if len(sorted_dates) >= 2:
         first_date_str = sorted_dates[0]
         first_net = daily_net_history[first_date_str]
@@ -587,16 +529,13 @@ def main():
     calc_rate = max(monthly_growth_rate, 0.015) 
     safe_net_asset = max(net_asset, 1)          
     
-    # === 時間軸推算 (自動排序) ===
     targets = [
         {"name": "850萬", "value": 8500000},
         {"name": "1000萬", "value": 10000000},
         {"name": "100萬鎂", "value": 1000000 * usd_rate}
     ]
     
-    timeline_events = [
-        {"year": 2026, "month": 10, "text": "- 2026-10: 🎖️ 成功嶺退伍日"}
-    ]
+    timeline_events = [{"year": 2026, "month": 10, "text": "- 2026-10: 🎖️ 成功嶺退伍日"}]
     
     for t in targets:
         target_val = t["value"]
@@ -613,51 +552,75 @@ def main():
     timeline_events.sort(key=lambda x: (x["year"], x["month"]))
     timeline_text = "\n".join([event["text"] for event in timeline_events])
 
-    msg = f"""
+    # === 重構訊息格式 (支援 HTML 排版，讓視覺更像圖卡) ===
+    # 提醒：Telegram 圖片 caption 限制 1024 字元，因此我們將最長的主文獨立發送
+    msg_html = f"""
 {title_header}
-======================
-📊【 資產總覽 】
-💰 總資產 (Total)：${total_asset:,.0f}
-🟢 淨資產 (Net)：${net_asset:,.0f}
+──────────────────
+📊 <b>【 資產總覽 】</b>
+💰 總資產 (Total)：<code>${total_asset:,.0f}</code>
+🟢 淨資產 (Net)：<code>${net_asset:,.0f}</code>
 {daily_str}
-======================
-📂【 資產明細 】
-🇹🇼 台股現值：${tw_stock_value:,.0f}
-🇺🇸 美股現值：${us_stock_value_twd:,.0f} (約 ${us_stock_value_usd:,.0f} USD)
-🐣 基金現值：${fund_value:,.0f}
-💵 現金(TWD)：${cash_twd:,.0f}
-💴 現金(USD)：${cash_usd * usd_rate:,.0f} (約 ${cash_usd:,.0f} USD)
-💸 質押借款：-${total_debt_with_interest:,.0f} (內含利息 ${accumulated_interest:,.0f})
-======================
-📑【 資產板塊 】
-🇹🇼 現貨台股：{tw_free_pct:.1f}%
-🦆 借款佔比：{debt_pct:.1f}%
-🇺🇲 現貨美股：{us_pct:.1f}%
-🐔 TSMC Exposure：{tsmc_pct:.1f}% 
-======================
-🛡️【 風險監控 】
-⚙️ 總資產Beta：{effective_leverage:.2f} 倍 (含正2&質押曝險)
-⚖️ 凱利安全邊界：{half_kelly_limit:.2f} 倍 (容量: {kelly_utilization:.1f}% {kelly_status})
-🕸️ 資產負債比：{debt_ratio:.1f}%
-🦾 質押維持率：{maintenance_ratio:.1f}% (狀態：{ratio_status})
-======================
-🚀【 歷史增率 】
+
+📂 <b>【 資產明細 】</b>
+🇹🇼 台股現值：<code>${tw_stock_value:,.0f}</code>
+🇺🇸 美股現值：<code>${us_stock_value_twd:,.0f}</code> (約 ${us_stock_value_usd:,.0f} USD)
+🐣 基金現值：<code>${fund_value:,.0f}</code>
+💵 現金(TWD)：<code>${cash_twd:,.0f}</code>
+💴 現金(USD)：<code>${cash_usd * usd_rate:,.0f}</code> (約 ${cash_usd:,.0f} USD)
+💸 質押借款：<code>-${total_debt_with_interest:,.0f}</code> (內含利息 ${accumulated_interest:,.0f})
+
+📑 <b>【 資產板塊 】</b>
+🇹🇼 現貨台股：<code>{tw_free_pct:.1f}%</code>
+🦆 借款佔比：<code>{debt_pct:.1f}%</code>
+🇺🇲 現貨美股：<code>{us_pct:.1f}%</code>
+🐔 TSMC 曝險：<code>{tsmc_pct:.1f}%</code> 
+
+🛡️ <b>【 風險監控 】</b>
+⚙️ 總資產Beta：<code>{effective_leverage:.2f} 倍</code>
+⚖️ 凱利安全邊界：<code>{half_kelly_limit:.2f} 倍</code> (容量: {kelly_utilization:.1f}% {kelly_status})
+🕸️ 資產負債比：<code>{debt_ratio:.1f}%</code>
+🦾 質押維持率：<code>{maintenance_ratio:.1f}%</code> (狀態：{ratio_status})
+
+🚀 <b>【 歷史增率 】</b>
 {growth_text}
-======================
-🎯【 模型預測 】
-千萬目標達成率：{progress_pct:.1f}%
- [{bar}] {progress_pct:.1f}%
-時間軸推算
+
+🎯 <b>【 模型預測 】</b>
+千萬目標達成率：<code>{progress_pct:.1f}%</code>
+<code>[{bar}]</code>
+<b>時間軸推算：</b>
 {timeline_text}
-======================
-🔗 【 快速連結 】
-📝 Growth 表單：https://forms.gle/9ZEJawwNRGfiXQiV8
-📈 Skynet Monitoring：https://5972x4.csb.app/
 """
 
-    base_tg_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-    requests.post(base_tg_url, data={"chat_id": TELEGRAM_CHAT_ID, "photo": line_url})
-    requests.post(base_tg_url, data={"chat_id": TELEGRAM_CHAT_ID, "photo": pie_url, "caption": msg})
+    # === 建立 Inline Keyboard (互動式按鈕) ===
+    keyboard = {
+        "inline_keyboard": [
+            [
+                {"text": "📝 Growth 填寫表單", "url": "https://forms.gle/9ZEJawwNRGfiXQiV8"}
+            ],
+            [
+                {"text": "📈 Skynet 儀表板", "url": "https://5972x4.csb.app/"}
+            ]
+        ]
+    }
+
+    # === 發送順序調整 ===
+    base_tg_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/"
+    
+    # 1. 發送兩張統計圖 (使用 MediaGroup 以相簿形式發送，版面更簡潔)
+    media_group = [
+        {"type": "photo", "media": line_url},
+        {"type": "photo", "media": pie_url}
+    ]
+    requests.post(base_tg_url + "sendMediaGroup", json={"chat_id": TELEGRAM_CHAT_ID, "media": media_group})
+    
+    # 2. 發送排版過的數據主文與互動按鈕
+    requests.post(base_tg_url + "sendMessage", json={
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": msg_html,
+        "parse_mode": "HTML",
+        "reply_markup": keyboard
+    })
 
 if __name__ == "__main__":
     main()
