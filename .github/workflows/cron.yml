@@ -34,4 +34,3 @@ jobs:
           GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python main.py
-```
