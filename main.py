@@ -193,11 +193,27 @@ def calculate_current_assets():
 # 3. 金融市場報價與 QuickChart 繪圖模組
 # ==========================================
 def get_usd_twd_rate():
-    try: return yf.Ticker("TWD=X").history(period="1d")['Close'].iloc[-1]
-    except: return 32.3
+    try:
+        # 使用直接呼叫 API + 偽裝成 Chrome 瀏覽器，繞過 GitHub IP 封鎖
+        url = "https://query1.finance.yahoo.com/v8/finance/chart/TWD=X?interval=1d&range=1d"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        res = requests.get(url, headers=headers, timeout=5)
+        return float(res.json()['chart']['result'][0]['meta']['regularMarketPrice'])
+    except:
+        try: return yf.Ticker("TWD=X").history(period="1d")['Close'].iloc[-1]
+        except: return 32.5
+
 def get_us_stock_price(symbol):
-    try: return yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1]
-    except: return 0
+    try:
+        # 使用直接呼叫 API + 偽裝成 Chrome 瀏覽器
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        res = requests.get(url, headers=headers, timeout=5)
+        return float(res.json()['chart']['result'][0]['meta']['regularMarketPrice'])
+    except:
+        try: return yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1]
+        except: return 0
+
 def get_tw_stock_price(symbol):
     url = "https://api.finmindtrade.com/api/v4/data"
     start_date = (datetime.date.today() - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
