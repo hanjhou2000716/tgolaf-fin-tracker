@@ -511,7 +511,7 @@ def main():
     y1_str = get_growth_str(365, "+83.1%")
     y3_str = get_growth_str(1095, "+195.7%")
 
-    growth_text = f"🔺 近一月: {m1_str} | 近一季: {m3_str}\n🔺 近一年: {y1_str} | 近三年: {y3_str}"
+    growth_text = f"🔺 近一月: {m1_str} | 近一季: {m3_str}<br>🔺 近一年: {y1_str} | 近三年: {y3_str}"
 
     if len(sorted_dates) >= 2:
         first_date_str = sorted_dates[0]
@@ -553,10 +553,7 @@ def main():
     timeline_events.sort(key=lambda x: (x["year"], x["month"]))
     timeline_text = "<br>".join([event["text"] for event in timeline_events])
 
-    tw_color = "#ef4444" if daily_diff >= 0 else "#10b981"
-    tw_arrow = "▲" if daily_diff >= 0 else "▼"
     ratio_color = "#ef4444" if maintenance_ratio < 150 else "#10b981"
-    
     time_str = tw_now.strftime("%Y/%m/%d %H:%M CST")
     
     html_content = f"""
@@ -602,7 +599,6 @@ def main():
             
             .full-card {{ grid-column: 1 / -1; }}
             .text-up {{ color: #ef4444; }}
-            .text-down {{ color: #10b981; }}
             
             .chart-img {{ width: 100%; border-radius: 8px; margin-top: 10px; }}
         </style>
@@ -615,7 +611,7 @@ def main():
         <div class="container">
             <div class="summary-box">
                 總資產：${total_asset:,.0f}、淨資產：${net_asset:,.0f}<br>
-                單日變化：{daily_pct:.1f}% ({sign}${daily_diff:,.0f})，{growth_text.replace(chr(10), '，').replace('🔺 ', '')}
+                單日變化：{daily_pct:.1f}% ({sign}${daily_diff:,.0f})
             </div>
             
             <div class="grid">
@@ -647,9 +643,16 @@ def main():
                 <div class="card">
                     <div class="card-title">千萬目標達成率</div>
                     <div class="card-value">{progress_pct:.1f}%</div>
-                    <div class="card-sub">{bar}</div>
+                    <div class="card-sub" style="font-family: monospace;">{bar}</div>
                 </div>
                 
+                <div class="card full-card">
+                    <div class="card-title">歷史增率</div>
+                    <div class="card-sub" style="font-size:14px; color:#334155; line-height: 1.6;">
+                        {growth_text}
+                    </div>
+                </div>
+
                 <div class="card full-card">
                     <div class="card-title">時間軸推算</div>
                     <div class="card-sub" style="font-size:13px; color:#334155; line-height: 1.6;">
@@ -669,9 +672,13 @@ def main():
     """
 
     hti = Html2Image(custom_flags=['--no-sandbox', '--disable-gpu'])
-    # 設定截圖尺寸，寬度固定 500px，高度設定長一點讓他自己適應
     image_filename = 'dashboard.png'
-    hti.snapshot(html_str=html_content, save_as=image_filename, size=(500, 1150))
+    
+    # 雙重相容機制：先嘗試新版 snapshot，若沒有該屬性則降級使用舊版 screenshot
+    try:
+        hti.snapshot(html_str=html_content, save_as=image_filename, size=(500, 1250))
+    except AttributeError:
+        hti.screenshot(html_str=html_content, save_as=image_filename, size=(500, 1250))
 
     keyboard = {
         "inline_keyboard": [
@@ -693,7 +700,7 @@ def main():
                 "chat_id": TELEGRAM_CHAT_ID, 
                 "caption": f"✅ <b>日報結算完畢！</b>\n為您送上最新的 Growth 儀表板。",
                 "parse_mode": "HTML",
-                "reply_markup": json.dumps(keyboard) # 傳送檔案時按鈕必須轉為 JSON 字串
+                "reply_markup": json.dumps(keyboard) 
             },
             files={"photo": photo}
         )
