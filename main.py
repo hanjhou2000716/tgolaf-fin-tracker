@@ -190,7 +190,7 @@ def calculate_current_assets():
     return inventory, history_sheet
 
 # ==========================================
-# 3. 金融市場報價與 QuickChart 繪圖模組 (保持不變)
+# 3. 金融市場報價與 QuickChart 繪圖模組 (修復文字顯示問題)
 # ==========================================
 def get_usd_twd_rate():
     try: return yf.Ticker("TWD=X").history(period="1d")['Close'].iloc[-1]
@@ -206,17 +206,24 @@ def get_tw_stock_price(symbol):
         data = requests.get(url, params=parameter).json()
         return data["data"][-1]["close"] if data["msg"] == "success" else 0
     except: return 0
+
 def generate_pie_chart(tw_free_val, debt_val, us_val):
+    # 增加 format=png 和較大的尺寸以確保文字渲染
     chart_config = {
         "type": "outlabeledPie",
         "data": {
-            "labels": ["🇹🇼 現貨台股", "🦆 質押投資", "🇺🇸 現貨美股"],
+            "labels": ["台股現貨", "質押投資", "美股現貨"],
             "datasets": [{"backgroundColor": ["#36a2eb", "#ff6384", "#ffce56"], "data": [tw_free_val, debt_val, us_val]}]
         },
         "options": {
             "plugins": {
                 "legend": {"display": False},
-                "outlabels": {"text": "%l %p", "color": "white", "stretch": 35, "font": {"minSize": 12}}
+                "outlabels": {
+                    "text": "%l %p",
+                    "color": "white",
+                    "stretch": 30,
+                    "font": {"resizable": False, "minSize": 14, "maxSize": 18} # 強制設定字體大小
+                }
             }
         }
     }
@@ -224,7 +231,9 @@ def generate_pie_chart(tw_free_val, debt_val, us_val):
         chart_config["data"]["labels"] = ["尚無資產數據"]
         chart_config["data"]["datasets"][0]["data"] = [1]
         chart_config["data"]["datasets"][0]["backgroundColor"] = ["#cccccc"]
-    return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=400&h=250"
+    
+    chart_url = f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=600&h=400&format=png"
+    return chart_url
         
 def generate_line_chart(history_records, today_str, total_asset, net_asset):
     daily_data = {}
@@ -313,6 +322,7 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
     else:
         y_min, y_max = 0, 1000000
     
+    # 增加 format=png 和較大的尺寸以確保文字渲染
     chart_config = {
         "type": "line",
         "data": {
@@ -326,23 +336,52 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
             ]
         },
         "options": {
-            "title": {"display": True, "text": "近期資產軌跡 (含月線 20MA)"},
-            "scales": {"yAxes": [{"ticks": {"min": y_min, "max": y_max, "stepSize": 200000}}]}
+            "title": {
+                "display": True,
+                "text": "近期資產軌跡 (含月線 20MA)",
+                "fontSize": 18, # 加大標題
+                "fontColor": "#333"
+            },
+            "legend": {
+                "labels": {
+                    "fontSize": 14, # 加大圖例文字
+                    "fontColor": "#333"
+                }
+            },
+            "scales": {
+                "yAxes": [{
+                    "ticks": {
+                        "min": y_min, "max": y_max, "stepSize": 200000,
+                        "fontSize": 12, # 加大刻度文字
+                        "fontColor": "#666"
+                    }
+                }],
+                "xAxes": [{
+                    "ticks": {
+                        "fontSize": 12, # 加大刻度文字
+                        "fontColor": "#666"
+                    }
+                }]
+            }
         }
     }
-    return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=400&h=250"
+    chart_url = f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=800&h=500&format=png"
+    return chart_url
 
 # ==========================================
-# 4. 核心結算與通知發送主程序 (加入Telegram按鈕與HTML排版)
+# 4. 核心結算與通知發送主程序 (改為發送多張圖卡相簿)
 # ==========================================
 def main():
     tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
     today_str = tw_now.strftime("%m-%d")
+    time_str = tw_now.strftime("%Y/%m/%d %H:%M CST")
     
     if 12 <= tw_now.hour <= 20:
-        title_header = f"🇹🇼 <b>PRStK | Growth（{today_str}）</b>"
+        title_prefix = "🇹🇼 PRStK | Growth"
     else:
-        title_header = f"🇺🇲 <b>PRStK | Growth（{today_str}）</b>"
+        title_prefix = "🇺🇲 PRStK | Growth"
+        
+    title_full = f"{title_prefix}（{today_str}）"
         
     inventory, history_sheet = calculate_current_assets()
     try: history_records = history_sheet.get_all_records()
