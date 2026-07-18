@@ -1,9 +1,23 @@
- - name: Set up Python
+name: Tranquil Growth Tracker
+
+on:
+repository_dispatch:
+types: [trigger_update]
+workflow_dispatch:
+
+jobs:
+build:
+runs-on: ubuntu-latest
+steps:
+- name: Checkout Repository
+uses: actions/checkout@v3
+
+  - name: Set up Python
     uses: actions/setup-python@v4
     with:
       python-version: '3.10'
 
-  - name: Install System Fonts (解決中文亂碼)
+  - name: Install System Fonts
     run: |
       sudo apt-get update
       sudo apt-get install -y fonts-noto-cjk
