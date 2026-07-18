@@ -1,7 +1,7 @@
-requests
-gspread
-google-auth
-yfinance
+requests==2.31.0
+yfinance==0.2.40
+gspread==6.1.2
+google-auth==2.32.0
 finmind
 pandas
-html2image
+html2image==2.0.4 
