@@ -190,7 +190,7 @@ def calculate_current_assets():
     return inventory, history_sheet
 
 # ==========================================
-# 3. 金融市場報價與 QuickChart 繪圖模組 (保持不變)
+# 3. 金融市場報價與 QuickChart 繪圖模組
 # ==========================================
 def get_usd_twd_rate():
     try: return yf.Ticker("TWD=X").history(period="1d")['Close'].iloc[-1]
@@ -216,15 +216,16 @@ def generate_pie_chart(tw_free_val, debt_val, us_val):
         "options": {
             "plugins": {
                 "legend": {"display": False},
-                "outlabels": {"text": "%l %p", "color": "white", "stretch": 35, "font": {"minSize": 12}}
-            }
+                "outlabels": {"text": "%l %p", "color": "black", "stretch": 30, "font": {"minSize": 14, "weight": "bold"}}
+            },
+            "layout": {"padding": 20}
         }
     }
     if tw_free_val <= 0 and debt_val <= 0 and us_val <= 0:
         chart_config["data"]["labels"] = ["尚無資產數據"]
         chart_config["data"]["datasets"][0]["data"] = [1]
         chart_config["data"]["datasets"][0]["backgroundColor"] = ["#cccccc"]
-    return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=400&h=250"
+    return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=450&h=300&bkg=white"
         
 def generate_line_chart(history_records, today_str, total_asset, net_asset):
     daily_data = {}
@@ -326,23 +327,37 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
             ]
         },
         "options": {
-            "title": {"display": True, "text": "近期資產軌跡 (含月線 20MA)"},
-            "scales": {"yAxes": [{"ticks": {"min": y_min, "max": y_max, "stepSize": 200000}}]}
+            "title": {"display": True, "text": "近期資產軌跡 (含月線 20MA)", "fontColor": "black", "fontSize": 16},
+            "scales": {
+                "yAxes": [{"ticks": {"min": y_min, "max": y_max, "stepSize": 200000, "fontColor": "black"}}],
+                "xAxes": [{"ticks": {"fontColor": "black"}}]
+            },
+            "legend": {"labels": {"fontColor": "black"}}
         }
     }
-    return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=400&h=250"
+    return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=450&h=300&bkg=white"
 
 # ==========================================
-# 4. 核心結算與通知發送主程序 (加入Telegram按鈕與HTML排版)
+# 4. 核心結算與通知發送主程序 (更新：拆分為四張圖卡並解決中文字體問題)
 # ==========================================
 def main():
+    # 1. 嘗試導入 html2image，並檢查版本
+    try:
+        import html2image
+        print(f"🔍 html2image version: {html2image.__version__}")
+    except ImportError:
+        print("❌ html2image not installed.")
+        return
+    except Exception as e:
+        print(f"⚠️ Could not get html2image version: {e}")
+
     tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
     today_str = tw_now.strftime("%m-%d")
     
     if 12 <= tw_now.hour <= 20:
-        title_header = f"🇹🇼 <b>PRStK | Growth（{today_str}）</b>"
+        title_header = f"🇹🇼 PRStK | Growth（{today_str}）"
     else:
-        title_header = f"🇺🇲 <b>PRStK | Growth（{today_str}）</b>"
+        title_header = f"🇺🇲 PRStK | Growth（{today_str}）"
         
     inventory, history_sheet = calculate_current_assets()
     try: history_records = history_sheet.get_all_records()
@@ -457,7 +472,7 @@ def main():
     daily_pct = (daily_diff / yesterday_net * 100) if yesterday_net else 0
     sign = "+" if daily_diff >= 0 else ""
     emoji = "📈" if daily_diff >= 0 else "📉"
-    daily_str = f"⚡ <b>單日變化：</b>{emoji}{sign}{daily_pct:.1f}% ({sign}${daily_diff:,.0f})" if yesterday_net else "⚡ <b>單日變化：</b>-- (首日累積數據中)"
+    daily_str = f"{emoji} {sign}{daily_pct:.1f}% ({sign}${daily_diff:,.0f})" if yesterday_net else "--"
 
     progress_pct = (net_asset / 10000000) * 100 if net_asset > 0 else 0
     bar_blocks = max(0, min(10, int(progress_pct / 10)))
@@ -511,7 +526,11 @@ def main():
     y1_str = get_growth_str(365, "+83.1%")
     y3_str = get_growth_str(1095, "+195.7%")
 
-    growth_text = f"🔺 近一月: {m1_str} | 近一季: {m3_str}<br>🔺 近一年: {y1_str} | 近三年: {y3_str}"
+    growth_rows = [
+        f"<tr><td>近一月</td><td>{m1_str}</td><td>近一季</td><td>{m3_str}</td></tr>",
+        f"<tr><td>近一年</td><td>{y1_str}</td><td>近三年</td><td>{y3_str}</td></tr>"
+    ]
+    growth_html = "".join(growth_rows)
 
     if len(sorted_dates) >= 2:
         first_date_str = sorted_dates[0]
@@ -536,174 +555,188 @@ def main():
         {"name": "100萬鎂", "value": 1000000 * usd_rate}
     ]
     
-    timeline_events = [{"year": 2026, "month": 10, "text": "- 2026-10: 🎖️ 成功嶺退伍日"}]
+    timeline_events = [{"year": 2026, "month": 10, "text": "2026-10: 🎖️ 成功嶺退伍日"}]
     
     for t in targets:
         target_val = t["value"]
         target_name = t["name"]
         if safe_net_asset >= target_val:
-            timeline_events.append({"year": 0, "month": 0, "text": f"- 已達標: {target_name} ✅"})
+            timeline_events.append({"year": 0, "month": 0, "text": f"已達標: {target_name} ✅"})
         else:
             months_needed = math.log(target_val / safe_net_asset) / math.log(1 + calc_rate)
             target_month = tw_now.date().month + int(months_needed)
             target_year = tw_now.date().year + (target_month - 1) // 12
             final_month = (target_month - 1) % 12 + 1
-            timeline_events.append({"year": target_year, "month": final_month, "text": f"- {target_year}-{final_month:02d}: {target_name} 達標"})
+            timeline_events.append({"year": target_year, "month": final_month, "text": f"{target_year}-{final_month:02d}: {target_name} 達標"})
             
     timeline_events.sort(key=lambda x: (x["year"], x["month"]))
-    timeline_text = "<br>".join([event["text"] for event in timeline_events])
+    timeline_html = "".join([f"<li>{event['text']}</li>" for event in timeline_events])
 
     ratio_color = "#ef4444" if maintenance_ratio < 150 else "#10b981"
     time_str = tw_now.strftime("%Y/%m/%d %H:%M CST")
     
+    # ==========================================
+    # 5. HTML 模板設計 (引入 Google Fonts 解決中文字體問題)
+    # ==========================================
     html_content = f"""
     <!DOCTYPE html>
     <html lang="zh-TW">
     <head>
         <meta charset="UTF-8">
+        <title>Growth Dashboard</title>
+        <!-- 引入 Google Fonts: Noto Sans TC (思源黑體) -->
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap" rel="stylesheet">
         <style>
+            /* 全局樣式：設定寬度為 500px，背景色，並指定中文字體 */
             body {{
-                font-family: 'Helvetica Neue', Arial, 'Microsoft JhengHei', sans-serif;
-                margin: 0; padding: 0; width: 500px;
-                background-color: #0f172a;
+                font-family: 'Noto Sans TC', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                margin: 0; padding: 20px; width: 500px;
+                background-color: #f0f2f5; color: #1c1e21; box-sizing: border-box;
             }}
-            .header {{
-                padding: 20px; color: white;
+            /* 每個獨立圖卡的容器樣式 */
+            .card-container {{
+                background-color: #ffffff; border-radius: 12px;
+                box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+                overflow: hidden; margin-bottom: 20px; /* 截圖時會忽略這個 margin */
             }}
-            .header h1 {{ margin: 0; font-size: 22px; font-weight: bold; }}
-            .header p {{ margin: 5px 0 0 0; font-size: 13px; color: #94a3b8; }}
+            /* 卡片標題列 */
+            .card-header {{
+                padding: 15px 20px; border-bottom: 1px solid #e4e6eb;
+            }}
+            .card-header h2 {{
+                margin: 0; font-size: 18px; font-weight: 700; color: #050505;
+                display: flex; align-items: center;
+            }}
+            .card-header h2 .icon {{ margin-right: 8px; font-size: 20px; }}
+            .card-header .time {{ font-size: 12px; color: #65676b; margin-top: 4px; }}
             
-            .container {{
-                background-color: #f8fafc;
-                border-radius: 16px 16px 0 0;
-                padding: 20px;
-            }}
-            .summary-box {{
-                background: linear-gradient(135deg, #c2410c, #ea580c);
-                color: white; padding: 15px; border-radius: 10px;
-                margin-bottom: 20px; font-size: 15px; line-height: 1.6;
-                box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            }}
-            .grid {{
-                display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
-                margin-bottom: 12px;
-            }}
-            .card {{
-                background: white; padding: 12px 15px; border-radius: 10px;
-                border: 1px solid #e2e8f0;
-                box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-            }}
-            .card-title {{ font-size: 13px; color: #64748b; margin-bottom: 6px; }}
-            .card-value {{ font-size: 18px; font-weight: bold; color: #0f172a; }}
-            .card-sub {{ font-size: 12px; margin-top: 5px; color: #94a3b8; }}
+            /* 卡片內容區域 */
+            .card-body {{ padding: 20px; }}
             
-            .full-card {{ grid-column: 1 / -1; }}
+            /* 網格佈局系統 */
+            .grid-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }}
+            .grid-3 {{ display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; }}
+
+            /* 數據模組樣式 */
+            .metric-item {{
+                background: #f7f8fa; padding: 12px; border-radius: 8px;
+            }}
+            .metric-label {{ font-size: 13px; color: #65676b; margin-bottom: 4px; }}
+            .metric-value {{ font-size: 18px; font-weight: 700; color: #050505; }}
+            .metric-sub {{ font-size: 12px; color: #65676b; margin-top: 4px; }}
+            
+            /* 強調色文字 */
             .text-up {{ color: #ef4444; }}
+            .text-down {{ color: #10b981; }}
+            .text-blue {{ color: #3b82f6; }}
+
+            /* 總覽區塊特別樣式 */
+            .summary-hero {{
+                background: linear-gradient(135deg, #3b82f6, #2563eb); color: white;
+                padding: 20px; border-radius: 12px; margin-bottom: 15px;
+            }}
+            .summary-hero .label {{ font-size: 14px; opacity: 0.9; }}
+            .summary-hero .value {{ font-size: 32px; font-weight: 700; margin: 5px 0; }}
+            .summary-hero .daily {{
+                display: inline-block; background: rgba(255,255,255,0.2);
+                padding: 4px 10px; border-radius: 20px; font-size: 14px; font-weight: 500;
+            }}
+
+            /* 表格樣式 (用於歷史增率) */
+            .data-table {{ width: 100%; border-collapse: collapse; }}
+            .data-table td {{
+                padding: 10px; border-bottom: 1px solid #e4e6eb;
+                font-size: 14px;
+            }}
+            .data-table td:nth-child(odd) {{ color: #65676b; }}
+            .data-table td:nth-child(even) {{ font-weight: 500; text-align: right; }}
+            .data-table tr:last-child td {{ border-bottom: none; }}
+
+            /* 時間軸與進度條樣式 */
+            .timeline-list {{
+                list-style: none; padding: 0; margin: 0;
+            }}
+            .timeline-list li {{
+                position: relative; padding-left: 25px; margin-bottom: 12px;
+                font-size: 14px; color: #333; line-height: 1.5;
+            }}
+            .timeline-list li::before {{
+                content: ''; position: absolute; left: 5px; top: 6px;
+                width: 8px; height: 8px; background: #3b82f6; border-radius: 50%;
+            }}
+            .progress-bar-container {{
+                background: #e4e6eb; border-radius: 6px; height: 10px; overflow: hidden;
+                margin: 10px 0 5px 0;
+            }}
+            .progress-bar-fill {{
+                height: 100%; background: linear-gradient(90deg, #3b82f6, #2563eb);
+                width: {progress_pct}%;
+            }}
             
-            .chart-img {{ width: 100%; border-radius: 8px; margin-top: 10px; }}
+            /* 圖表圖片樣式 */
+            .chart-img {{ width: 100%; border-radius: 8px; display: block; }}
         </style>
     </head>
     <body>
-        <div class="header">
-            <h1>{title_header.replace('<b>', '').replace('</b>', '')} 儀表板</h1>
-            <p>{time_str}</p>
-        </div>
-        <div class="container">
-            <div class="summary-box">
-                總資產：${total_asset:,.0f}、淨資產：${net_asset:,.0f}<br>
-                單日變化：{daily_pct:.1f}% ({sign}${daily_diff:,.0f})
+        <!-- ========================================= -->
+        <!-- 圖卡 1: 核心總覽 (ID: card1) -->
+        <!-- ========================================= -->
+        <div id="card1" class="card-container">
+            <div class="card-header">
+                <h2><span class="icon">📊</span>資產總覽</h2>
+                <div class="time">{title_header} | {time_str}</div>
             </div>
-            
-            <div class="grid">
-                <div class="card">
-                    <div class="card-title">台股市值</div>
-                    <div class="card-value">${tw_stock_value:,.0f}</div>
-                    <div class="card-sub text-up">佔比 {tw_free_pct:.1f}%</div>
+            <div class="card-body">
+                <div class="summary-hero">
+                    <div class="label">淨資產 (Net Asset)</div>
+                    <div class="value">${net_asset:,.0f}</div>
+                    <div class="daily">今日變化: {daily_str}</div>
                 </div>
-                <div class="card">
-                    <div class="card-title">美股市值</div>
-                    <div class="card-value">${us_stock_value_twd:,.0f}</div>
-                    <div class="card-sub text-up">佔比 {us_pct:.1f}%</div>
-                </div>
-                <div class="card">
-                    <div class="card-title">質押借款</div>
-                    <div class="card-value" style="color:#3b82f6">-${total_debt_with_interest:,.0f}</div>
-                    <div class="card-sub">負債比 {debt_ratio:.1f}%</div>
-                </div>
-                <div class="card">
-                    <div class="card-title">質押維持率</div>
-                    <div class="card-value" style="color:{ratio_color}">{maintenance_ratio:.1f}%</div>
-                    <div class="card-sub">{ratio_status}</div>
-                </div>
-                <div class="card">
-                    <div class="card-title">曝險 Beta</div>
-                    <div class="card-value">{effective_leverage:.2f}x</div>
-                    <div class="card-sub">半凱利邊界 {half_kelly_limit:.2f}x</div>
-                </div>
-                <div class="card">
-                    <div class="card-title">千萬目標達成率</div>
-                    <div class="card-value">{progress_pct:.1f}%</div>
-                    <div class="card-sub" style="font-family: monospace;">{bar}</div>
-                </div>
-                
-                <div class="card full-card">
-                    <div class="card-title">歷史增率</div>
-                    <div class="card-sub" style="font-size:14px; color:#334155; line-height: 1.6;">
-                        {growth_text}
+                <div class="grid-2">
+                    <div class="metric-item">
+                        <div class="metric-label">總資產</div>
+                        <div class="metric-value">${total_asset:,.0f}</div>
                     </div>
-                </div>
-
-                <div class="card full-card">
-                    <div class="card-title">時間軸推算</div>
-                    <div class="card-sub" style="font-size:13px; color:#334155; line-height: 1.6;">
-                        {timeline_text}
+                    <div class="metric-item">
+                        <div class="metric-label">現金部位 (TWD+USD)</div>
+                        <div class="metric-value">${total_cash_twd:,.0f}</div>
+                        <div class="metric-sub">約 ${cash_usd + (cash_twd/usd_rate):,.0f} USD</div>
                     </div>
-                </div>
-                
-                <!-- 嵌入兩張圖表 -->
-                <div class="card full-card" style="padding:0; border:none; background:transparent; box-shadow:none;">
-                    <img src="{line_url}" class="chart-img">
-                    <img src="{pie_url}" class="chart-img">
                 </div>
             </div>
         </div>
-    </body>
-    </html>
-    """
 
-    hti = Html2Image(custom_flags=['--no-sandbox', '--disable-gpu'])
-    image_filename = 'dashboard.png'
-    
-    # 雙重相容機制：先嘗試新版 snapshot，若沒有該屬性則降級使用舊版 screenshot
-    try:
-        hti.snapshot(html_str=html_content, save_as=image_filename, size=(500, 1250))
-    except AttributeError:
-        hti.screenshot(html_str=html_content, save_as=image_filename, size=(500, 1250))
-
-    keyboard = {
-        "inline_keyboard": [
-            [
-                {"text": "📝 Growth 填寫表單", "url": "https://forms.gle/9ZEJawwNRGfiXQiV8"}
-            ],
-            [
-                {"text": "📈 Skynet 儀表板", "url": "https://5972x4.csb.app/"}
-            ]
-        ]
-    }
-
-    base_tg_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-    
-    with open(image_filename, "rb") as photo:
-        requests.post(
-            base_tg_url, 
-            data={
-                "chat_id": TELEGRAM_CHAT_ID, 
-                "caption": f"✅ <b>日報結算完畢！</b>\n為您送上最新的 Growth 儀表板。",
-                "parse_mode": "HTML",
-                "reply_markup": json.dumps(keyboard) 
-            },
-            files={"photo": photo}
-        )
-
-if __name__ == "__main__":
-    main()
+        <!-- ========================================= -->
+        <!-- 圖卡 2: 風險與板塊 (ID: card2) -->
+        <!-- ========================================= -->
+        <div id="card2" class="card-container">
+            <div class="card-header">
+                <h2><span class="icon">🛡️</span>風險與板塊</h2>
+            </div>
+            <div class="card-body">
+                <div class="grid-2" style="margin-bottom: 15px;">
+                    <div class="metric-item">
+                        <div class="metric-label">質押負債</div>
+                        <div class="metric-value text-blue">-${total_debt_with_interest:,.0f}</div>
+                        <div class="metric-sub">負債比 {debt_ratio:.1f}%</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">質押維持率</div>
+                        <div class="metric-value" style="color:{ratio_color}">{maintenance_ratio:.1f}%</div>
+                        <div class="metric-sub">{ratio_status}</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">曝險槓桿 (Beta)</div>
+                        <div class="metric-value">{effective_leverage:.2f}x</div>
+                        <div class="metric-sub">安全邊界 {half_kelly_limit:.2f}x {kelly_status}</div>
+                    </div>
+                    <div class="metric-item">
+                        <div class="metric-label">TSMC Exposure</div>
+                        <div class="metric-value">{tsmc_pct:.1f}%</div>
+                        <div class="metric-sub">${tsmc_exposure_twd:,.0f}</div>
+                    </div>
+                </div>
+                <div>
+                    <div class="metric-label" style="
