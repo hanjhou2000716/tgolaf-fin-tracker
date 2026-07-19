@@ -4,17 +4,37 @@ import requests
 import datetime
 import math
 import re
+import base64
 import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
 import urllib.parse
 from html2image import Html2Image
 
-# 設定 matplotlib 在無 GUI 環境下執行
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import matplotlib.font_manager as fm
+
+def setup_chinese_font():
+    """強制在 GitHub Actions 環境中尋找並套用中文字體，解決口口口亂碼問題"""
+    font_dirs = ['/usr/share/fonts']
+    for font_dir in font_dirs:
+        if not os.path.exists(font_dir): continue
+        for root, dirs, files in os.walk(font_dir):
+            for file in files:
+                if file.endswith(('.ttc', '.ttf')) and ('NotoSansCJK' in file or 'wqy' in file or 'JhengHei' in file):
+                    font_path = os.path.join(root, file)
+                    try:
+                        fm.fontManager.addfont(font_path)
+                        prop = fm.FontProperties(fname=font_path)
+                        plt.rcParams['font.sans-serif'].insert(0, prop.get_name())
+                        return 
+                    except Exception:
+                        pass
+setup_chinese_font()
+plt.rcParams['axes.unicode_minus'] = False 
 
 # ==========================================
 # 1. 環境變數與金鑰設定
@@ -23,10 +43,6 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 FINMIND_TOKEN = os.getenv("FINMIND_TOKEN")
 GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
-
-# 設定中文字型 (優先使用 Noto Sans CJK)
-plt.rcParams['font.sans-serif'] = ['Noto Sans CJK TC', 'Microsoft JhengHei', 'sans-serif']
-plt.rcParams['axes.unicode_minus'] = False 
 
 # ==========================================
 # 2. Google Sheets 動態資產結算核心
@@ -198,7 +214,7 @@ def calculate_current_assets():
     return inventory, history_sheet
 
 # ==========================================
-# 3. 金融市場報價模組 (防爬蟲阻擋優化版)
+# 3. 金融市場報價模組
 # ==========================================
 def get_usd_twd_rate():
     try:
@@ -252,17 +268,15 @@ def generate_local_pie_chart(tw_free_val, debt_val, us_val, filename='pie_chart.
         autotext.set_weight('bold')
 
     ax.axis('equal') 
-    
-    # 將圖片背景設為完全透明，並緊縮邊緣
     plt.savefig(filename, bbox_inches='tight', pad_inches=0.1, dpi=120, transparent=True)
     plt.close(fig)
     return filename
 
 def generate_local_line_chart(dates_str, total_data, net_data, total_20ma, net_20ma, twii_ma, filename='line_chart.png'):
+    # 修復日期格式對應，支援跨年份
     dates = [datetime.datetime.strptime(d, "%Y-%m-%d") for d in dates_str]
     
     fig, ax1 = plt.subplots(figsize=(8, 4.5))
-    
     color_total, color_net = '#36a2eb', '#ff6384'
     ax1.set_ylabel('資產金額 (TWD)', color='#334155', fontweight='bold')
     l1 = ax1.plot(dates, total_data, label='總資產', color=color_total, linewidth=2, marker='o', markersize=4)
@@ -296,8 +310,13 @@ def generate_local_line_chart(dates_str, total_data, net_data, total_20ma, net_2
     plt.close(fig)
     return filename
 
+def image_to_base64(filepath):
+    """將本地圖片轉為 Base64 格式，保證 HTML 載入時圖片絕對存在，避免排版崩塌裁切"""
+    with open(filepath, "rb") as f:
+        return "data:image/png;base64," + base64.b64encode(f.read()).decode('utf-8')
+
 # ==========================================
-# 5. 主程序與完美的單一長圖 HTML 組裝
+# 5. 主程序與 HTML 組裝
 # ==========================================
 def main():
     tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
@@ -448,6 +467,9 @@ def main():
     pie_chart_file = generate_local_pie_chart(tw_free_value, total_debt_with_interest, us_stock_value_twd)
     line_chart_file = generate_local_line_chart(recent_dates_str, recent_total, recent_net, total_20ma, net_20ma, twii_ma)
     
+    pie_b64 = image_to_base64(pie_chart_file)
+    line_b64 = image_to_base64(line_chart_file)
+    
     def get_growth_str(target_days, sim_text):
         if not sorted_dates: return f"{sim_text}(模)"
         target_date_obj = tw_now.date() - datetime.timedelta(days=target_days)
@@ -479,8 +501,7 @@ def main():
             
     timeline_events.sort(key=lambda x: (x["year"], x["month"]))
     timeline_html = "".join([f'<li style="margin-bottom:6px; display:flex; align-items:center;"><span style="color:#3b82f6; margin-right:8px;">➜</span>{t["text"]}</li>' for t in timeline_events])
-
-    # 決定維持率的顏色
+    
     ratio_color = "#ef4444" if 0 < maintenance_ratio < 150 else "#10b981"
 
     # ==========================================
@@ -558,8 +579,8 @@ def main():
     <div class="card-wrap" style="margin-bottom: 0;">
         <div class="title">📊 資產軌跡與分佈</div>
         <div class="chart-container">
-            <img src="{line_chart_file}" class="chart-img">
-            <img src="{pie_chart_file}" class="chart-img" style="margin-top: 5px;">
+            <img src="{line_b64}" class="chart-img">
+            <img src="{pie_b64}" class="chart-img" style="margin-top: 5px;">
         </div>
     </div>
     </body></html>
@@ -574,9 +595,17 @@ def main():
     with open('temp_full.html', 'w', encoding='utf-8') as f:
         f.write(full_html)
         
-    # size=(540, None) 讓高度自動適應內容，確保無截斷、無留白
-    try: hti.screenshot(html_file='temp_full.html', save_as=dashboard_file, size=(540, None))
-    except Exception as e: print(f"截圖失敗:", e)
+    try: 
+        # 捨棄容易出錯的 None，將高度鎖定為保證夠長且不留白的 1900px
+        hti.screenshot(html_file='temp_full.html', save_as=dashboard_file, size=(540, 1900))
+    except Exception as e: 
+        print(f"截圖失敗:", e)
+        return # 若截圖失敗，提早結束避免後續引發 FileNotFoundError
+
+    # 確認檔案真的有產生再發送
+    if not os.path.exists(dashboard_file):
+        print("❌ 錯誤：截圖檔案未生成！")
+        return
 
     keyboard = {
         "inline_keyboard": [
