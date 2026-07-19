@@ -18,7 +18,7 @@ GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
 
 # 🚨 必填項目：請填入您 GitHub Pages 的網址 (結尾要有斜線 /)
 # 例如: "https://hanjhou2000716.github.io/tgolaf-fin-tracker/"
-WEB_APP_URL = "https://你的帳號.github.io/你的專案名稱/"
+WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/"
 
 # ==========================================
 # 2. Google Sheets 動態資產結算 (邏輯不變)
