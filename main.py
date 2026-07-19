@@ -42,8 +42,6 @@ def calculate_current_assets():
         seen_names = [s.title for s in available_sheets]
         raise ValueError(f"\n❌ 找不到檔案！機器人目前看得到的檔案：{seen_names}。")
         
-    print(f"✅ 雷達鎖定成功！正在打開試算表：{sheet.title}")
-    
     data_rows = []
     history_sheet = None
     for ws in sheet.worksheets():
@@ -239,7 +237,7 @@ def generate_pie_chart(tw_free_val, debt_val, us_val):
         chart_config["data"]["labels"] = ["尚無資產數據"]
         chart_config["data"]["datasets"][0]["data"] = [1]
         chart_config["data"]["datasets"][0]["backgroundColor"] = ["#cccccc"]
-    return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=500&h=300"
+    return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=480&h=240"
         
 def generate_line_chart(history_records, today_str, total_asset, net_asset):
     daily_data = {}
@@ -341,12 +339,12 @@ def generate_line_chart(history_records, today_str, total_asset, net_asset):
             ]
         },
         "options": {
-            "title": {"display": True, "text": "近期資產軌跡 (含月線 20MA)", "fontSize": 14},
+            "title": {"display": False},
             "scales": {"yAxes": [{"ticks": {"min": y_min, "max": y_max, "stepSize": 200000}}]},
             "legend": {"position": "bottom"}
         }
     }
-    return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=500&h=300"
+    return f"https://quickchart.io/chart?c={urllib.parse.quote(json.dumps(chart_config))}&w=480&h=240"
 
 # ==========================================
 # 4. 主程序與 HTML 模組化產生
@@ -563,9 +561,9 @@ def main():
     ratio_color = "#ef4444" if maintenance_ratio < 150 else "#10b981"
     
     # ==========================================
-    # 5. 組合單一無縫長截圖 HTML (補回所有遺失資料)
+    # 5. 組合單一無縫緊湊長截圖 HTML
     # ==========================================
-    timeline_html = "".join([f'<li style="margin-bottom:8px; display:flex; align-items:center;"><span style="color:#3b82f6; margin-right:10px;">➜</span>{t["text"]}</li>' for t in timeline_events])
+    timeline_html = "".join([f'<li style="margin-bottom:6px; display:flex; align-items:center;"><span style="color:#3b82f6; margin-right:8px; font-size:12px;">➜</span>{t["text"]}</li>' for t in timeline_events])
     
     html_content = f"""
     <!DOCTYPE html>
@@ -574,45 +572,50 @@ def main():
     <meta charset="UTF-8">
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700;900&display=swap');
-        body {{ font-family: 'Noto Sans TC', sans-serif; background-color: #f1f5f9; margin: 0; padding: 20px; box-sizing: border-box; width: 540px; }}
-        .header {{ background-color: #0f172a; color: white; padding: 25px; border-radius: 16px 16px 0 0; margin-bottom: -10px; }}
-        .header h1 {{ margin: 0; font-size: 26px; font-weight: 900; }}
-        .header p {{ margin: 5px 0 0 0; font-size: 14px; color: #94a3b8; }}
+        body {{ font-family: 'Noto Sans TC', sans-serif; background-color: #f1f5f9; margin: 0; padding: 15px; box-sizing: border-box; width: 540px; }}
         
-        .summary-box {{ background: linear-gradient(135deg, #f97316, #ea580c); color: white; padding: 25px; border-radius: 16px; position: relative; z-index: 10; box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3); margin-bottom: 20px; }}
-        .s-val {{ font-size: 32px; font-weight: 900; margin: 10px 0; }}
-        .s-diff {{ font-size: 16px; background: rgba(0,0,0,0.2); display: inline-block; padding: 5px 12px; border-radius: 20px; font-weight: 700; }}
+        .main-card {{ background-color: white; border-radius: 16px; overflow: hidden; box-shadow: 0 10px 25px rgba(0,0,0,0.05); }}
         
-        .section-title {{ font-size: 18px; font-weight: 900; color: #334155; margin: 25px 0 15px 5px; border-left: 4px solid #3b82f6; padding-left: 10px; }}
-        .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 20px; }}
-        .card {{ background: white; border-radius: 12px; padding: 15px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; }}
+        .header {{ background-color: #0f172a; color: white; padding: 20px; }}
+        .header h1 {{ margin: 0; font-size: 22px; font-weight: 900; }}
+        .header p {{ margin: 4px 0 0 0; font-size: 12px; color: #94a3b8; }}
         
-        .c-title {{ font-size: 13px; color: #64748b; font-weight: 700; margin-bottom: 6px; }}
-        .c-val {{ font-size: 20px; font-weight: 900; color: #0f172a; }}
-        .c-sub {{ font-size: 12px; color: #94a3b8; margin-top: 4px; font-weight: 500; display: block; }}
+        .summary-box {{ background: linear-gradient(135deg, #ea580c, #c2410c); color: white; padding: 20px; border-radius: 12px; margin: 15px; box-shadow: 0 4px 10px rgba(234, 88, 12, 0.3); }}
+        .s-val {{ font-size: 28px; font-weight: 900; margin: 8px 0; }}
+        .s-diff {{ font-size: 14px; background: rgba(0,0,0,0.2); display: inline-block; padding: 4px 10px; border-radius: 16px; font-weight: 700; }}
         
-        .badge-container {{ display: flex; flex-wrap: wrap; gap: 8px; }}
-        .badge {{ background: #f8fafc; padding: 8px 12px; border-radius: 8px; font-weight: 700; color: #475569; font-size: 14px; border: 1px solid #e2e8f0; width: 45%; }}
+        .section-title {{ font-size: 16px; font-weight: 900; color: #334155; margin: 20px 15px 12px 15px; border-left: 4px solid #3b82f6; padding-left: 8px; display: flex; align-items: center; gap: 6px; }}
         
-        .chart-card {{ background: white; border-radius: 12px; padding: 15px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); text-align: center; margin-bottom: 15px; }}
-        .chart-card img {{ width: 100%; border-radius: 8px; }}
+        .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 0 15px; margin-bottom: 15px; }}
+        .card {{ background: #f8fafc; border-radius: 10px; padding: 12px; border: 1px solid #e2e8f0; }}
+        
+        .c-title {{ font-size: 12px; color: #64748b; font-weight: 700; margin-bottom: 4px; display:flex; align-items:center; gap: 4px; }}
+        .c-val {{ font-size: 18px; font-weight: 900; color: #0f172a; }}
+        .c-sub {{ font-size: 11px; color: #94a3b8; margin-top: 2px; font-weight: 500; display: block; }}
+        
+        .badge-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 0 15px; margin-bottom: 15px; }}
+        .badge {{ background: #f8fafc; padding: 8px 10px; border-radius: 8px; font-weight: 700; color: #475569; font-size: 13px; border: 1px solid #e2e8f0; text-align: center; }}
+        
+        .timeline-card {{ background: #f8fafc; border-radius: 10px; padding: 15px; border: 1px solid #e2e8f0; margin: 0 15px 15px 15px; }}
+        .chart-container {{ text-align: center; padding: 0 15px 15px 15px; }}
+        .chart-container img {{ width: 100%; border-radius: 8px; border: 1px solid #e2e8f0; margin-bottom: 10px; background: #fff; }}
+        .chart-title {{ font-size: 14px; font-weight: 700; color: #475569; margin-bottom: 8px; text-align: left; padding-left: 5px; }}
     </style>
     </head>
     <body>
-        <!-- Header -->
+      <div class="main-card">
+        <!-- Header & Summary -->
         <div class="header">
             <h1>{header_text}</h1>
             <p>{time_str}</p>
         </div>
-        
-        <!-- Summary -->
         <div class="summary-box">
-            <div style="font-size: 16px; font-weight:700;">💰 總資產：${total_asset:,.0f}</div>
+            <div style="font-size: 14px; font-weight:700;">💰 總資產：${total_asset:,.0f}</div>
             <div class="s-val">🟢 淨額：${net_asset:,.0f}</div>
             <div class="s-diff">{emoji} {daily_str_plain}</div>
         </div>
 
-        <!-- 區塊 1: 資產與現金明細 (完美 2x3 網格) -->
+        <!-- 區塊 1: 資產與現金明細 -->
         <div class="section-title">📂 資產明細</div>
         <div class="grid">
             <div class="card"><div class="c-title">🇹🇼 台股現值</div><div class="c-val">${tw_stock_value:,.0f}</div></div>
@@ -623,7 +626,7 @@ def main():
             <div class="card"><div class="c-title">💸 質押借款</div><div class="c-val" style="color:#ef4444">-${total_debt_with_interest:,.0f}</div><span class="c-sub">內含利息 ${accumulated_interest:,.0f}</span></div>
         </div>
 
-        <!-- 區塊 2: 風險與槓桿監控 (完美 2x2 網格) -->
+        <!-- 區塊 2: 風險與槓桿監控 -->
         <div class="section-title">🛡️ 風險監控</div>
         <div class="grid">
             <div class="card"><div class="c-title">⚖️ 總資產Beta</div><div class="c-val">{effective_leverage:.2f}x</div><span class="c-sub">凱利邊界: {half_kelly_limit:.2f}x</span></div>
@@ -634,32 +637,36 @@ def main():
 
         <!-- 區塊 3: 歷史與目標 -->
         <div class="section-title">🚀 歷史增率</div>
-        <div class="card" style="margin-bottom:12px;">
-            <div class="badge-container">
-                <div class="badge">1月: {m1_str}</div> <div class="badge">1季: {m3_str}</div>
-                <div class="badge">1年: {y1_str}</div> <div class="badge">3年: {y3_str}</div>
-            </div>
+        <div class="badge-grid">
+            <div class="badge">1月: {m1_str}</div> 
+            <div class="badge">1季: {m3_str}</div>
+            <div class="badge">1年: {y1_str}</div> 
+            <div class="badge">3年: {y3_str}</div>
         </div>
         
         <div class="section-title">🎯 模型預測</div>
-        <div class="card" style="margin-bottom:20px;">
-            <div class="c-title">千萬目標達成率 ({progress_pct:.1f}%)</div>
-            <div style="font-family:monospace; color:#3b82f6; font-size:16px; margin: 5px 0 10px 0;">{bar_str}</div>
-            <div class="c-title" style="margin-top: 10px;">時間軸推算</div>
-            <ul style="padding:0; margin:0; list-style:none; font-size:14px; font-weight:500; color:#1e293b;">{timeline_html}</ul>
+        <div class="timeline-card">
+            <div class="c-title" style="margin-bottom:8px;">千萬目標達成率 ({progress_pct:.1f}%)</div>
+            <div style="font-family:monospace; color:#3b82f6; font-size:15px; margin-bottom: 12px; letter-spacing:-1px;">{bar_str}</div>
+            <div class="c-title" style="margin-bottom:6px;">時間軸推算</div>
+            <ul style="padding:0; margin:0; list-style:none; font-size:13px; font-weight:500; color:#1e293b;">{timeline_html}</ul>
         </div>
 
         <!-- 區塊 4: 圖表分析 -->
         <div class="section-title">📊 視覺化分析</div>
-        <div class="chart-card"><img src="{line_url}"></div>
-        <!-- 增加底部 margin 確保不會因為渲染邊距被切掉 -->
-        <div class="chart-card" style="margin-bottom: 40px;"><img src="{pie_url}"></div>
+        <div class="chart-container">
+            <div class="chart-title">近期資產軌跡 (含月線 20MA)</div>
+            <img src="{line_url}">
+            <div class="chart-title" style="margin-top:10px;">現貨與質押分佈</div>
+            <img src="{pie_url}">
+        </div>
+      </div>
     </body>
     </html>
     """
 
     # ==========================================
-    # 6. 單次截圖與 Telegram 發送 (還原為傳送單張圖片)
+    # 6. 精準裁切截圖與 Telegram 發送
     # ==========================================
     with open('dashboard.html', 'w', encoding='utf-8') as f: 
         f.write(html_content)
@@ -667,8 +674,8 @@ def main():
     hti = Html2Image(custom_flags=['--no-sandbox', '--disable-gpu', '--hide-scrollbars'])
     
     try:
-        # 將畫布高度大幅加長至 3500px，確保兩張圖表絕對能完整呈現不被切斷
-        hti.screenshot(html_file='dashboard.html', save_as='dashboard.png', size=(540, 3500))
+        # 將畫布高度精準設定為 1720px，完美消除底部的殘留空白
+        hti.screenshot(html_file='dashboard.html', save_as='dashboard.png', size=(540, 1720))
     except Exception as e:
         print("screenshot 失敗:", e)
         pass
