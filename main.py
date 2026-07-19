@@ -259,7 +259,7 @@ def generate_local_pie_chart(tw_free_val, debt_val, us_val, filename='pie_chart.
     return filename
 
 def generate_local_line_chart(dates_str, total_data, net_data, total_20ma, net_20ma, twii_ma, filename='line_chart.png'):
-    dates = [datetime.datetime.strptime(d, "%m-%d").replace(year=datetime.date.today().year) for d in dates_str]
+    dates = [datetime.datetime.strptime(d, "%Y-%m-%d") for d in dates_str]
     
     fig, ax1 = plt.subplots(figsize=(8, 4.5))
     
