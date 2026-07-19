@@ -480,6 +480,9 @@ def main():
     timeline_events.sort(key=lambda x: (x["year"], x["month"]))
     timeline_html = "".join([f'<li style="margin-bottom:6px; display:flex; align-items:center;"><span style="color:#3b82f6; margin-right:8px;">➜</span>{t["text"]}</li>' for t in timeline_events])
 
+    # 決定維持率的顏色
+    ratio_color = "#ef4444" if 0 < maintenance_ratio < 150 else "#10b981"
+
     # ==========================================
     # 6. 組合完美比例 HTML
     # ==========================================
@@ -571,8 +574,8 @@ def main():
     with open('temp_full.html', 'w', encoding='utf-8') as f:
         f.write(full_html)
         
-    # 高度設為稍微寬裕的值，確保絕對不裁切，配合背景色可以無縫接軌
-    try: hti.screenshot(html_file='temp_full.html', save_as=dashboard_file, size=(540, 1950))
+    # size=(540, None) 讓高度自動適應內容，確保無截斷、無留白
+    try: hti.screenshot(html_file='temp_full.html', save_as=dashboard_file, size=(540, None))
     except Exception as e: print(f"截圖失敗:", e)
 
     keyboard = {
