@@ -1,50 +1,51 @@
 name: Tranquil Growth Web App Deployment
 
 on:
-repository_dispatch:
-types: [trigger_update]
-workflow_dispatch:
-
-如果您需要每天自動執行，可以把下面兩行的註解(#)拿掉
-
-schedule:
-
-- cron: '30 14 * * *'
-
-賦予 Actions 推送網頁到 gh-pages 分支的權限 (非常重要)
+  repository_dispatch:
+    types: [trigger_update]
+  workflow_dispatch:
+  # 如果您需要每天自動執行，可以把下面兩行的註解(#)拿掉
+  # schedule:
+  #   - cron: '30 14 * * *'
 
 permissions:
-contents: write
+  contents: write
 
 jobs:
-build_and_deploy:
-runs-on: ubuntu-latest
-steps:
-- name: Checkout Repository
-uses: actions/checkout@v3
+  build_and_deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
 
-  - name: Set up Python
-    uses: actions/setup-python@v4
-    with:
-      python-version: '3.10'
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
 
-  - name: Install Dependencies
-    # 因為已經改成 Web App，我們不再需要 html2image 和 matplotlib，安裝速度會快非常多！
-    run: |
-      python -m pip install --upgrade pip
-      pip install requests yfinance gspread google-auth
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests yfinance gspread google-auth
 
-  - name: Run Tracker Script (Generate index.html)
-    env:
-      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-      GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
-      FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-    run: python tg_bot_optimized.py
-    
-  - name: Deploy to GitHub Pages
-    uses: peaceiris/actions-gh-pages@v3
-    with:
-      github_token: ${{ secrets.GITHUB_TOKEN }}
-      publish_dir: ./
-      publish_branch: gh-pages
+      - name: Run Tracker Script (Generate index.html)
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+        run: python tg_bot_optimized.py
+        
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./
+          publish_branch: gh-pages
+```eof
+
+### 為什麼這段程式碼會運作？
+1.  **結構層級**：`steps` 下面的每一個項目（例如 `- name: Checkout...`）都比上一層往右縮排了 6 個空格，這樣 GitHub 才看得懂這些是步驟。
+2.  **註解處理**：所有的說明文字都加上了 `#`，這能告訴 GitHub 系統：「這是給人看的註解，不是指令」，這樣就不會報錯了。
+
+請複製後貼上，並記得按下 GitHub 頁面底部的 **Commit changes** 儲存。如果還有語法錯誤，請隨時告訴我，我會幫您檢查。
