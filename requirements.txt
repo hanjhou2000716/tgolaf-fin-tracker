@@ -1,0 +1,6 @@
+requests==2.31.0
+yfinance==0.2.40
+gspread==6.1.2
+google-auth==2.32.0
+html2image==2.0.4
+matplotlib==3.8.2
