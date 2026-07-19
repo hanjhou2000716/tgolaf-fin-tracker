@@ -11,6 +11,7 @@ from google.oauth2.service_account import Credentials
 import urllib.parse
 from html2image import Html2Image
 
+# 設定 matplotlib 在無 GUI 環境下執行
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
