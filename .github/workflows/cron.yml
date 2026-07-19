@@ -34,7 +34,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-        run: python tg_bot_optimized.py
+        run: python main.py
         
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
