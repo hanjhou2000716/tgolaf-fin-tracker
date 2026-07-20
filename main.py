@@ -153,7 +153,7 @@ def get_tw_stock_price(symbol):
 def main():
     tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
     today_str = tw_now.strftime("%m-%d")
-    display_date = tw_now.strftime"%m/%d" # 新增這行：推播專用的 07/20 格式
+    display_date = tw_now.strftime("%m/%d")
         
     inventory, history_sheet = calculate_current_assets()
     try: history_records = history_sheet.get_all_records()
