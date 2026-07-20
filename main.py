@@ -331,8 +331,8 @@ def main():
     </head>
     <body>
         <div class="header-container">
-            <img src="./PRStK-Remove.png" alt="PRStK" style="height: 40px; object-fit: contain;">
-            <img src="./SFC.e-removebg-preview.png" alt="SFC.e" style="height: 38px; object-fit: contain;">
+            <img src="./PRStK-Remove.png" alt="PRStK" style="height: 35px; object-fit: contain;">
+            <img src="./SFC.e-removebg-preview.png" alt="SFC.e" style="height: 35px; object-fit: contain;">
             <span class="header-text">| Growth</span>
         </div>
 
