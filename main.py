@@ -462,19 +462,22 @@ def main():
     with open('index.html', 'w', encoding='utf-8') as f: f.write(html_content)
 
     # --- 判斷每日損益，動態生成推播文字 ---
+    # --- 判斷每日損益，動態生成推播文字 ---
     if daily_diff >= 0:
         msg_body = f"🚀 厲害的阿洲，今天賺了 {int(daily_diff):,} 元 (+{daily_pct:.1f}%)"
     else:
         # daily_pct 本身就是負數，所以直接顯示即可
         msg_body = f"💸 可憐的阿洲，今天賠了 {abs(int(daily_diff)):,} 元 ({daily_pct:.1f}%)"
 
-    tg_text = f"✅ ({display_date}) 結算完畢！\n{msg_body}\n\n@PRStK Lab & SFC.e. All right reserve"
+    # 移除了日期前後的括號
+    tg_text = f"✅ {display_date} 結算完畢！\n{msg_body}\n\n@PRStK Lab & SFC.e. All right reserve"
 
     # --- 傳送 Telegram 訊息 ---
     keyboard = {
         "inline_keyboard": [
             [{"text": "🦎 Growth 儀表板", "web_app": {"url": WEB_APP_URL}}],
-            [{"text": "📈 Skynet Monitoring", "web_app": {"url": "https://5972x4.csb.app/"}}]
+            # 嘗試使用強制預覽的 embed 網址來隱藏編輯器
+            [{"text": "📈 Skynet Monitoring", "web_app": {"url": "https://codesandbox.io/embed/5972x4?view=preview&moduleview=1&hidenavigation=1"}}]
         ]
     }
     
