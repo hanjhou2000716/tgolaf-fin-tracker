@@ -376,7 +376,6 @@ def main():
         </div>
 
         <a href="https://forms.gle/9ZEJawwNRGfiXQiV8" class="btn">📝 Growth 表單</a>
-        <a href="https://5972x4.csb.app/">📈 Skynet Monitoring</a>
 
         <script>
             // 確保網頁讀取完畢後才開始畫圖，並加入 try-catch 防止崩潰
@@ -464,7 +463,8 @@ def main():
     # --- 傳送 Telegram 訊息 ---
     keyboard = {
         "inline_keyboard": [
-            [{"text": "🦎 Growth 儀表板", "web_app": {"url": WEB_APP_URL}}]
+            [{"text": "🦎 Growth 儀表板", "web_app": {"url": WEB_APP_URL}}],
+            [{"text": "📈 Skynet Monitoring", "url": "https://5972x4.csb.app/"}]
         ]
     }
     
