@@ -476,8 +476,8 @@ def main():
     keyboard = {
         "inline_keyboard": [
             [{"text": "🦎 Growth 儀表板", "web_app": {"url": WEB_APP_URL}}],
-            # 嘗試使用強制預覽的 embed 網址來隱藏編輯器
-            [{"text": "📈 Skynet Monitoring", "web_app": {"url": "https://codesandbox.io/embed/5972x4?view=preview&moduleview=1&hidenavigation=1"}}]
+            # 填入您剛架設好的 Skynet GitHub Pages 網址！
+            [{"text": "📈 Skynet Monitoring", "web_app": {"url": "https://hanjhou2000716.github.io/skynet-monitoring/"}}]
         ]
     }
     
