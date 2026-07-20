@@ -490,3 +490,19 @@ def main():
 
 if __name__ == "__main__":
     main()
+# === 新增：產生數據供網頁讀取 ===
+    data_for_web = {
+        "taiex": 46465.2, # 這裡請換成您算出的真實 taiex 變數
+        "vix": vix,       # 這裡請換成您算出的真實 vix 變數
+        "current006208": price_006208, # 這裡請換成您算出的真實價格
+        "lastUpdated": tw_now.strftime("%H:%M:%S")
+    }
+    
+    # 確保資料夾存在
+    import os
+    if not os.path.exists('public'):
+        os.makedirs('public')
+        
+    with open('public/data.json', 'w', encoding='utf-8') as f:
+        json.dump(data_for_web, f)
+    # ===============================
