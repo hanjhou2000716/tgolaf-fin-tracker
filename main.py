@@ -376,7 +376,7 @@ def main():
         </div>
 
         <a href="https://forms.gle/9ZEJawwNRGfiXQiV8" class="btn">📝 Growth 表單</a>
-        <a href="https://5972x4.csb.app/" class="btn btn-alt">📈 Skynet Monitoring</a>
+        <a href="https://codesandbox.io/embed/5972x4?view=preview&hidenavigation=1">📈 Skynet Monitoring</a>
 
         <script>
             // 確保網頁讀取完畢後才開始畫圖，並加入 try-catch 防止崩潰
