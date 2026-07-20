@@ -237,6 +237,7 @@ def main():
     
     try:
         twii_hist = yf.Ticker("0050.TW").history(period="3mo")
+        if twii_hist.empty: twii_hist = yf.Ticker("^TWII").history(period="3mo")
         twii_hist['20MA'] = twii_hist['Close'].rolling(window=20).mean()
         twii_map = {idx.strftime("%Y-%m-%d"): row['20MA'] for idx, row in twii_hist.iterrows() if not math.isnan(row['20MA'])}
         last_ma = list(twii_map.values())[-1] if twii_map else 0
@@ -252,6 +253,13 @@ def main():
             net_20ma.append(sum(all_nets[start:i+1]) / len(all_nets[start:i+1]))
             twii_ma.append(twii_map.get(d, last_ma))
 
+    chart_dates_json = json.dumps(chart_dates)
+    chart_totals_json = json.dumps(chart_totals)
+    chart_nets_json = json.dumps(chart_nets)
+    total_20ma_json = json.dumps(total_20ma)
+    net_20ma_json = json.dumps(net_20ma)
+    twii_ma_json = json.dumps(twii_ma)
+
     def get_growth_str(days):
         if not sorted_dates: return "+0.0%(模)"
         target = tw_now.date() - datetime.timedelta(days=days)
@@ -264,7 +272,6 @@ def main():
             return f"{'+' if rate>=0 else ''}{rate:.1f}%(實)"
         return "-4.7%(實)" if days==30 else "+215.9%(模)" if days==90 else "+83.1%(模)" if days==365 else "+195.7%(模)"
 
-    # --- HTML Web App 產出 ---
     html_content = f"""
     <!DOCTYPE html>
     <html lang="zh-TW">
@@ -295,15 +302,12 @@ def main():
         </style>
     </head>
     <body>
-        <!-- Header -->
         <div class="header-container">
-            <!-- 請確保這兩張圖片與 index.html 放在同一個 GitHub 目錄下 -->
             <img src="./PRStK-Remove.png" class="header-logo" alt="PRStK">
             <img src="./SFC.e-removebg-preview.png" class="header-logo" alt="SFC.e" style="height: 34px;">
             <span class="header-text">| Growth</span>
         </div>
 
-        <!-- 資產總覽 -->
         <div class="card">
             <div class="sec-title">📊【 資產總覽 】</div>
             <div class="info-row">💰 總資產 (Total)：${total_asset:,.0f}</div>
@@ -311,7 +315,6 @@ def main():
             <div class="info-row">⚡️ 單日變化：{emoji}{sign}{daily_pct:.1f}% ({sign}${daily_diff:,.0f})</div>
         </div>
 
-        <!-- 資產明細 -->
         <div class="card">
             <div class="sec-title">📂【 資產明細 】</div>
             <div class="grid-2">
@@ -324,7 +327,6 @@ def main():
             </div>
         </div>
 
-        <!-- 風險監控 -->
         <div class="card">
             <div class="sec-title">🛡️【 風險監控 】</div>
             <div class="grid-2">
@@ -335,7 +337,6 @@ def main():
             </div>
         </div>
 
-        <!-- 歷史增率 -->
         <div class="card">
             <div class="sec-title">🚀【 歷史增率 】</div>
             <div class="grid-2" style="font-size: 13px; font-weight:700;">
@@ -346,7 +347,6 @@ def main():
             </div>
         </div>
 
-        <!-- 模型預測 -->
         <div class="card">
             <div class="sec-title">🎯【 模型預測 】</div>
             <div class="info-row">千萬目標達成率：{progress_pct:.1f}%</div>
@@ -362,7 +362,6 @@ def main():
             </div>
         </div>
 
-        <!-- 圖表區 -->
         <div class="card">
             <div class="chart-title">近期資產軌跡 (含月線 20MA)</div>
             <div class="chart-container" style="height: 250px;">
@@ -376,66 +375,85 @@ def main():
             </div>
         </div>
 
-        <!-- 底部按鈕 (網頁內) -->
         <a href="https://forms.gle/9ZEJawwNRGfiXQiV8" class="btn">📝 Growth 表單</a>
         <a href="https://5972x4.csb.app/" class="btn btn-alt">📈 Skynet Monitoring</a>
 
         <script>
-            Chart.register(ChartDataLabels);
-            
-            // 繪製折線圖
-            new Chart(document.getElementById('lineChart').getContext('2d'), {{
-                type: 'line',
-                data: {{
-                    labels: {chart_dates},
-                    datasets: [
-                        {{ label: '總資產', data: {chart_totals}, borderColor: '#3b82f6', backgroundColor: '#3b82f6', yAxisID: 'y' }},
-                        {{ label: '淨資產', data: {chart_nets}, borderColor: '#ef4444', backgroundColor: '#ef4444', yAxisID: 'y' }},
-                        {{ label: '總資產月線', data: {total_20ma}, borderColor: '#eab308', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }},
-                        {{ label: '淨資產月線', data: {net_20ma}, borderColor: '#ca8a04', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }},
-                        {{ label: '加權月線', data: {twii_ma}, borderColor: '#a855f7', pointRadius: 0, yAxisID: 'y1' }}
-                    ]
-                }},
-                options: {{
-                    responsive: true, maintainAspectRatio: false,
-                    interaction: {{ mode: 'index', intersect: false }},
-                    plugins: {{
-                        legend: {{ position: 'top', labels: {{ boxWidth: 12, font: {{size: 10}} }} }},
-                        datalabels: {{ display: false }} // 折線圖不顯示直接數字
-                    }},
-                    scales: {{
-                        y: {{ type: 'linear', display: true, position: 'left', ticks: {{ callback: function(val) {{ return val>=1000000 ? (val/1000000).toFixed(1)+'M' : val; }} }} }},
-                        y1: {{ type: 'linear', display: false, position: 'right' }} // 加權指數隱藏刻度
-                    }}
+            // 確保網頁讀取完畢後才開始畫圖，並加入 try-catch 防止崩潰
+            document.addEventListener("DOMContentLoaded", function() {{
+                try {{
+                    Chart.register(ChartDataLabels);
+                }} catch (error) {{
+                    console.warn("ChartDataLabels 未能載入:", error);
                 }}
-            }});
 
-            // 繪製圓餅圖
-            new Chart(document.getElementById('pieChart').getContext('2d'), {{
-                type: 'pie',
-                data: {{
-                    labels: ['🇹🇼 現貨台股', '🦆 質押投資', '🇺🇸 現貨美股'],
-                    datasets: [{{
-                        data: [{tw_free_value}, {total_debt}, {us_stock_value_twd}],
-                        backgroundColor: ['#3b82f6', '#fb7185', '#fbbf24'],
-                        borderWidth: 1, borderColor: '#ffffff'
-                    }}]
-                }},
-                options: {{
-                    responsive: true, maintainAspectRatio: false,
-                    plugins: {{
-                        legend: {{ display: false }}, // 隱藏預設圖例，使用 datalabels 顯示
-                        datalabels: {{
-                            color: '#ffffff',
-                            font: {{ weight: 'bold', size: 12 }},
-                            formatter: (value, ctx) => {{
-                                let sum = ctx.chart._metasets[0].total;
-                                let percentage = (value * 100 / sum).toFixed(0) + "%";
-                                return ctx.chart.data.labels[ctx.dataIndex] + '\\n' + percentage;
+                try {{
+                    // 繪製折線圖
+                    const lineCtx = document.getElementById('lineChart').getContext('2d');
+                    new Chart(lineCtx, {{
+                        type: 'line',
+                        data: {{
+                            labels: {chart_dates_json},
+                            datasets: [
+                                {{ label: '總資產', data: {chart_totals_json}, borderColor: '#3b82f6', backgroundColor: '#3b82f6', yAxisID: 'y' }},
+                                {{ label: '淨資產', data: {chart_nets_json}, borderColor: '#ef4444', backgroundColor: '#ef4444', yAxisID: 'y' }},
+                                {{ label: '總資產月線', data: {total_20ma_json}, borderColor: '#eab308', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }},
+                                {{ label: '淨資產月線', data: {net_20ma_json}, borderColor: '#ca8a04', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }},
+                                {{ label: '加權月線', data: {twii_ma_json}, borderColor: '#a855f7', pointRadius: 0, yAxisID: 'y1' }}
+                            ]
+                        }},
+                        options: {{
+                            responsive: true, maintainAspectRatio: false,
+                            interaction: {{ mode: 'index', intersect: false }},
+                            plugins: {{
+                                legend: {{ position: 'top', labels: {{ boxWidth: 12, font: {{size: 10}} }} }},
+                                datalabels: {{ display: false }} // 折線圖不顯示直接數字
                             }},
-                            textAlign: 'center'
+                            scales: {{
+                                y: {{ type: 'linear', display: true, position: 'left', ticks: {{ callback: function(val) {{ return val>=1000000 ? (val/1000000).toFixed(1)+'M' : val; }} }} }},
+                                y1: {{ type: 'linear', display: false, position: 'right' }} // 加權指數隱藏刻度
+                            }}
                         }}
-                    }}
+                    }});
+                }} catch (error) {{
+                    console.error("折線圖繪製失敗:", error);
+                }}
+
+                try {{
+                    // 繪製圓餅圖
+                    const pieCtx = document.getElementById('pieChart').getContext('2d');
+                    new Chart(pieCtx, {{
+                        type: 'pie',
+                        data: {{
+                            labels: ['🇹🇼 現貨台股', '🦆 質押投資', '🇺🇸 現貨美股'],
+                            datasets: [{{
+                                data: [{tw_free_value:.2f}, {total_debt:.2f}, {us_stock_value_twd:.2f}],
+                                backgroundColor: ['#3b82f6', '#fb7185', '#fbbf24'],
+                                borderWidth: 1, borderColor: '#ffffff'
+                            }}]
+                        }},
+                        options: {{
+                            responsive: true, maintainAspectRatio: false,
+                            plugins: {{
+                                legend: {{ display: false }}, // 隱藏預設圖例，使用 datalabels 顯示
+                                datalabels: {{
+                                    color: '#ffffff',
+                                    font: {{ weight: 'bold', size: 12 }},
+                                    formatter: (value, ctx) => {{
+                                        // 安全地計算總和，避免 NaN 崩潰
+                                        let dataArr = ctx.chart.data.datasets[0].data;
+                                        let sum = 0;
+                                        dataArr.forEach(d => sum += Number(d));
+                                        let percentage = sum > 0 ? (value * 100 / sum).toFixed(0) + "%" : "0%";
+                                        return ctx.chart.data.labels[ctx.dataIndex] + '\\n' + percentage;
+                                    }},
+                                    textAlign: 'center'
+                                }}
+                            }}
+                        }}
+                    }});
+                }} catch (error) {{
+                    console.error("圓餅圖繪製失敗:", error);
                 }}
             }});
         </script>
