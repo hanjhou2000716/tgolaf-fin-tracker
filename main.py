@@ -486,7 +486,7 @@ def main():
     </html>
     """
 
-    with open('index.html', 'w', encoding='utf-8') as f: f.write(html_content)
+   with open('index.html', 'w', encoding='utf-8') as f: f.write(html_content)
 
     # === [關鍵補丁]：產生網頁專用即時數據 ===
     import os
