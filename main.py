@@ -488,7 +488,43 @@ def main():
 
     with open('index.html', 'w', encoding='utf-8') as f: f.write(html_content)
 
-    # --- 判斷每日損益，動態生成推播文字 ---
+    # === [關鍵補丁]：產生網頁專用即時數據 ===
+    import os
+    if not os.path.exists('public'):
+        os.makedirs('public')
+    
+    try:
+        # 自動抓取真實加權指數與 200MA
+        taiex_val = yf.Ticker("^TWII").history(period="1d")['Close'].iloc[-1]
+        ma200_val = yf.Ticker("^TWII").history(period="200d")['Close'].mean()
+    except:
+        taiex_val, ma200_val = 22000, 20000
+
+    try:
+        # 自動抓取真實 VIX 恐慌指數
+        vix_val = yf.Ticker("^VIX").history(period="1d")['Close'].iloc[-1]
+    except:
+        vix_val = 16.5
+        
+    try:
+        # 自動抓取 006208 近半年高點作為基準
+        peak_006208 = yf.Ticker("006208.TW").history(period="6mo")['High'].max()
+    except:
+        peak_006208 = 249.85
+
+    data_for_web = {
+        "taiex": round(taiex_val, 2),
+        "ma200": round(ma200_val, 2),
+        "vix": round(vix_val, 2),
+        "peak_006208": round(peak_006208, 2),
+        "asset_006208": round(price_006208, 2) if price_006208 else 249.1,
+        "lastUpdated": tw_now.strftime("%Y/%m/%d %H:%M:%S")
+    }
+
+    with open('public/data.json', 'w', encoding='utf-8') as f:
+        json.dump(data_for_web, f)
+    # =================================
+
     # --- 判斷每日損益，動態生成推播文字 ---
     if daily_diff >= 0:
         msg_body = f"🚀 厲害的阿洲，今天賺了 {int(daily_diff):,} 元 (+{daily_pct:.1f}%)"
@@ -517,14 +553,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-# === [關鍵補丁]：產生數據供網頁讀取 ===
-    data_for_web = {
-        "taiex": 46465.2, # 這裡應填入您從 FinMind 抓到的最新指數
-        "vix": 16.5,      # 這裡應填入您的 VIX 變數
-        "asset_006208": float(price_006208),
-        "lastUpdated": datetime.datetime.now().strftime("%H:%M:%S")
-    }
-    
-    # 確保寫入正確路徑
-    with open('data.json', 'w', encoding='utf-8') as f:
-        json.dump(data_for_web, f)
