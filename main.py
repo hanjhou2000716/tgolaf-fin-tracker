@@ -17,6 +17,33 @@ FINMIND_TOKEN = os.getenv("FINMIND_TOKEN")
 GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
 WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/"
 
+# [函數省略：calculate_current_assets, get_usd_twd_rate, get_us_stock_price, get_tw_stock_price 同您提供的版本]
+# (為了縮短篇幅，我假設您會保留原有的這些邏輯函數)
+
+def main():
+    # ... (您的原有計算邏輯) ...
+    # 假設計算完後，我們有這些變數:
+    # total_asset, net_asset, tw_stock_value, us_stock_value_twd, 
+    # cash_twd, cash_usd, total_debt, price_006208 等...
+    
+    # === [關鍵補丁]：產生數據供網頁讀取 ===
+    # 請確保這段程式碼放在 main() 函式中，計算完所有資產之後
+    data_for_web = {
+        "taiex": 22000.0, # 這裡應填入您從 FinMind 抓到的最新指數
+        "ma200": 18500.0, # 您的 MA200
+        "vix": 16.5,      # 這裡應填入您的 VIX 變數
+        "asset_006208": float(price_006208),
+        "total_asset": float(total_asset),
+        "net_asset": float(net_asset),
+        "lastUpdated": datetime.datetime.now().strftime("%H:%M:%S")
+    }
+    
+    # 確保 public 資料夾存在
+    if not os.path.exists('public'):
+        os.makedirs('public')
+        
+    with open('public/data.json', 'w', encoding='utf-8') as f:
+        json.dump(data_for_web, f)
 # ==========================================
 # 2. Google Sheets 動態資產結算核心
 # ==========================================
