@@ -153,6 +153,7 @@ def get_tw_stock_price(symbol):
 def main():
     tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
     today_str = tw_now.strftime("%m-%d")
+    display_date = tw_now.strftime("%m/%d")
         
     inventory, history_sheet = calculate_current_assets()
     try: history_records = history_sheet.get_all_records()
@@ -460,17 +461,26 @@ def main():
 
     with open('index.html', 'w', encoding='utf-8') as f: f.write(html_content)
 
+    # --- 判斷每日損益，動態生成推播文字 ---
+    if daily_diff >= 0:
+        msg_body = f"🚀 厲害的阿洲，今天賺了 {int(daily_diff):,} 元 (+{daily_pct:.1f}%)"
+    else:
+        # daily_pct 本身就是負數，所以直接顯示即可
+        msg_body = f"💸 可憐的阿洲，今天賠了 {abs(int(daily_diff)):,} 元 ({daily_pct:.1f}%)"
+
+    tg_text = f"✅ ({display_date}) 結算完畢！\n{msg_body}\n\n@PRStK Lab & SFC.e. All right reserve"
+
     # --- 傳送 Telegram 訊息 ---
     keyboard = {
         "inline_keyboard": [
             [{"text": "🦎 Growth 儀表板", "web_app": {"url": WEB_APP_URL}}],
-            [{"text": "📡 Skynet Monitoring", "url": "https://5972x4.csb.app/"}]
+            [{"text": "📈 Skynet Monitoring", "web_app": {"url": "https://5972x4.csb.app/"}}]
         ]
     }
     
     requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
         "chat_id": TELEGRAM_CHAT_ID, 
-        "text": f"✅ {today_str}日報結算完畢！\n@PRStK Lab & SFC.e. All right reserve",
+        "text": tg_text,
         "parse_mode": "Markdown",
         "reply_markup": keyboard
     })
