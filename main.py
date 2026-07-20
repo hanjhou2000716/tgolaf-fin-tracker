@@ -451,15 +451,15 @@ def main():
     # --- 傳送 Telegram 訊息 ---
     keyboard = {
         "inline_keyboard": [
-            [{"text": "⚡️ 開啟互動儀表板", "web_app": {"url": WEB_APP_URL}}],
+            [{"text": "🦎 Growth 儀表板", "web_app": {"url": WEB_APP_URL}}],
             [{"text": "📝 Growth 表單", "url": "https://forms.gle/9ZEJawwNRGfiXQiV8"}],
-            [{"text": "📈 Skynet Monitoring", "url": "https://5972x4.csb.app/"}]
+            [{"text": "🛡️ Skynet Monitoring", "url": "https://5972x4.csb.app/"}]
         ]
     }
     
     requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
         "chat_id": TELEGRAM_CHAT_ID, 
-        "text": f"✅ **日報結算完畢！({today_str})**\n\n您的專屬 Web App 互動儀表板已更新，請點擊下方按鈕查看。",
+        "text": f"✅ {today_str}日報結算完畢！\n@PRStK Lab & SFC.e. All right reserve",
         "parse_mode": "Markdown",
         "reply_markup": keyboard
     })
