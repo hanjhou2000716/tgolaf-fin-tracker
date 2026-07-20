@@ -459,7 +459,7 @@ def main():
     </html>
     """
 
-   with open('index.html', 'w', encoding='utf-8') as f: f.write(html_content)
+    with open('index.html', 'w', encoding='utf-8') as f: f.write(html_content)
 
     # --- 判斷每日損益，動態生成推播文字 ---
     if daily_diff >= 0:
@@ -474,7 +474,6 @@ def main():
     keyboard = {
         "inline_keyboard": [
             [{"text": "🦎 Growth 儀表板", "web_app": {"url": WEB_APP_URL}}],
-            # 將 url 改成 web_app 屬性，這樣就會從下方滑出半滿/全滿視窗！
             [{"text": "📈 Skynet Monitoring", "web_app": {"url": "https://5972x4.csb.app/"}}]
         ]
     }
