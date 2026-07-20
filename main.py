@@ -303,8 +303,8 @@ def main():
     </head>
     <body>
         <div class="header-container">
-            <img src="./PRStK-Remove.png" class="header-logo" alt="PRStK">
-            <img src="./SFC.e-removebg-preview.png" class="header-logo" alt="SFC.e" style="height: 34px;">
+            <img src="./PRStK-Remove.png" alt="PRStK" style="height: 40px; object-fit: contain;">
+            <img src="./SFC.e-removebg-preview.png" alt="SFC.e" style="height: 38px; object-fit: contain;">
             <span class="header-text">| Growth</span>
         </div>
 
@@ -398,8 +398,7 @@ def main():
                                 {{ label: '總資產', data: {chart_totals_json}, borderColor: '#3b82f6', backgroundColor: '#3b82f6', yAxisID: 'y' }},
                                 {{ label: '淨資產', data: {chart_nets_json}, borderColor: '#ef4444', backgroundColor: '#ef4444', yAxisID: 'y' }},
                                 {{ label: '總資產月線', data: {total_20ma_json}, borderColor: '#eab308', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }},
-                                {{ label: '淨資產月線', data: {net_20ma_json}, borderColor: '#ca8a04', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }},
-                                {{ label: '加權月線', data: {twii_ma_json}, borderColor: '#a855f7', pointRadius: 0, yAxisID: 'y1' }}
+                                {{ label: '淨資產月線', data: {net_20ma_json}, borderColor: '#ca8a04', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }}
                             ]
                         }},
                         options: {{
@@ -410,8 +409,7 @@ def main():
                                 datalabels: {{ display: false }} // 折線圖不顯示直接數字
                             }},
                             scales: {{
-                                y: {{ type: 'linear', display: true, position: 'left', ticks: {{ callback: function(val) {{ return val>=1000000 ? (val/1000000).toFixed(1)+'M' : val; }} }} }},
-                                y1: {{ type: 'linear', display: false, position: 'right' }} // 加權指數隱藏刻度
+                                y: {{ type: 'linear', display: true, position: 'left', ticks: {{ callback: function(val) {{ return val>=1000000 ? (val/1000000).toFixed(1)+'M' : val; }} }} }}
                             }}
                         }}
                     }});
@@ -466,9 +464,7 @@ def main():
     # --- 傳送 Telegram 訊息 ---
     keyboard = {
         "inline_keyboard": [
-            [{"text": "🦎 Growth 儀表板", "web_app": {"url": WEB_APP_URL}}],
-            [{"text": "📝 Growth 表單", "url": "https://forms.gle/9ZEJawwNRGfiXQiV8"}],
-            [{"text": "🛡️ Skynet Monitoring", "url": "https://5972x4.csb.app/"}]
+            [{"text": "🦎 Growth 儀表板", "web_app": {"url": WEB_APP_URL}}]
         ]
     }
     
