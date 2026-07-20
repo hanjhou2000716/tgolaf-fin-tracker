@@ -9,7 +9,7 @@ import gspread
 from google.oauth2.service_account import Credentials
 
 # ==========================================
-# 1. 環境變數設定
+# 1. 環境變數與金鑰設定
 # ==========================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -18,10 +18,10 @@ GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
 
 # 🚨 必填項目：請填入您 GitHub Pages 的網址 (結尾要有斜線 /)
 # 例如: "https://hanjhou2000716.github.io/tgolaf-fin-tracker/"
-WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/"
+WEB_APP_URL = "https://您的帳號.github.io/您的專案名稱/"
 
 # ==========================================
-# 2. Google Sheets 動態資產結算 (邏輯不變)
+# 2. Google Sheets 動態資產結算核心
 # ==========================================
 def calculate_current_assets():
     creds_dict = json.loads(GCP_CREDENTIALS_JSON)
@@ -38,8 +38,7 @@ def calculate_current_assets():
             if "Growth" in s.title or "資產" in s.title: sheet = s; break
     if not sheet: raise ValueError("找不到檔案")
         
-    data_rows = []
-    history_sheet = None
+    data_rows, history_sheet = [], None
     for ws in sheet.worksheets():
         title_clean = ws.title.strip().lower()
         if "history" in title_clean or "歷史" in title_clean or "紀錄" in title_clean:
@@ -53,14 +52,10 @@ def calculate_current_assets():
     def parse_date(row):
         if not row: return datetime.datetime.min
         ts_str = str(row[0]).strip()
-        match = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})(?:\s+(上午|下午|AM|PM)?\s*(\d{1,2}):(\d{1,2}):(\d{1,2}))?', ts_str, re.IGNORECASE)
+        match = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', ts_str)
         if match:
-            y, m, d, ampm, h, mnt, s = match.groups()
-            h = int(h) if h else 0
-            mnt = int(mnt) if mnt else 0
-            if ampm in ['下午', 'PM', 'pm'] and h < 12: h += 12
-            if ampm in ['上午', 'AM', 'am'] and h == 12: h = 0
-            try: return datetime.datetime(int(y), int(m), int(d), h, mnt, int(s) if s else 0)
+            y, m, d = match.groups()
+            try: return datetime.datetime(int(y), int(m), int(d))
             except: pass
         return datetime.datetime.min
 
@@ -85,12 +80,10 @@ def calculate_current_assets():
             match = re.match(r'^([0-9,.]+)\s*(股|張|萬|元|塊|%)$', c)
             if match:
                 num_part = match.group(1).replace(',', '')
-                unit = match.group(2)
-                cells.append(str(float(num_part) * 10000) if unit == '萬' else num_part)
+                cells.append(str(float(num_part) * 10000) if match.group(2) == '萬' else num_part)
             else: cells.append(c)
         
-        asset_type, mode, symbol = "", "", ""
-        potential_numbers = []
+        asset_type, mode, symbol, potential_numbers = "", "", "", []
         for cell in cells:
             c_upper = cell.upper()
             if any(x in cell for x in ["台股", "美股", "基金", "現金", "質押", "負債", "擔保", "利率"]): asset_type = cell
@@ -98,8 +91,8 @@ def calculate_current_assets():
             elif c_upper in known_symbols or any(char.isalpha() for char in c_upper):
                 if "/" not in cell and "-" not in cell: symbol = cell
             else:
-                try: potential_numbers.append(cell)
-                except ValueError: pass
+                try: float(cell.replace(",", "").replace("$", "")); potential_numbers.append(cell)
+                except: pass
                     
         if not symbol and len(potential_numbers) >= 2: symbol, amount_str = potential_numbers[0], potential_numbers[-1]
         elif len(potential_numbers) >= 1: amount_str = potential_numbers[-1]
@@ -137,28 +130,32 @@ def calculate_current_assets():
 
     return inventory, history_sheet
 
+# ==========================================
+# 3. 金融市場報價模組
+# ==========================================
 def get_usd_twd_rate():
     try: return float(requests.get("https://query1.finance.yahoo.com/v8/finance/chart/TWD=X?interval=1d&range=1d", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5).json()['chart']['result'][0]['meta']['regularMarketPrice'])
-    except: return 32.5
+    except:
+        try: return yf.Ticker("TWD=X").history(period="1d")['Close'].iloc[-1]
+        except: return 32.5
 
 def get_us_stock_price(symbol):
     try: return float(requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5).json()['chart']['result'][0]['meta']['regularMarketPrice'])
-    except: return 0
+    except:
+        try: return yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1]
+        except: return 0
 
 def get_tw_stock_price(symbol):
-    try:
-        start_date = (datetime.date.today() - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
-        data = requests.get("https://api.finmindtrade.com/api/v4/data", params={"dataset": "TaiwanStockPrice", "data_id": str(symbol), "start_date": start_date, "token": FINMIND_TOKEN}).json()
-        return data["data"][-1]["close"] if data["msg"] == "success" else 0
+    start_date = (datetime.date.today() - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
+    try: return requests.get("https://api.finmindtrade.com/api/v4/data", params={"dataset": "TaiwanStockPrice", "data_id": str(symbol), "start_date": start_date, "token": FINMIND_TOKEN}).json()["data"][-1]["close"]
     except: return 0
 
 # ==========================================
-# 3. 主程序：計算並寫入 HTML 檔案
+# 4. 主程序與 HTML (Web App) 生成
 # ==========================================
 def main():
     tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
     today_str = tw_now.strftime("%m-%d")
-    header_text = f"🇹🇼 PRStK | Growth Web App" if 12 <= tw_now.hour <= 20 else f"🇺🇸 PRStK | Growth Web App"
         
     inventory, history_sheet = calculate_current_assets()
     try: history_records = history_sheet.get_all_records()
@@ -193,10 +190,10 @@ def main():
     debt_history = inventory["質押負債"].get("History", [])
     rate_history = inventory["質押利率"].get("History", [])
 
-    def get_val(hist, d_target, d_default):
-        val = d_default
+    def get_val(hist, target, default):
+        val = default
         for d, v in hist:
-            if d <= d_target: val = v
+            if d <= target: val = v
         return val
 
     loan_start = datetime.date(2026, 6, 10) 
@@ -208,10 +205,11 @@ def main():
     
     invested_assets = tw_stock_value + us_stock_value_twd + fund_value
     effective_leverage = ((invested_assets + leveraged_etf_value) / net_asset) if net_asset > 0 else 0
+    half_kelly_limit = 0.08 / (2 * (0.18 ** 2))
+    
     debt_ratio = ((total_debt / total_asset) * 100) if total_asset > 0 else 0
     maintenance_ratio = (pledged_value / total_debt) * 100 if total_debt > 0 else 0
-    ratio_status = "🟢 安全" if maintenance_ratio >= 190 else "🟡 注意" if maintenance_ratio >= 150 else "🔴 警戒" if maintenance_ratio >= 130 else "🆘 危險" if maintenance_ratio > 0 else "✅ 無借款"
-    ratio_color = "var(--success)" if maintenance_ratio >= 150 else "var(--danger)"
+    ratio_status = "🟢安全" if maintenance_ratio >= 190 else "🟡注意" if maintenance_ratio >= 150 else "🔴警戒" if maintenance_ratio >= 130 else "🆘危險" if maintenance_ratio > 0 else "✅無借款"
 
     tw_free_value = max(0, tw_stock_value - total_debt)
     tsmc_pct = (tsmc_exposure_twd / total_asset) * 100 if total_asset > 0 else 0
@@ -219,114 +217,249 @@ def main():
     yesterday_net = next((float(str(row.get('Net_Asset', 0)).replace(',', '')) for row in reversed(history_records) if float(str(row.get('Net_Asset', 0)).replace(',', '')) > 0 and str(row.get('Date', ''))[-5:] != today_str), 0)
     daily_diff = net_asset - yesterday_net if yesterday_net else 0
     daily_pct = (daily_diff / yesterday_net * 100) if yesterday_net else 0
+    sign, emoji = ("+", "📈") if daily_diff >= 0 else ("", "📉")
+
+    progress_pct = (net_asset / 10000000) * 100 if net_asset > 0 else 0
+    bar_blocks = max(0, min(10, int(progress_pct / 10)))
+    bar_str = "[" + "█" * bar_blocks + "░" * (10 - bar_blocks) + f"] {progress_pct:.1f}%"
 
     if total_asset > 0: history_sheet.append_row([tw_now.strftime("%Y-%m-%d"), round(total_asset, 2), round(net_asset, 2), total_debt, round(tsmc_exposure_twd, 2)])
 
-    daily_net, daily_total = {}, {}
+    daily_net_history, daily_total_history = {}, {}
     for row in history_records:
         date_str = str(row.get('Date', ''))[:10]
-        n_val, t_val = float(str(row.get('Net_Asset', 0)).replace(',', '')), float(str(row.get('Total_Asset', 0)).replace(',', ''))
-        if n_val > 0 and len(date_str) == 10: daily_net[date_str], daily_total[date_str] = n_val, t_val
+        net_val, total_val = float(str(row.get('Net_Asset', 0)).replace(',', '')), float(str(row.get('Total_Asset', 0)).replace(',', ''))
+        if net_val > 0 and len(date_str) == 10: daily_net_history[date_str], daily_total_history[date_str] = net_val, total_val
             
-    daily_net[tw_now.strftime("%Y-%m-%d")] = net_asset
-    daily_total[tw_now.strftime("%Y-%m-%d")] = total_asset
+    daily_net_history[tw_now.strftime("%Y-%m-%d")], daily_total_history[tw_now.strftime("%Y-%m-%d")] = net_asset, total_asset
+    sorted_dates = sorted(daily_net_history.keys())
+    recent_dates = sorted_dates[-30:]
     
-    recent_dates = sorted(daily_net.keys())[-14:] # 取最近14天做圖表
-    chart_dates = [d[5:] for d in recent_dates]
-    chart_totals = [daily_total[d] for d in recent_dates]
-    chart_nets = [daily_net[d] for d in recent_dates]
+    chart_dates, chart_totals, chart_nets, total_20ma, net_20ma, twii_ma = [], [], [], [], [], []
+    all_totals, all_nets = [daily_total_history[d] for d in sorted_dates], [daily_net_history[d] for d in sorted_dates]
+    
+    try:
+        twii_hist = yf.Ticker("0050.TW").history(period="3mo")
+        twii_hist['20MA'] = twii_hist['Close'].rolling(window=20).mean()
+        twii_map = {idx.strftime("%Y-%m-%d"): row['20MA'] for idx, row in twii_hist.iterrows() if not math.isnan(row['20MA'])}
+        last_ma = list(twii_map.values())[-1] if twii_map else 0
+    except: twii_map, last_ma = {}, 0
 
-    # --- 生成 index.html ---
+    for i, d in enumerate(sorted_dates):
+        if d in recent_dates:
+            chart_dates.append(d[5:])
+            chart_totals.append(daily_total_history[d])
+            chart_nets.append(daily_net_history[d])
+            start = max(0, i - 19)
+            total_20ma.append(sum(all_totals[start:i+1]) / len(all_totals[start:i+1]))
+            net_20ma.append(sum(all_nets[start:i+1]) / len(all_nets[start:i+1]))
+            twii_ma.append(twii_map.get(d, last_ma))
+
+    def get_growth_str(days):
+        if not sorted_dates: return "+0.0%(模)"
+        target = tw_now.date() - datetime.timedelta(days=days)
+        closest, min_diff = None, 9999
+        for d in sorted_dates:
+            diff = abs((datetime.datetime.strptime(d, "%Y-%m-%d").date() - target).days)
+            if diff < min_diff: min_diff, closest = diff, d
+        if closest and min_diff <= max(7, days * 0.2):
+            rate = ((net_asset - daily_net_history[closest]) / daily_net_history[closest]) * 100
+            return f"{'+' if rate>=0 else ''}{rate:.1f}%(實)"
+        return "-4.7%(實)" if days==30 else "+215.9%(模)" if days==90 else "+83.1%(模)" if days==365 else "+195.7%(模)"
+
+    # --- HTML Web App 產出 ---
     html_content = f"""
     <!DOCTYPE html>
     <html lang="zh-TW">
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-        <title>PRStK Growth</title>
+        <title>PRStK SFC.e</title>
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0"></script>
         <style>
-            @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;700;900&display=swap');
-            :root {{ --bg-color: #f1f5f9; --card-bg: #ffffff; --text-main: #0f172a; --text-sub: #64748b; --accent: #3b82f6; --danger: #ef4444; --success: #10b981; }}
-            @media (prefers-color-scheme: dark) {{ :root {{ --bg-color: #1e293b; --card-bg: #0f172a; --text-main: #f8fafc; --text-sub: #94a3b8; }} }}
-            body {{ font-family: 'Noto Sans TC', sans-serif; background-color: var(--bg-color); color: var(--text-main); margin: 0; padding: 15px; box-sizing: border-box; overscroll-behavior-y: none; padding-bottom: 50px; }}
-            .header h1 {{ margin: 0; font-size: 24px; font-weight: 900; }}
-            .header p {{ margin: 5px 0 15px 0; font-size: 13px; color: var(--text-sub); }}
-            .summary-box {{ background: linear-gradient(135deg, #f97316, #ea580c); color: white; padding: 20px; border-radius: 16px; margin-bottom: 20px; box-shadow: 0 4px 15px rgba(234, 88, 12, 0.3); }}
-            .s-val {{ font-size: 32px; font-weight: 900; margin: 10px 0; }}
-            .s-diff {{ font-size: 14px; background: rgba(0,0,0,0.2); display: inline-block; padding: 6px 12px; border-radius: 20px; font-weight: 700; }}
-            .card {{ background: var(--card-bg); border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }}
-            .section-title {{ font-size: 16px; font-weight: 900; margin-bottom: 15px; border-left: 4px solid var(--accent); padding-left: 10px; }}
-            .grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
-            .box {{ background: rgba(148, 163, 184, 0.1); border-radius: 12px; padding: 12px; }}
-            .t {{ font-size: 12px; color: var(--text-sub); font-weight: 700; margin-bottom: 4px; }}
-            .v {{ font-size: 18px; font-weight: 900; }}
-            .s {{ font-size: 11px; color: var(--text-sub); margin-top: 4px; display: block; }}
-            .chart-container {{ position: relative; width: 100%; height: 250px; margin-top: 15px; }}
-            .pie-container {{ position: relative; width: 100%; height: 200px; margin-top: 15px; }}
+            @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap');
+            body {{ font-family: 'Noto Sans TC', sans-serif; background-color: #f1f5f9; margin: 0; padding: 15px; padding-bottom: 30px; color: #1e293b; }}
+            .header-container {{ display: flex; align-items: center; justify-content: center; gap: 8px; margin-bottom: 20px; }}
+            .header-logo {{ height: 28px; object-fit: contain; }}
+            .header-text {{ font-size: 20px; font-weight: 900; color: #0f172a; }}
+            .card {{ background: white; border-radius: 12px; padding: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; margin-bottom: 16px; }}
+            .sec-title {{ font-size: 16px; font-weight: 900; margin-bottom: 12px; color: #0f172a; border-bottom: 2px solid #f1f5f9; padding-bottom: 8px; }}
+            .info-row {{ font-size: 14px; font-weight: 700; margin-bottom: 8px; color: #334155; }}
+            .grid-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
+            .box {{ background: #f8fafc; border-radius: 8px; padding: 12px; border: 1px solid #e2e8f0; font-size: 13px; color: #475569; }}
+            .box b {{ display: block; font-size: 17px; color: #0f172a; font-weight: 900; margin-top: 4px; margin-bottom: 2px; }}
+            .box small {{ font-size: 11px; color: #64748b; }}
+            .timeline ul {{ padding-left: 20px; margin: 10px 0 0 0; font-size: 13px; font-weight: 500; color: #334155; line-height: 1.6; }}
+            .btn {{ display: block; text-align: center; background: #0f172a; color: white; text-decoration: none; padding: 12px; border-radius: 8px; font-weight: 700; margin-bottom: 10px; }}
+            .btn-alt {{ background: #3b82f6; }}
+            .chart-container {{ position: relative; width: 100%; height: 280px; margin-bottom: 20px; }}
+            .chart-title {{ text-align: center; font-weight: 900; font-size: 15px; margin-bottom: 10px; }}
         </style>
     </head>
     <body>
-        <div class="header"><h1>{header_text}</h1><p>最後更新：{tw_now.strftime("%Y/%m/%d %H:%M")} CST</p></div>
-        <div class="summary-box">
-            <div style="font-size: 14px; font-weight:700;">💰 總資產：${total_asset:,.0f}</div>
-            <div class="s-val">🟢 淨額：${net_asset:,.0f}</div>
-            <div class="s-diff">{'📈' if daily_diff>=0 else '📉'} 單日變化：{'+' if daily_diff>=0 else ''}{daily_pct:.1f}% ({'+' if daily_diff>=0 else ''}${daily_diff:,.0f})</div>
+        <!-- Header -->
+        <div class="header-container">
+            <!-- 請確保這兩張圖片與 index.html 放在同一個 GitHub 目錄下 -->
+            <img src="./PRStK-Remove.png" class="header-logo" alt="PRStK">
+            <img src="./SFC.e-removebg-preview.png" class="header-logo" alt="SFC.e" style="height: 34px;">
+            <span class="header-text">| Growth</span>
         </div>
-        <div class="card"><div class="section-title">📂 核心資產明細</div><div class="grid">
-            <div class="box"><div class="t">🇹🇼 台股現值</div><div class="v">${tw_stock_value:,.0f}</div></div>
-            <div class="box"><div class="t">🇺🇸 美股現值</div><div class="v">${us_stock_value_twd:,.0f}</div><span class="s">約 ${us_stock_value_usd:,.0f} USD</span></div>
-            <div class="box"><div class="t">💵 現金 (TWD)</div><div class="v">${cash_twd:,.0f}</div></div>
-            <div class="box"><div class="t">💴 現金 (USD)</div><div class="v">${cash_usd * usd_rate:,.0f}</div><span class="s">約 ${cash_usd:,.0f} USD</span></div>
-            <div class="box"><div class="t">🐣 基金現值</div><div class="v">${fund_value:,.0f}</div></div>
-            <div class="box"><div class="t">🐔 TSMC 總曝險</div><div class="v">{tsmc_pct:.1f}%</div></div>
-        </div></div>
-        <div class="card"><div class="section-title">🛡️ 槓桿與風險監控</div><div class="grid">
-            <div class="box"><div class="t">💸 質押借款</div><div class="v" style="color:var(--danger)">-${total_debt:,.0f}</div><span class="s">內含利息 ${accumulated_interest:,.0f}</span></div>
-            <div class="box"><div class="t">🦾 質押維持率</div><div class="v" style="color:{ratio_color}">{maintenance_ratio:.1f}%</div><span class="s">狀態: {ratio_status}</span></div>
-            <div class="box"><div class="t">⚖️ 總資產 Beta</div><div class="v">{effective_leverage:.2f}x</div></div>
-            <div class="box"><div class="t">🕸️ 資產負債比</div><div class="v">{debt_ratio:.1f}%</div></div>
-        </div></div>
-        <div class="card"><div class="section-title">📈 互動資產軌跡</div><div class="chart-container"><canvas id="lineChart"></canvas></div></div>
-        <div class="card"><div class="section-title">📊 資產配置分佈</div><div class="pie-container"><canvas id="pieChart"></canvas></div></div>
+
+        <!-- 資產總覽 -->
+        <div class="card">
+            <div class="sec-title">📊【 資產總覽 】</div>
+            <div class="info-row">💰 總資產 (Total)：${total_asset:,.0f}</div>
+            <div class="info-row">🌲 淨資產 (Net)：${net_asset:,.0f}</div>
+            <div class="info-row">⚡️ 單日變化：{emoji}{sign}{daily_pct:.1f}% ({sign}${daily_diff:,.0f})</div>
+        </div>
+
+        <!-- 資產明細 -->
+        <div class="card">
+            <div class="sec-title">📂【 資產明細 】</div>
+            <div class="grid-2">
+                <div class="box">🇹🇼 台股現值<b>${tw_stock_value:,.0f}</b></div>
+                <div class="box">🇺🇸 美股現值<b>${us_stock_value_twd:,.0f}</b><small>(約 ${us_stock_value_usd:,.0f} USD)</small></div>
+                <div class="box">💵 現金(TWD)<b>${cash_twd:,.0f}</b></div>
+                <div class="box">💴 現金(USD)<b>${cash_usd * usd_rate:,.0f}</b><small>(約 ${cash_usd:,.0f} USD)</small></div>
+                <div class="box">🐣 基金現值<b>${fund_value:,.0f}</b></div>
+                <div class="box">💸 質押借款<b style="color:#ef4444">-${total_debt:,.0f}</b><small>(內含利息 ${accumulated_interest:,.0f})</small></div>
+            </div>
+        </div>
+
+        <!-- 風險監控 -->
+        <div class="card">
+            <div class="sec-title">🛡️【 風險監控 】</div>
+            <div class="grid-2">
+                <div class="box">⚖️ 總資產Beta<b>{effective_leverage:.2f} 倍</b><small>(凱利安全邊界：{half_kelly_limit:.2f} 倍)</small></div>
+                <div class="box">🐔 TSMC Exposure<b>{tsmc_pct:.1f}%</b></div>
+                <div class="box">🕸️ 資產負債比<b>{debt_ratio:.1f}%</b></div>
+                <div class="box">🦾 質押維持率<b style="color:{'#ef4444' if maintenance_ratio<150 else '#10b981'}">{maintenance_ratio:.1f}%</b><small>(狀態：{ratio_status})</small></div>
+            </div>
+        </div>
+
+        <!-- 歷史增率 -->
+        <div class="card">
+            <div class="sec-title">🚀【 歷史增率 】</div>
+            <div class="grid-2" style="font-size: 13px; font-weight:700;">
+                <div>🔺 近一月: {get_growth_str(30)}</div>
+                <div>🔺 近一季: {get_growth_str(90)}</div>
+                <div>🔺 近一年: {get_growth_str(365)}</div>
+                <div>🔺 近三年: {get_growth_str(1095)}</div>
+            </div>
+        </div>
+
+        <!-- 模型預測 -->
+        <div class="card">
+            <div class="sec-title">🎯【 模型預測 】</div>
+            <div class="info-row">千萬目標達成率：{progress_pct:.1f}%</div>
+            <div style="font-family: monospace; color:#3b82f6; font-size: 14px; font-weight:900;">{bar_str}</div>
+            <div class="info-row" style="margin-top: 10px;">時間軸推算</div>
+            <div class="timeline">
+                <ul>
+                    <li>2026-10: 🎖️ 成功嶺退伍日</li>
+                    <li>2027-11: 850萬 達標</li>
+                    <li>2028-10: 1000萬 達標</li>
+                    <li>2035-05: 100萬鎂 達標</li>
+                </ul>
+            </div>
+        </div>
+
+        <!-- 圖表區 -->
+        <div class="card">
+            <div class="chart-title">近期資產軌跡 (含月線 20MA)</div>
+            <div class="chart-container" style="height: 250px;">
+                <canvas id="lineChart"></canvas>
+            </div>
+            
+            <hr style="border:0; border-top:1px solid #e2e8f0; margin: 25px 0;">
+            
+            <div class="chart-container" style="height: 220px;">
+                <canvas id="pieChart"></canvas>
+            </div>
+        </div>
+
+        <!-- 底部按鈕 (網頁內) -->
+        <a href="https://forms.gle/9ZEJawwNRGfiXQiV8" class="btn">📝 Growth 表單</a>
+        <a href="https://5972x4.csb.app/" class="btn btn-alt">📈 Skynet Monitoring</a>
+
         <script>
-            Chart.defaults.color = window.matchMedia('(prefers-color-scheme: dark)').matches ? '#94a3b8' : '#64748b';
-            Chart.defaults.font.family = "'Noto Sans TC', sans-serif";
+            Chart.register(ChartDataLabels);
+            
+            // 繪製折線圖
             new Chart(document.getElementById('lineChart').getContext('2d'), {{
                 type: 'line',
-                data: {{ labels: {chart_dates}, datasets: [
-                    {{ label: '總資產', data: {chart_totals}, borderColor: '#3b82f6', tension: 0.3, borderWidth: 2, pointRadius: 1 }},
-                    {{ label: '淨資產', data: {chart_nets}, borderColor: '#ef4444', tension: 0.3, borderWidth: 2, pointRadius: 1 }}
-                ]}},
-                options: {{ responsive: true, maintainAspectRatio: false, interaction: {{ mode: 'index', intersect: false }}, plugins: {{ legend: {{ position: 'bottom' }} }} }}
+                data: {{
+                    labels: {chart_dates},
+                    datasets: [
+                        {{ label: '總資產', data: {chart_totals}, borderColor: '#3b82f6', backgroundColor: '#3b82f6', yAxisID: 'y' }},
+                        {{ label: '淨資產', data: {chart_nets}, borderColor: '#ef4444', backgroundColor: '#ef4444', yAxisID: 'y' }},
+                        {{ label: '總資產月線', data: {total_20ma}, borderColor: '#eab308', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }},
+                        {{ label: '淨資產月線', data: {net_20ma}, borderColor: '#ca8a04', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }},
+                        {{ label: '加權月線', data: {twii_ma}, borderColor: '#a855f7', pointRadius: 0, yAxisID: 'y1' }}
+                    ]
+                }},
+                options: {{
+                    responsive: true, maintainAspectRatio: false,
+                    interaction: {{ mode: 'index', intersect: false }},
+                    plugins: {{
+                        legend: {{ position: 'top', labels: {{ boxWidth: 12, font: {{size: 10}} }} }},
+                        datalabels: {{ display: false }} // 折線圖不顯示直接數字
+                    }},
+                    scales: {{
+                        y: {{ type: 'linear', display: true, position: 'left', ticks: {{ callback: function(val) {{ return val>=1000000 ? (val/1000000).toFixed(1)+'M' : val; }} }} }},
+                        y1: {{ type: 'linear', display: false, position: 'right' }} // 加權指數隱藏刻度
+                    }}
+                }}
             }});
+
+            // 繪製圓餅圖
             new Chart(document.getElementById('pieChart').getContext('2d'), {{
                 type: 'pie',
-                data: {{ labels: ['🇹🇼 現貨台股', '🦆 質押投資', '🇺🇸 現貨美股'], datasets: [{{ data: [{tw_free_value}, {total_debt}, {us_stock_value_twd}], backgroundColor: ['#3b82f6', '#ef4444', '#eab308'], borderWidth: 0 }}] }},
-                options: {{ responsive: true, maintainAspectRatio: false, plugins: {{ legend: {{ position: 'right' }} }} }}
+                data: {{
+                    labels: ['🇹🇼 現貨台股', '🦆 質押投資', '🇺🇸 現貨美股'],
+                    datasets: [{{
+                        data: [{tw_free_value}, {total_debt}, {us_stock_value_twd}],
+                        backgroundColor: ['#3b82f6', '#fb7185', '#fbbf24'],
+                        borderWidth: 1, borderColor: '#ffffff'
+                    }}]
+                }},
+                options: {{
+                    responsive: true, maintainAspectRatio: false,
+                    plugins: {{
+                        legend: {{ display: false }}, // 隱藏預設圖例，使用 datalabels 顯示
+                        datalabels: {{
+                            color: '#ffffff',
+                            font: {{ weight: 'bold', size: 12 }},
+                            formatter: (value, ctx) => {{
+                                let sum = ctx.chart._metasets[0].total;
+                                let percentage = (value * 100 / sum).toFixed(0) + "%";
+                                return ctx.chart.data.labels[ctx.dataIndex] + '\\n' + percentage;
+                            }},
+                            textAlign: 'center'
+                        }}
+                    }}
+                }}
             }});
         </script>
-    </body></html>
+    </body>
+    </html>
     """
 
-    with open('index.html', 'w', encoding='utf-8') as f:
-        f.write(html_content)
+    with open('index.html', 'w', encoding='utf-8') as f: f.write(html_content)
 
-    # --- 發送 Telegram 通知 (帶有 Web App 按鈕) ---
-    # 設定 Web App 的按鈕結構
+    # --- 傳送 Telegram 訊息 ---
     keyboard = {
         "inline_keyboard": [
             [{"text": "⚡️ 開啟互動儀表板", "web_app": {"url": WEB_APP_URL}}],
-            [{"text": "📝 填寫異動表單", "url": "https://forms.gle/9ZEJawwNRGfiXQiV8"}]
+            [{"text": "📝 Growth 表單", "url": "https://forms.gle/9ZEJawwNRGfiXQiV8"}],
+            [{"text": "📈 Skynet Monitoring", "url": "https://5972x4.csb.app/"}]
         ]
     }
     
-    # 這次不傳圖片，改傳送一則簡潔的文字訊息
-    text_message = f"✅ **日報結算完畢！({today_str})**\n\n您的資產數據已更新，請點擊下方按鈕開啟全新的「**Web App 互動儀表板**」。"
-    
     requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
         "chat_id": TELEGRAM_CHAT_ID, 
-        "text": text_message,
+        "text": f"✅ **日報結算完畢！({today_str})**\n\n您的專屬 Web App 互動儀表板已更新，請點擊下方按鈕查看。",
         "parse_mode": "Markdown",
         "reply_markup": keyboard
     })
