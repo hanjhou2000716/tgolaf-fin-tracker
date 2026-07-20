@@ -28,22 +28,22 @@
         </style>
     </head>
     <body>
-        <div class="header"><h1>🇺🇸 PRStK | Growth Web App</h1><p>最後更新：2026/07/19 22:22 CST</p></div>
+        <div class="header"><h1>🇺🇸 PRStK | Growth Web App</h1><p>最後更新：2026/07/20 08:02 CST</p></div>
         <div class="summary-box">
-            <div style="font-size: 14px; font-weight:700;">💰 總資產：$8,545,409</div>
-            <div class="s-val">🟢 淨額：$6,668,816</div>
-            <div class="s-diff">📉 單日變化：-0.0% ($-169)</div>
+            <div style="font-size: 14px; font-weight:700;">💰 總資產：$8,541,406</div>
+            <div class="s-val">🟢 淨額：$6,664,643</div>
+            <div class="s-diff">📉 單日變化：-0.1% ($-4,172)</div>
         </div>
         <div class="card"><div class="section-title">📂 核心資產明細</div><div class="grid">
             <div class="box"><div class="t">🇹🇼 台股現值</div><div class="v">$6,043,735</div></div>
-            <div class="box"><div class="t">🇺🇸 美股現值</div><div class="v">$2,438,686</div><span class="s">約 $75,349 USD</span></div>
+            <div class="box"><div class="t">🇺🇸 美股現值</div><div class="v">$2,434,692</div><span class="s">約 $75,349 USD</span></div>
             <div class="box"><div class="t">💵 現金 (TWD)</div><div class="v">$30,000</div></div>
-            <div class="box"><div class="t">💴 現金 (USD)</div><div class="v">$5,988</div><span class="s">約 $185 USD</span></div>
+            <div class="box"><div class="t">💴 現金 (USD)</div><div class="v">$5,979</div><span class="s">約 $185 USD</span></div>
             <div class="box"><div class="t">🐣 基金現值</div><div class="v">$27,000</div></div>
-            <div class="box"><div class="t">🐔 TSMC 總曝險</div><div class="v">41.4%</div></div>
+            <div class="box"><div class="t">🐔 TSMC 總曝險</div><div class="v">41.5%</div></div>
         </div></div>
         <div class="card"><div class="section-title">🛡️ 槓桿與風險監控</div><div class="grid">
-            <div class="box"><div class="t">💸 質押借款</div><div class="v" style="color:var(--danger)">-$1,876,594</div><span class="s">內含利息 $6,594</span></div>
+            <div class="box"><div class="t">💸 質押借款</div><div class="v" style="color:var(--danger)">-$1,876,763</div><span class="s">內含利息 $6,763</span></div>
             <div class="box"><div class="t">🦾 質押維持率</div><div class="v" style="color:var(--success)">157.8%</div><span class="s">狀態: 🟡 注意</span></div>
             <div class="box"><div class="t">⚖️ 總資產 Beta</div><div class="v">1.36x</div></div>
             <div class="box"><div class="t">🕸️ 資產負債比</div><div class="v">22.0%</div></div>
@@ -55,15 +55,15 @@
             Chart.defaults.font.family = "'Noto Sans TC', sans-serif";
             new Chart(document.getElementById('lineChart').getContext('2d'), {
                 type: 'line',
-                data: { labels: ['07-04', '07-06', '07-07', '07-08', '07-09', '07-10', '07-11', '07-13', '07-14', '07-15', '07-16', '07-17', '07-18', '07-19'], datasets: [
-                    { label: '總資產', data: [8907153.48, 8933012.84, 8921243.84, 8887743.26, 8883174.05, 8909988.17, 8939572.0, 8984132.44, 8920381.92, 9078664.54, 9100456.74, 8541638.51, 8545409.42, 8545409.416150002], borderColor: '#3b82f6', tension: 0.3, borderWidth: 2, pointRadius: 1 },
-                    { label: '淨資產', data: [7033095.83, 7058617.06, 7046678.99, 7013009.34, 7008271.06, 7034916.12, 7064330.88, 7108553.18, 7044633.6, 7202747.14, 7224370.27, 6665382.97, 6668984.81, 6668815.744917125], borderColor: '#ef4444', tension: 0.3, borderWidth: 2, pointRadius: 1 }
+                data: { labels: ['07-06', '07-07', '07-08', '07-09', '07-10', '07-11', '07-13', '07-14', '07-15', '07-16', '07-17', '07-18', '07-19', '07-20'], datasets: [
+                    { label: '總資產', data: [8933012.84, 8921243.84, 8887743.26, 8883174.05, 8909988.17, 8939572.0, 8984132.44, 8920381.92, 9078664.54, 9100456.74, 8541638.51, 8545409.42, 8545409.42, 8541406.08712], borderColor: '#3b82f6', tension: 0.3, borderWidth: 2, pointRadius: 1 },
+                    { label: '淨資產', data: [7058617.06, 7046678.99, 7013009.34, 7008271.06, 7034916.12, 7064330.88, 7108553.18, 7044633.6, 7202747.14, 7224370.27, 6665382.97, 6668984.81, 6668815.74, 6664643.347393973], borderColor: '#ef4444', tension: 0.3, borderWidth: 2, pointRadius: 1 }
                 ]},
                 options: { responsive: true, maintainAspectRatio: false, interaction: { mode: 'index', intersect: false }, plugins: { legend: { position: 'bottom' } } }
             });
             new Chart(document.getElementById('pieChart').getContext('2d'), {
                 type: 'pie',
-                data: { labels: ['🇹🇼 現貨台股', '🦆 質押投資', '🇺🇸 現貨美股'], datasets: [{ data: [4167141.3287671236, 1876593.6712328766, 2438685.9202000005], backgroundColor: ['#3b82f6', '#ef4444', '#eab308'], borderWidth: 0 }] },
+                data: { labels: ['🇹🇼 現貨台股', '🦆 質押投資', '🇺🇸 現貨美股'], datasets: [{ data: [4166972.2602739725, 1876762.7397260275, 2434692.39776], backgroundColor: ['#3b82f6', '#ef4444', '#eab308'], borderWidth: 0 }] },
                 options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { position: 'right' } } }
             });
         </script>
