@@ -350,6 +350,9 @@ def main():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+        <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+        <meta http-equiv="Pragma" content="no-cache">
+        <meta http-equiv="Expires" content="0">
         <title>PRStK SFC.e</title>
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0"></script>
@@ -368,19 +371,23 @@ def main():
             .box small {{ font-size: 11px; color: #64748b; }}
             .timeline ul {{ padding-left: 20px; margin: 10px 0 0 0; font-size: 13px; font-weight: 500; color: #334155; line-height: 1.6; }}
             .btn {{ display: block; text-align: center; background: #0f172a; color: white; text-decoration: none; padding: 12px; border-radius: 8px; font-weight: 700; margin-bottom: 10px; }}
-            .btn-alt {{ background: #3b82f6; }}
-            .chart-container {{ position: relative; width: 100%; height: 280px; margin-bottom: 20px; }}
-            .chart-title {{ text-align: center; font-weight: 900; font-size: 15px; margin-bottom: 10px; }}
-        </style>
-    </head>
-    <body>
-        <div class="header-container">
-            <span class="header-text">| Growth Tracker</span>
-        </div>
+        .chart-title {{ text-align: center; font-weight: 900; font-size: 15px; margin-bottom: 10px; }}
+    </style>
+</head>
+<body>
+    <div class="header-container">
+        <img src="./PRStK-Remove.png" alt="PRStK" style="height: 40px; object-fit: contain;">
+        <img src="./SFC.e-removebg-preview.png" alt="SFC.e" style="height: 38px; object-fit: contain;">
+        <span class="header-text">| Growth Tracker</span>
+    </div>
 
-        <div class="card">
-            <div class="sec-title">📊【 資產總覽 】</div>
-            <div class="info-row">💰 總資產 (Total)：${total_asset:,.0f}</div>
+    <div style="text-align:center; font-size:13px; color:#64748b; margin-top:-10px; margin-bottom:15px; font-weight: bold;">
+        🔄 數據最後同步：{tw_now.strftime("%m/%d %H:%M:%S")}
+    </div>
+
+    <div class="card">
+        <div class="sec-title">📊【 資產總覽 】</div>
+        <div class="info-row">💰 總資產 (Total)：${total_asset:,.0f}</div>
             <div class="info-row">🌲 淨資產 (Net)：${net_asset:,.0f}</div>
             <div class="info-row">⚡️ 單日變化：{emoji}{sign}{daily_pct:.1f}% ({sign}${daily_diff:,.0f})</div>
         </div>
