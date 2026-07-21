@@ -371,13 +371,13 @@ def main():
             .box small {{ font-size: 11px; color: #64748b; }}
             .timeline ul {{ padding-left: 20px; margin: 10px 0 0 0; font-size: 13px; font-weight: 500; color: #334155; line-height: 1.6; }}
             .btn {{ display: block; text-align: center; background: #0f172a; color: white; text-decoration: none; padding: 12px; border-radius: 8px; font-weight: 700; margin-bottom: 10px; }}
-            .btn-alt {{ background: #3b82f6; }}
-            .chart-container {{ position: relative; width: 100%; height: 280px; margin-bottom: 20px; }}
-        .chart-title {{ text-align: center; font-weight: 900; font-size: 15px; margin-bottom: 10px; }}
+        .chart-title { text-align: center; font-weight: 900; font-size: 15px; margin-bottom: 10px; }
     </style>
 </head>
 <body>
     <div class="header-container">
+        <img src="./PRStK-Remove.png" alt="PRStK" style="height: 40px; object-fit: contain;">
+        <img src="./SFC.e-removebg-preview.png" alt="SFC.e" style="height: 38px; object-fit: contain;">
         <span class="header-text">| Growth Tracker</span>
     </div>
 
