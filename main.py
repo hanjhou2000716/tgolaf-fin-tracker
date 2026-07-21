@@ -290,12 +290,9 @@ def main():
             body {{ font-family: 'Noto Sans TC', sans-serif; background-color: #f1f5f9; margin: 0; padding: 15px; padding-bottom: 30px; color: #1e293b; }}
             
             .header-wrapper {{ background: white; border-radius: 12px; padding: 16px 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; margin-bottom: 16px; }}
-            .header-container {{ display: flex; align-items: center; justify-content: space-between; width: 100%; }}
-            .header-item {{ flex: 1; display: flex; align-items: center; }}
-            .item-left {{ justify-content: flex-start; }}
-            .item-center {{ justify-content: center; }}
-            .item-right {{ justify-content: flex-end; }}
-
+            .header-container {{ display: flex; align-items: center; justify-content: space-around; width: 100%; }}
+            .header-item {{ display: flex; align-items: center; justify-content: center; }}
+            
             .card {{ background: white; border-radius: 12px; padding: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; margin-bottom: 16px; }}
             .sec-title {{ font-size: 16px; font-weight: 900; margin-bottom: 12px; color: #0f172a; border-bottom: 2px solid #f1f5f9; padding-bottom: 8px; }}
             .info-row {{ font-size: 14px; font-weight: 700; margin-bottom: 8px; color: #334155; }}
@@ -313,19 +310,19 @@ def main():
     <body>
         <div class="header-wrapper">
             <div class="header-container">
-                <!-- 左側 1/3：PRStK -->
-                <div class="header-item item-left">
+                <!-- 左側：PRStK -->
+                <div class="header-item">
                     <img src="./PRStK-Remove.png" alt="PRStK" style="height: 26px; object-fit: contain; max-width: 100%;">
                 </div>
-                <!-- 中間 1/3：SFC -->
-                <div class="header-item item-center">
+                <!-- 中間：SFC -->
+                <div class="header-item">
                     <img src="./SFC.e-removebg-preview.png" alt="SFC.e" style="height: 30px; object-fit: contain; max-width: 100%;">
                 </div>
-                <!-- 右側 1/3：Growth 文字排版 -->
-                <div class="header-item item-right">
+                <!-- 右側：Growth -->
+                <div class="header-item">
                     <div style="display: flex; align-items: center;">
                         <div style="width: 2.5px; height: 22px; background-color: #0f172a; margin-right: 8px; border-radius: 2px;"></div>
-                        <div style="font-size: 16px; font-weight: 900; color: #0f172a; letter-spacing: 0.5px;">Growth</div>
+                        <div style="font-size: 18px; font-weight: 900; color: #0f172a; letter-spacing: 0.5px;">Growth</div>
                     </div>
                 </div>
             </div>

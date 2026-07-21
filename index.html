@@ -15,12 +15,9 @@
             body { font-family: 'Noto Sans TC', sans-serif; background-color: #f1f5f9; margin: 0; padding: 15px; padding-bottom: 30px; color: #1e293b; }
             
             .header-wrapper { background: white; border-radius: 12px; padding: 16px 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; margin-bottom: 16px; }
-            .header-container { display: flex; align-items: center; justify-content: space-between; width: 100%; }
-            .header-item { flex: 1; display: flex; align-items: center; }
-            .item-left { justify-content: flex-start; }
-            .item-center { justify-content: center; }
-            .item-right { justify-content: flex-end; }
-
+            .header-container { display: flex; align-items: center; justify-content: space-around; width: 100%; }
+            .header-item { display: flex; align-items: center; justify-content: center; }
+            
             .card { background: white; border-radius: 12px; padding: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; margin-bottom: 16px; }
             .sec-title { font-size: 16px; font-weight: 900; margin-bottom: 12px; color: #0f172a; border-bottom: 2px solid #f1f5f9; padding-bottom: 8px; }
             .info-row { font-size: 14px; font-weight: 700; margin-bottom: 8px; color: #334155; }
@@ -38,42 +35,42 @@
     <body>
         <div class="header-wrapper">
             <div class="header-container">
-                <!-- 左側 1/3：PRStK -->
-                <div class="header-item item-left">
+                <!-- 左側：PRStK -->
+                <div class="header-item">
                     <img src="./PRStK-Remove.png" alt="PRStK" style="height: 26px; object-fit: contain; max-width: 100%;">
                 </div>
-                <!-- 中間 1/3：SFC -->
-                <div class="header-item item-center">
+                <!-- 中間：SFC -->
+                <div class="header-item">
                     <img src="./SFC.e-removebg-preview.png" alt="SFC.e" style="height: 30px; object-fit: contain; max-width: 100%;">
                 </div>
-                <!-- 右側 1/3：Growth 文字排版 -->
-                <div class="header-item item-right">
+                <!-- 右側：Growth -->
+                <div class="header-item">
                     <div style="display: flex; align-items: center;">
                         <div style="width: 2.5px; height: 22px; background-color: #0f172a; margin-right: 8px; border-radius: 2px;"></div>
-                        <div style="font-size: 16px; font-weight: 900; color: #0f172a; letter-spacing: 0.5px;">Growth</div>
+                        <div style="font-size: 18px; font-weight: 900; color: #0f172a; letter-spacing: 0.5px;">Growth</div>
                     </div>
                 </div>
             </div>
             <!-- 下方時間戳記整合 -->
             <div style="text-align: center; color: #64748b; font-size: 12px; font-weight: 700; margin-top: 12px; padding-top: 10px; border-top: 1px dashed #cbd5e1;">
-                🔄 數據最後同步：07/21 09:42:09
+                🔄 數據最後同步：07/21 09:47:03
             </div>
         </div>
 
         <div class="card">
             <div class="sec-title">📊【 資產總覽 】</div>
-            <div class="info-row">💰 總資產 (Total)：$8,398,771</div>
-            <div class="info-row">🌲 淨資產 (Net)：$6,521,839</div>
-            <div class="info-row">⚡️ 單日變化：📈+0.0% (+$1,573)</div>
+            <div class="info-row">💰 總資產 (Total)：$8,400,433</div>
+            <div class="info-row">🌲 淨資產 (Net)：$6,523,501</div>
+            <div class="info-row">⚡️ 單日變化：📈+0.0% (+$3,235)</div>
         </div>
 
         <div class="card">
             <div class="sec-title">📂【 資產明細 】</div>
             <div class="grid-2">
                 <div class="box">🇹🇼 台股現值<b>$5,902,530</b></div>
-                <div class="box">🇺🇸 美股現值<b>$2,433,267</b><small>(約 $75,366 USD)</small></div>
+                <div class="box">🇺🇸 美股現值<b>$2,434,925</b><small>(約 $75,366 USD)</small></div>
                 <div class="box">💵 現金(TWD)<b>$30,000</b></div>
-                <div class="box">💴 現金(USD)<b>$5,974</b><small>(約 $185 USD)</small></div>
+                <div class="box">💴 現金(USD)<b>$5,978</b><small>(約 $185 USD)</small></div>
                 <div class="box">🐣 基金現值<b>$27,000</b></div>
                 <div class="box">💸 質押借款<b style="color:#ef4444">-$1,876,932</b><small>(內含利息 $6,932)</small></div>
             </div>
@@ -146,10 +143,10 @@
                         data: {
                             labels: ["06-19", "06-20", "06-21", "06-22", "06-23", "06-24", "06-25", "06-26", "06-27", "06-29", "06-30", "07-01", "07-02", "07-03", "07-04", "07-06", "07-07", "07-08", "07-09", "07-10", "07-11", "07-13", "07-14", "07-15", "07-16", "07-17", "07-18", "07-19", "07-20", "07-21"],
                             datasets: [
-                                { label: '總資產', data: [8950592.47, 8950274.97, 8950274.97, 9190268.99, 9104072.12, 9019852.04, 8836503.98, 8585680.41, 8537152.59, 8651051.75, 8906714.68, 9081305.68, 9018858.08, 8988855.16, 8907153.48, 8933012.84, 8921243.84, 8887743.26, 8883174.05, 8909988.17, 8939572.0, 8984132.44, 8920381.92, 9078664.54, 9100456.74, 8541638.51, 8545409.42, 8545409.42, 8397028.64, 8398770.87744], borderColor: '#3b82f6', backgroundColor: '#3b82f6', yAxisID: 'y' },
-                                { label: '淨資產', data: [7078732.72, 7080274.97, 7080274.97, 7318240.17, 7231874.23, 7147485.08, 6963967.95, 6712975.31, 6664278.43, 6777839.45, 7033333.31, 7207755.24, 7145138.57, 7114966.58, 7033095.83, 7058617.06, 7046678.99, 7013009.34, 7008271.06, 7034916.12, 7064330.88, 7108553.18, 7044633.6, 7202747.14, 7224370.27, 6665382.97, 6668984.81, 6668815.74, 6520265.9, 6521839.069220822], borderColor: '#ef4444', backgroundColor: '#ef4444', yAxisID: 'y' },
-                                { label: '總資產月線', data: [7975863.273999999, 8055207.834999999, 8131901.915999999, 8224144.339, 8305167.751999999, 8377606.0825000005, 8439453.167499999, 8486124.966499997, 8533864.023999998, 8597041.675, 8679276.133499999, 8765759.844500002, 8812538.444000002, 8851194.686, 8871104.702, 8891143.357, 8901429.603, 8904332.636, 8908550.6375, 8910688.6765, 8910137.653, 8911830.5265, 8910335.874, 8904755.651499998, 8904574.882499998, 8880664.206, 8866109.477999998, 8864095.9285, 8857089.731, 8844475.687372], borderColor: '#eab308', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' },
-                                { label: '淨資產月線', data: [6754364.522, 6774709.083, 6792403.164, 6825544.146, 6847457.6645, 6860777.647, 6863497.930499999, 6851034.474499999, 6839629.823999999, 6843646.859999999, 6866712.25, 6894018.439, 6940627.970000001, 6979115.143000001, 6998856.0905, 7018717.2235, 7028834.401000001, 7031568.365499998, 7035617.298499999, 7037586.268999999, 7036866.177000001, 7038280.0875, 7036498.018999999, 7030723.3675, 7030348.169499999, 7006243.063999998, 6991493.907, 6989285.928499999, 6982085.301999999, 6969285.282961041], borderColor: '#ca8a04', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }
+                                { label: '總資產', data: [8950592.47, 8950274.97, 8950274.97, 9190268.99, 9104072.12, 9019852.04, 8836503.98, 8585680.41, 8537152.59, 8651051.75, 8906714.68, 9081305.68, 9018858.08, 8988855.16, 8907153.48, 8933012.84, 8921243.84, 8887743.26, 8883174.05, 8909988.17, 8939572.0, 8984132.44, 8920381.92, 9078664.54, 9100456.74, 8541638.51, 8545409.42, 8545409.42, 8397028.64, 8400433.000319999], borderColor: '#3b82f6', backgroundColor: '#3b82f6', yAxisID: 'y' },
+                                { label: '淨資產', data: [7078732.72, 7080274.97, 7080274.97, 7318240.17, 7231874.23, 7147485.08, 6963967.95, 6712975.31, 6664278.43, 6777839.45, 7033333.31, 7207755.24, 7145138.57, 7114966.58, 7033095.83, 7058617.06, 7046678.99, 7013009.34, 7008271.06, 7034916.12, 7064330.88, 7108553.18, 7044633.6, 7202747.14, 7224370.27, 6665382.97, 6668984.81, 6668815.74, 6520265.9, 6523501.192100821], borderColor: '#ef4444', backgroundColor: '#ef4444', yAxisID: 'y' },
+                                { label: '總資產月線', data: [7975863.273999999, 8055207.834999999, 8131901.915999999, 8224144.339, 8305167.751999999, 8377606.0825000005, 8439453.167499999, 8486124.966499997, 8533864.023999998, 8597041.675, 8679276.133499999, 8765759.844500002, 8812538.444000002, 8851194.686, 8871104.702, 8891143.357, 8901429.603, 8904332.636, 8908550.6375, 8910688.6765, 8910137.653, 8911830.5265, 8910335.874, 8904755.651499998, 8904574.882499998, 8880664.206, 8866109.477999998, 8864095.9285, 8857089.731, 8844558.793515999], borderColor: '#eab308', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' },
+                                { label: '淨資產月線', data: [6754364.522, 6774709.083, 6792403.164, 6825544.146, 6847457.6645, 6860777.647, 6863497.930499999, 6851034.474499999, 6839629.823999999, 6843646.859999999, 6866712.25, 6894018.439, 6940627.970000001, 6979115.143000001, 6998856.0905, 7018717.2235, 7028834.401000001, 7031568.365499998, 7035617.298499999, 7037586.268999999, 7036866.177000001, 7038280.0875, 7036498.018999999, 7030723.3675, 7030348.169499999, 7006243.063999998, 6991493.907, 6989285.928499999, 6982085.301999999, 6969368.38910504], borderColor: '#ca8a04', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }
                             ]
                         },
                         options: {
@@ -176,7 +173,7 @@
                         data: {
                             labels: ['🇹🇼 現貨台股', '🦆 質押投資', '🇺🇸 現貨美股'],
                             datasets: [{
-                                data: [4025598.19, 1876931.81, 2433267.00],
+                                data: [4025598.19, 1876931.81, 2434925.05],
                                 backgroundColor: ['#3b82f6', '#fb7185', '#fbbf24'],
                                 borderWidth: 1, borderColor: '#ffffff'
                             }]
