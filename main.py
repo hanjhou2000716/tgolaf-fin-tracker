@@ -321,11 +321,11 @@ def main():
                 <div class="header-item item-center">
                     <img src="./SFC.e-removebg-preview.png" alt="SFC.e" style="height: 30px; object-fit: contain; max-width: 100%;">
                 </div>
-                <!-- 右側 1/3：Growth Tracker 文字排版 -->
+                <!-- 右側 1/3：Growth 文字排版 -->
                 <div class="header-item item-right">
                     <div style="display: flex; align-items: center;">
-                        <div style="width: 2.5px; height: 28px; background-color: #0f172a; margin-right: 6px; border-radius: 2px;"></div>
-                        <div style="font-size: 13px; font-weight: 900; color: #0f172a; line-height: 1.15; text-align: left; letter-spacing: 0.5px;">Growth<br>Tracker</div>
+                        <div style="width: 2.5px; height: 22px; background-color: #0f172a; margin-right: 8px; border-radius: 2px;"></div>
+                        <div style="font-size: 16px; font-weight: 900; color: #0f172a; letter-spacing: 0.5px;">Growth</div>
                     </div>
                 </div>
             </div>
