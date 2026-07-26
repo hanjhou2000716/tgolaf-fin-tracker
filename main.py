@@ -611,7 +611,7 @@ def main():
                     const fullNets = {chart_nets_json};
                     const movingAverages = {{
                         20: {total_20ma_json}, 60: {total_60ma_json},
-                        120: {total_120ma_json}, 240: {total_240ma_json}
+                        240: {total_240ma_json}
                     }};
                     const netMovingAverages = {{20: {net_20ma_json}, 60: {net_60ma_json}, 120: {net_120ma_json}, 240: {net_240ma_json}}};
                     const lineChart = new Chart(lineCtx, {{
