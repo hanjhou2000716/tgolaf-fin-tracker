@@ -310,8 +310,6 @@ def main():
     stress_scenarios = [
         {"label": "006208 下跌 10%", "netImpact": asset_006208_value * -0.10, "netAsset": net_asset - asset_006208_value * 0.10, "maintenance": stressed_maintenance_ratio(0.10)},
         {"label": "006208 下跌 20%", "netImpact": asset_006208_value * -0.20, "netAsset": net_asset - asset_006208_value * 0.20, "maintenance": stressed_maintenance_ratio(0.20)},
-        {"label": "QQQM 下跌 10%", "netImpact": qqqm_value * -0.10, "netAsset": net_asset - qqqm_value * 0.10, "maintenance": None},
-        {"label": "QQQM 下跌 20%", "netImpact": qqqm_value * -0.20, "netAsset": net_asset - qqqm_value * 0.20, "maintenance": None},
     ]
 
     yesterday_net = next((float(str(row.get('Net_Asset', 0)).replace(',', '')) for row in reversed(history_records) if float(str(row.get('Net_Asset', 0)).replace(',', '')) > 0 and str(row.get('Date', ''))[-5:] != today_str), 0)
