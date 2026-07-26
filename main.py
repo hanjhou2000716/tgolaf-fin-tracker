@@ -840,7 +840,7 @@ def main():
     # --- 傳送 Telegram 訊息 ---
     keyboard = {
         "inline_keyboard": [
-            [{"text": "🦎 Growth 儀表板", "web_app": {"url": WEB_APP_URL}}],
+            [{"text": "開啟Growth儀表板", "web_app": {"url": WEB_APP_URL}}],
         ]
     }
     
