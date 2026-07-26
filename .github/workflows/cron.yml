@@ -11,15 +11,19 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: growth-dashboard
+  cancel-in-progress: false
+
 jobs:
   build_and_deploy:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.10'
 
@@ -35,6 +39,11 @@ jobs:
           GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
         run: python main.py
+      - name: Verify generated dashboard data
+        run: |
+          test -s index.html
+          test -s public/data.json
+          python -m json.tool public/data.json > /dev/null
         
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
