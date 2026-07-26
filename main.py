@@ -619,7 +619,7 @@ def main():
             <a href="https://hanjhou2000716.github.io/skynet-monitoring/" class="btn btn-alt">開啟 Risk Monitor</a>
             <a href="https://forms.gle/9ZEJawwNRGfiXQiV8" class="btn">登錄資產異動</a>
         </div>
-        <footer class="footer">© 2026 PRStK Lab &amp; SFC.e. | All rights reserved.</footer>
+        <footer class="footer">@2026 PRStK Lab &amp; D.INV | All right reserved.</footer>
 
         <script>
             // 確保網頁讀取完畢後才開始畫圖，並加入 try-catch 防止崩潰
