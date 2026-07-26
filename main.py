@@ -479,11 +479,11 @@ def main():
                     new Chart(pieCtx, {{
                         type: 'pie',
                         data: {{
-                            labels: ['🇹🇼 現貨台股', '🦆 質押投資', '🇺🇸 現貨美股'],
+                            labels: ['台股', '美股', '現金', '基金'],
                             datasets: [{{
-                                data: [{tw_free_value:.2f}, {total_debt:.2f}, {us_stock_value_twd:.2f}],
-                                backgroundColor: ['#3b82f6', '#fb7185', '#fbbf24'],
-                                borderWidth: 1, borderColor: '#ffffff'
+                                data: [{tw_stock_value:.2f}, {us_stock_value_twd:.2f}, {total_cash_twd:.2f}, {fund_value:.2f}],
+                                backgroundColor: ['#727a6d', '#9a9387', '#c8c1b5', '#b58a72'],
+                                borderWidth: 1, borderColor: '#fbfaf7'
                             }}]
                         }},
                         options: {{
@@ -541,13 +541,38 @@ def main():
     except:
         peak_006208 = 249.85
 
+    allocation_items = [
+        {"label": "台股", "value": round(tw_stock_value, 2), "color": "#727a6d"},
+        {"label": "美股", "value": round(us_stock_value_twd, 2), "color": "#9a9387"},
+        {"label": "現金", "value": round(total_cash_twd, 2), "color": "#c8c1b5"},
+        {"label": "基金", "value": round(fund_value, 2), "color": "#b58a72"},
+    ]
+    for item in allocation_items:
+        item["percent"] = round((item["value"] / total_asset * 100), 1) if total_asset > 0 else 0
+
+    risk_level = "attention" if maintenance_ratio and maintenance_ratio < 150 else "watch" if debt_ratio >= 25 or tsmc_pct >= 35 else "stable"
+    risk_summary = {
+        "level": risk_level,
+        "debtRatio": round(debt_ratio, 1),
+        "maintenanceRatio": round(maintenance_ratio, 1),
+        "tsmcExposureRatio": round(tsmc_pct, 1),
+        "effectiveLeverage": round(effective_leverage, 2),
+    }
+
     data_for_web = {
         "taiex": round(taiex_val, 2),
         "ma200": round(ma200_val, 2),
         "vix": round(vix_val, 2),
         "peak_006208": round(peak_006208, 2),
         "asset_006208": round(price_006208, 2) if price_006208 else 249.1,
-        "lastUpdated": tw_now.strftime("%Y/%m/%d %H:%M:%S")
+        "lastUpdated": tw_now.strftime("%Y/%m/%d %H:%M:%S"),
+        "portfolio": {
+            "totalAsset": round(total_asset, 2),
+            "netAsset": round(net_asset, 2),
+            "totalDebt": round(total_debt, 2),
+            "allocation": allocation_items,
+            "risk": risk_summary,
+        },
     }
 
     data_for_web["status"] = "ok" if total_asset > 0 else "degraded"
