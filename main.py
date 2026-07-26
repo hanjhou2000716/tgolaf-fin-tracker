@@ -224,7 +224,7 @@ def main():
         
     usd_rate = get_usd_twd_rate()
     tw_stock_value, us_stock_value_usd, tsmc_exposure_twd, price_006208, leveraged_etf_value = 0, 0, 0, 0, 0
-    position_values_twd = {}
+    position_values_twd, tw_position_values, us_position_values = {}, {}, {}
     cash_twd, cash_usd = inventory["現金_TWD"].get("TWD", 0), inventory["現金_USD"].get("USD", 0)
     fund_value = sum(v for k, v in inventory["基金"].items() if k != "History")
 
@@ -234,6 +234,7 @@ def main():
         value = price * shares
         tw_stock_value += value 
         position_values_twd[symbol] = value
+        tw_position_values[symbol] = value
         if symbol == '2330': tsmc_exposure_twd += (value * 1.0)
         elif symbol == '006208': tsmc_exposure_twd += (value * 0.594); price_006208 = price
         elif symbol == '00685L': tsmc_exposure_twd += (value * 0.728); leveraged_etf_value = value
@@ -256,6 +257,7 @@ def main():
         value = get_us_stock_price(symbol) * shares
         us_stock_value_usd += value
         position_values_twd[symbol] = value * usd_rate
+        us_position_values[symbol] = value * usd_rate
         if symbol == 'TSM': tsmc_exposure_twd += (value * usd_rate * 1.0)
 
     us_stock_value_twd = us_stock_value_usd * usd_rate
@@ -295,6 +297,11 @@ def main():
     largest_position_status = "警示" if largest_position_pct >= 35 else "觀察" if largest_position_pct >= 20 else "正常"
     asset_006208_value = position_values_twd.get("006208", 0)
     qqqm_value = position_values_twd.get("QQQM", 0)
+    tw_largest_symbol, tw_largest_value = max(tw_position_values.items(), key=lambda item: item[1], default=("—", 0))
+    us_largest_symbol, us_largest_value = max(us_position_values.items(), key=lambda item: item[1], default=("—", 0))
+    tw_largest_pct = (tw_largest_value / total_asset * 100) if total_asset else 0
+    us_largest_pct = (us_largest_value / total_asset * 100) if total_asset else 0
+    unpledged_tw_value = max(0, tw_stock_value - pledged_value)
 
     def stressed_maintenance_ratio(decline):
         stressed_collateral = max(0, pledged_value - (pledged_006208_value * decline))
@@ -335,6 +342,14 @@ def main():
             previous = None
         category_daily_changes[key] = None if previous is None else {"amount": round(value - previous, 2), "percent": round((value - previous) / previous * 100, 2) if previous else 0}
 
+    category_labels = {"TW_Stock_Value": "台股", "US_Stock_Value": "美股", "Cash_Value": "現金", "Fund_Value": "基金"}
+    def daily_card(key, change):
+        if change is None:
+            return f'<div class="daily-card"><span>{category_labels[key]}</span><b class="price-flat">待累積</b><small>尚無前日快照</small></div>'
+        color = "price-up" if change["amount"] > 0 else "price-down" if change["amount"] < 0 else "price-flat"
+        return f'<div class="daily-card"><span>{category_labels[key]}</span><b class="{color}">{change["percent"]:+.2f}%</b><small>${change["amount"]:+,.0f}</small></div>'
+    daily_cards_html = "".join(daily_card(key, change) for key, change in category_daily_changes.items())
+
     snapshot_result = "skipped"
     if total_asset > 0:
         ensure_history_columns(history_sheet)
@@ -365,6 +380,8 @@ def main():
     chart_totals, chart_nets = all_totals, all_nets
     total_20ma, total_60ma = moving_average(all_totals, 20), moving_average(all_totals, 60)
     total_120ma, total_240ma = moving_average(all_totals, 120), moving_average(all_totals, 240)
+    net_20ma, net_60ma = moving_average(all_nets, 20), moving_average(all_nets, 60)
+    net_120ma, net_240ma = moving_average(all_nets, 120), moving_average(all_nets, 240)
 
     chart_dates_json = json.dumps(chart_dates)
     chart_totals_json = json.dumps(chart_totals)
@@ -373,6 +390,8 @@ def main():
     total_60ma_json = json.dumps(total_60ma)
     total_120ma_json = json.dumps(total_120ma)
     total_240ma_json = json.dumps(total_240ma)
+    net_20ma_json, net_60ma_json = json.dumps(net_20ma), json.dumps(net_60ma)
+    net_120ma_json, net_240ma_json = json.dumps(net_120ma), json.dumps(net_240ma)
 
     def get_growth_str(days):
         if not sorted_dates: return "+0.0%(模)"
@@ -401,7 +420,7 @@ def main():
         <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&display=swap');
-            :root {{ --paper: #f5f4ef; --surface: #fbfaf7; --ink: #34332f; --muted: #77736b; --line: #dedbd3; --sage: #727a6d; --brick: #ad6658; }}
+            :root {{ --paper: #f1f0eb; --surface: #fbfaf7; --ink: #23354a; --muted: #77736b; --line: #d7d4cc; --sage: #687c70; --brick: #c4674f; --orange:#c98a4b; --navy:#24425e; }}
             * {{ box-sizing: border-box; }}
             body {{ font-family: 'Noto Sans TC', sans-serif; background-color: var(--paper); margin: 0 auto; max-width: 1080px; padding: 32px 20px 48px; color: var(--ink); letter-spacing: .01em; }}
             .header-wrapper {{ display:flex; align-items:center; justify-content:space-between; gap:20px; padding:0 0 20px; border-bottom:1px solid var(--line); margin-bottom:18px; }}
@@ -447,7 +466,11 @@ def main():
             .stress-impact {{ color:var(--brick); font-family:'Noto Serif TC', serif; font-size:20px; font-weight:700; margin:7px 0 4px; }}
             .stress-detail {{ color:var(--muted); font-size:11px; line-height:1.7; }}
             .footer {{ border-top:1px solid var(--line); padding-top:16px; color:var(--muted); font-size:11px; text-align:center; letter-spacing:.04em; }}
-            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid {{ gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} }}
+            .daily-grid {{ display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin-top:12px; }}
+            .daily-card {{ background:#eef0ed; border:1px solid #d8ded8; padding:12px; font-size:12px; }} .daily-card b {{ display:block; font-size:18px; margin:4px 0; }} .daily-card small {{ color:var(--muted); }}
+            .price-up {{ color:#b84f45 !important; }} .price-down {{ color:#5e806d !important; }} .price-flat {{ color:var(--navy) !important; }}
+            .block-grid {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }}
+            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid {{ gap:8px; }} .daily-grid, .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} }}
         </style>
     </head>
     <body>
@@ -486,23 +509,25 @@ def main():
                 <div class="box">現金<b>${total_cash_twd:,.0f}</b><small>TWD 與 USD 合計</small></div>
                 <div class="box">基金<b>${fund_value:,.0f}</b></div>
             </div>
+            <div class="daily-grid">{daily_cards_html}</div>
         </div>
 
         <div class="card">
             <div class="sec-title">風險摘要 <span class="sec-note">Current safeguards</span></div>
             <div class="grid-2">
                 <div class="box">有效槓桿<b>{effective_leverage:.2f} ×</b><small>凱利安全邊界 {half_kelly_limit:.2f} ×</small></div>
-                <div class="box">TSMC 曝險<b>{tsmc_pct:.1f}%</b></div>
+                <div class="box">TSMC 曝險<b>{tsmc_pct:.1f}%</b><small>半導體穿透</small></div>
+                <div class="box">NVDA 曝險<b>{nvda_pct:.1f}%</b><small>含 QQQM／SPYG／VOO</small></div>
                 <div class="box">質押借款<b class="risk-alert">${total_debt:,.0f}</b><small>含利息 ${accumulated_interest:,.0f}</small></div>
                 <div class="box">質押維持率<b class="{'risk-alert' if maintenance_ratio<150 else 'risk-good'}">{maintenance_ratio:.1f}%</b><small>{ratio_status}</small></div>
             </div>
         </div>
 
         <div class="card">
-            <div class="sec-title">集中度與壓力測試 <span class="exposure-status">{largest_position_status}</span></div>
+            <div class="sec-title">集中度與壓力測試 <span class="exposure-status">20% 觀察 · 35% 警示</span></div>
             <div class="grid-2" style="margin-bottom:12px;">
-                <div class="box">最大單一標的<b>{largest_symbol} · {largest_position_pct:.1f}%</b><small>${largest_position_value:,.0f} ／ 總資產</small></div>
-                <div class="box">TSMC 穿透曝險<b>{tsmc_pct:.1f}%</b><small>單一標的 ≥20% 觀察；≥35% 警示</small></div>
+                <div class="box">台股最大單一標的<b>{tw_largest_symbol} · {tw_largest_pct:.1f}%</b><small>${tw_largest_value:,.0f} ／ 總資產</small></div>
+                <div class="box">美股最大單一標的<b>{us_largest_symbol} · {us_largest_pct:.1f}%</b><small>${us_largest_value:,.0f} ／ 總資產</small></div>
             </div>
             <div class="stress-grid">{stress_cards_html}</div>
         </div>
@@ -551,6 +576,11 @@ def main():
             <div class="chart-container" style="height: 220px;">
                 <canvas id="pieChart"></canvas>
             </div>
+            <div class="block-grid">
+                <div class="box">未質押台股<b>${unpledged_tw_value:,.0f}</b></div>
+                <div class="box">質押台股<b>${pledged_value:,.0f}</b></div>
+                <div class="box">現貨美股<b>${us_stock_value_twd:,.0f}</b></div>
+            </div>
         </div>
 
         <div class="actions">
@@ -578,6 +608,7 @@ def main():
                         20: {total_20ma_json}, 60: {total_60ma_json},
                         120: {total_120ma_json}, 240: {total_240ma_json}
                     }};
+                    const netMovingAverages = {{20: {net_20ma_json}, 60: {net_60ma_json}, 120: {net_120ma_json}, 240: {net_240ma_json}}};
                     const lineChart = new Chart(lineCtx, {{
                         type: 'line',
                         data: {{
@@ -588,7 +619,8 @@ def main():
                                 {{ label: '20 日線', data: movingAverages[20], borderColor: '#9a9387', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y' }},
                                 {{ label: '60 日季線', data: movingAverages[60], borderColor: '#b58a72', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y', hidden: true }},
                                 {{ label: '120 日線', data: movingAverages[120], borderColor: '#a59d8f', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y', hidden: true }},
-                                {{ label: '240 日年線', data: movingAverages[240], borderColor: '#77736b', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y', hidden: true }}
+                                {{ label: '240 日年線', data: movingAverages[240], borderColor: '#77736b', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y', hidden: true }},
+                                {{ label: '淨資產 20 日月線', data: netMovingAverages[20], borderColor: '#d28a76', borderDash: [2, 4], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y' }}
                             ]
                         }},
                         options: {{
@@ -646,10 +678,10 @@ def main():
                     new Chart(pieCtx, {{
                         type: 'pie',
                         data: {{
-                            labels: ['台股', '美股', '現金', '基金'],
+                            labels: ['未質押台股', '質押台股', '現貨美股'],
                             datasets: [{{
-                                data: [{tw_stock_value:.2f}, {us_stock_value_twd:.2f}, {total_cash_twd:.2f}, {fund_value:.2f}],
-                                backgroundColor: ['#727a6d', '#9a9387', '#c8c1b5', '#b58a72'],
+                                data: [{unpledged_tw_value:.2f}, {pledged_value:.2f}, {us_stock_value_twd:.2f}],
+                                backgroundColor: ['#24425e', '#687c70', '#c98a4b'],
                                 borderWidth: 1, borderColor: '#fbfaf7'
                             }}]
                         }},
