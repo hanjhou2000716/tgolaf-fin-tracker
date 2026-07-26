@@ -427,14 +427,14 @@ def main():
             .header-item {{ display:flex; align-items:center; }}
             .brand-divider {{ width:1px; height:28px; background:var(--line); }}
             .brand-name {{ font-family:'Noto Serif TC', serif; font-size:20px; font-weight:700; letter-spacing:.08em; }}
-            .sync {{ color:var(--muted); font-size:12px; white-space:nowrap; }}
+            .sync {{ color:var(--navy); font-size:12px; font-weight:700; white-space:nowrap; background:var(--surface); border:1px solid var(--line); border-radius:999px; padding:8px 12px; box-shadow:0 2px 5px rgba(50,54,53,.04); }}
             .eyebrow {{ color:var(--muted); font-size:11px; letter-spacing:.14em; text-transform:uppercase; margin:0 0 8px; }}
-            .hero {{ position:relative; overflow:hidden; background:var(--navy); border:1px solid #1d3850; padding:28px; margin-bottom:14px; color:#f8f6ef; box-shadow:0 10px 24px rgba(36,66,94,.13); }}
+            .hero {{ position:relative; overflow:hidden; background:var(--navy); border:1px solid #1d3850; border-radius:22px; padding:28px; margin-bottom:14px; color:#f8f6ef; box-shadow:0 10px 24px rgba(36,66,94,.13); }}
             .hero::after {{ content:''; position:absolute; width:210px; height:210px; border:1px solid rgba(255,255,255,.36); border-radius:50%; right:-70px; top:-112px; box-shadow:0 0 0 34px rgba(255,255,255,.055); pointer-events:none; }}
             .hero .eyebrow,.hero .metric-label {{ color:#ccd7dc; }} .hero .metric-value {{ color:#fffdf7; }}
             .hero-top {{ position:relative; z-index:1; display:flex; align-items:end; justify-content:space-between; gap:16px; border-bottom:1px solid rgba(255,255,255,.22); padding-bottom:20px; margin-bottom:18px; }}
             .hero-value {{ font-family:'Noto Serif TC', serif; font-size:clamp(34px, 6vw, 54px); line-height:1; letter-spacing:-.03em; }}
-            .change {{ color:{'#5e806d' if daily_diff < 0 else '#e17963'}; font-size:14px; font-weight:700; background:rgba(255,255,255,.10); padding:8px 10px; }}
+            .change {{ color:{'#5e806d' if daily_diff < 0 else '#e17963'}; font-size:14px; font-weight:700; background:#fbfaf7; border-radius:12px; padding:10px 12px; box-shadow:0 4px 10px rgba(10,24,40,.16); }}
             .metric-grid {{ position:relative; z-index:1; display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }}
             .metric {{ border-left:2px solid rgba(255,255,255,.33); padding-left:12px; }}
             .metric-label {{ color:var(--muted); font-size:12px; }}
@@ -471,9 +471,11 @@ def main():
             .price-up {{ color:#b84f45 !important; }} .price-down {{ color:#5e806d !important; }} .price-flat {{ color:var(--navy) !important; }}
             .daily-inline {{ display:inline-block; margin-left:6px; font-size:11px; font-weight:700; vertical-align:middle; white-space:nowrap; }}
             .block-grid {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }}
-            .exposure-pair {{ display:grid; grid-template-columns:1fr 1fr; gap:1px; background:#d6d3ca; border:1px solid #d6d3ca; }} .exposure-row {{ background:#edf1ed; padding:14px; }} .exposure-row strong {{ display:block; color:var(--navy); font-size:21px; margin-top:5px; }}
-            .allocation-card {{ margin-top:18px; background:#f4f2ed; padding:16px; border:1px solid #e5e2db; }}
-            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .exposure-pair {{ gap:8px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} }}
+            .risk-section {{ background:#f4f2ed; border:1px solid #e5e2db; border-radius:14px; padding:16px; }} .risk-section + .risk-section {{ margin-top:12px; }}
+            .risk-pair,.exposure-pair {{ display:grid; grid-template-columns:1fr 1fr; gap:1px; background:#d6d3ca; border:1px solid #d6d3ca; border-radius:10px; overflow:hidden; }}
+            .risk-column,.exposure-row {{ background:#edf1ed; padding:14px; }} .risk-column strong,.exposure-row strong {{ display:block; color:var(--navy); font-size:21px; margin-top:5px; }} .risk-column small,.exposure-row small {{ display:block; margin-top:4px; color:var(--muted); }}
+            .maintenance-line {{ border-top:1px solid #d5ddd5; margin-top:12px; padding-top:10px; }} .maintenance-line strong {{ display:inline; font-size:17px; margin:0; }}
+            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} }}
         </style>
     </head>
     <body>
@@ -516,16 +518,18 @@ def main():
 
         <div class="card">
             <div class="sec-title">風險摘要 <span class="sec-note">Current safeguards</span></div>
-            <div class="grid-2">
-                <div class="box">有效槓桿<b>{effective_leverage:.2f} ×</b><small>凱利安全邊界 {half_kelly_limit:.2f} ×</small></div>
-                <div class="box">質押借款<b class="risk-alert">${total_debt:,.0f}</b><small>含利息 ${accumulated_interest:,.0f}</small></div>
-                <div class="box">質押維持率<b class="{'risk-alert' if maintenance_ratio<150 else 'risk-good'}">{maintenance_ratio:.1f}%</b><small>{ratio_status}</small></div>
+            <div class="risk-section">
+                <div class="sec-title" style="margin-bottom:10px;">槓桿 <span class="sec-note">Leverage &amp; collateral</span></div>
+                <div class="risk-pair">
+                    <div class="risk-column"><span class="metric-label">有效槓桿</span><strong>{effective_leverage:.2f} ×</strong><small>凱利安全邊界 {half_kelly_limit:.2f} ×</small></div>
+                    <div class="risk-column"><span class="metric-label">質押借款</span><strong class="risk-alert">${total_debt:,.0f}</strong><small>含利息 ${accumulated_interest:,.0f}</small><div class="maintenance-line"><span class="metric-label">質押維持率</span> <strong class="{'risk-alert' if maintenance_ratio<150 else 'risk-good'}">{maintenance_ratio:.1f}%</strong> <small style="display:inline;">| {ratio_status}</small></div></div>
+                </div>
             </div>
-            <div class="allocation-card">
+            <div class="risk-section">
                 <div class="sec-title" style="margin-bottom:10px;">曝險 <span class="sec-note">Look-through concentration</span></div>
                 <div class="exposure-pair">
-                    <div class="exposure-row"><span class="metric-label">TSMC 曝險</span><strong>{tsmc_pct:.1f}%</strong><small>台股與 ETF 穿透</small></div>
-                    <div class="exposure-row"><span class="metric-label">NVDA 曝險</span><strong>{nvda_pct:.1f}%</strong><small>含 QQQM／SPYG／VOO</small></div>
+                    <div class="exposure-row"><span class="metric-label">TSMC 曝險</span><strong>{tsmc_pct:.1f}%</strong><small>台美股與 ETF 統合曝險</small></div>
+                    <div class="exposure-row"><span class="metric-label">NVDA 曝險</span><strong>{nvda_pct:.1f}%</strong><small>美股與 ETF 統合曝險</small></div>
                 </div>
             </div>
         </div>
