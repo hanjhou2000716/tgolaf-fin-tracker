@@ -318,99 +318,108 @@ def main():
             @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&display=swap');
             :root {{ --paper: #f5f4ef; --surface: #fbfaf7; --ink: #34332f; --muted: #77736b; --line: #dedbd3; --sage: #727a6d; --brick: #ad6658; }}
             * {{ box-sizing: border-box; }}
-            body {{ font-family: 'Noto Sans TC', sans-serif; background-color: var(--paper); margin: 0 auto; max-width: 1080px; padding: 28px 18px 44px; color: var(--ink); letter-spacing: .01em; }}
-            
-            .header-wrapper {{ background: transparent; border-radius: 0; padding: 2px 0 18px; box-shadow: none; border: 0; border-bottom: 1px solid var(--line); margin-bottom: 22px; }}
-            .header-container {{ display: flex; align-items: center; justify-content: space-around; width: 100%; }}
-            .header-item {{ display: flex; align-items: center; justify-content: center; }}
-            
-            .card {{ background: var(--surface); border-radius: 2px; padding: 20px; box-shadow: none; border: 1px solid var(--line); margin-bottom: 14px; }}
-            .sec-title {{ font-family: 'Noto Serif TC', serif; font-size: 17px; font-weight: 700; margin-bottom: 15px; color: var(--ink); border-bottom: 1px solid var(--line); padding-bottom: 10px; }}
-            .info-row {{ font-size: 14px; font-weight: 500; margin-bottom: 9px; color: #514f49; }}
-            .grid-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
-            .box {{ background: #f4f2ed; border-radius: 0; padding: 13px; border: 1px solid #e5e2db; font-size: 13px; color: var(--muted); }}
-            .box b {{ display: block; font-size: 18px; color: var(--ink); font-weight: 700; margin-top: 5px; margin-bottom: 2px; }}
-            .box small {{ font-size: 11px; color: var(--muted); }}
-            .timeline ul {{ padding-left: 20px; margin: 10px 0 0 0; font-size: 13px; font-weight: 500; color: #514f49; line-height: 1.75; }}
-            .btn {{ display: block; text-align: center; background: #45443f; color: white; text-decoration: none; padding: 13px; border-radius: 2px; font-weight: 500; letter-spacing: .08em; margin-bottom: 10px; }}
-            .btn-alt {{ background: var(--sage); }}
-            .chart-container {{ position: relative; width: 100%; height: 280px; margin-bottom: 20px; }}
-            .chart-title {{ font-family: 'Noto Serif TC', serif; text-align: left; font-weight: 700; font-size: 16px; margin-bottom: 14px; color: var(--ink); }}
-            @media (max-width: 540px) {{ body {{ padding: 20px 13px 32px; }} .card {{ padding: 16px; }} .grid-2 {{ gap: 8px; }} .box {{ padding: 10px; }} .header-container {{ justify-content: space-between; }} }}
+            body {{ font-family: 'Noto Sans TC', sans-serif; background-color: var(--paper); margin: 0 auto; max-width: 1080px; padding: 32px 20px 48px; color: var(--ink); letter-spacing: .01em; }}
+            .header-wrapper {{ display:flex; align-items:center; justify-content:space-between; gap:20px; padding:0 0 20px; border-bottom:1px solid var(--line); margin-bottom:18px; }}
+            .header-container {{ display:flex; align-items:center; gap:14px; }}
+            .header-item {{ display:flex; align-items:center; }}
+            .brand-divider {{ width:1px; height:28px; background:var(--line); }}
+            .brand-name {{ font-family:'Noto Serif TC', serif; font-size:20px; font-weight:700; letter-spacing:.08em; }}
+            .sync {{ color:var(--muted); font-size:12px; white-space:nowrap; }}
+            .eyebrow {{ color:var(--muted); font-size:11px; letter-spacing:.14em; text-transform:uppercase; margin:0 0 8px; }}
+            .hero {{ background:var(--surface); border:1px solid var(--line); padding:26px; margin-bottom:14px; }}
+            .hero-top {{ display:flex; align-items:end; justify-content:space-between; gap:16px; border-bottom:1px solid var(--line); padding-bottom:20px; margin-bottom:18px; }}
+            .hero-value {{ font-family:'Noto Serif TC', serif; font-size:clamp(32px, 6vw, 52px); line-height:1; letter-spacing:-.03em; }}
+            .change {{ color:{'#ad6658' if daily_diff < 0 else '#62705e'}; font-size:14px; font-weight:700; }}
+            .metric-grid {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }}
+            .metric {{ border-left:2px solid var(--line); padding-left:12px; }}
+            .metric-label {{ color:var(--muted); font-size:12px; }}
+            .metric-value {{ display:block; color:var(--ink); font-size:18px; font-weight:700; margin-top:4px; }}
+            .card {{ background:var(--surface); padding:21px; border:1px solid var(--line); margin-bottom:14px; }}
+            .sec-title {{ display:flex; align-items:center; justify-content:space-between; font-family:'Noto Serif TC', serif; font-size:17px; font-weight:700; margin-bottom:16px; color:var(--ink); }}
+            .sec-note {{ color:var(--muted); font-family:'Noto Sans TC', sans-serif; font-size:11px; font-weight:400; }}
+            .info-row {{ font-size:14px; font-weight:500; margin-bottom:9px; color:#514f49; }}
+            .grid-2 {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
+            .box {{ background:#f4f2ed; padding:14px; border:1px solid #e5e2db; font-size:12px; color:var(--muted); }}
+            .box b {{ display:block; font-size:19px; color:var(--ink); font-weight:700; margin-top:6px; margin-bottom:2px; }}
+            .box small {{ font-size:11px; color:var(--muted); }}
+            .risk-good {{ color:#62705e !important; }} .risk-alert {{ color:#ad6658 !important; }}
+            .timeline ul {{ padding-left:18px; margin:10px 0 0; font-size:13px; color:#514f49; line-height:1.9; }}
+            .goal-track {{ height:6px; background:#e5e2db; margin:12px 0 8px; }} .goal-fill {{ height:100%; background:var(--sage); width:{min(progress_pct, 100):.1f}%; }}
+            .actions {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:16px 0 30px; }}
+            .btn {{ display:block; text-align:center; background:#45443f; color:white; text-decoration:none; padding:14px; font-size:13px; font-weight:500; letter-spacing:.05em; border:1px solid #45443f; transition:background .2s; }}
+            .btn:hover {{ background:#30302c; }} .btn-alt {{ background:transparent; color:var(--ink); border-color:var(--line); }} .btn-alt:hover {{ background:#ece9e1; }}
+            .chart-container {{ position:relative; width:100%; height:280px; margin-bottom:20px; }}
+            .chart-title {{ font-family:'Noto Serif TC', serif; font-weight:700; font-size:16px; margin-bottom:5px; color:var(--ink); }}
+            .chart-caption {{ color:var(--muted); font-size:12px; margin-bottom:14px; }}
+            .footer {{ border-top:1px solid var(--line); padding-top:16px; color:var(--muted); font-size:11px; text-align:center; letter-spacing:.04em; }}
+            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2 {{ gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} }}
         </style>
     </head>
     <body>
         <div class="header-wrapper">
             <div class="header-container">
-                <!-- 左側：PRStK -->
                 <div class="header-item">
-                    <img src="./PRStK-Remove.png" alt="PRStK" style="height: 26px; object-fit: contain; max-width: 100%;">
+                    <img src="./PRStK-Remove.png" alt="PRStK" style="height:24px; object-fit:contain; max-width:100%;">
                 </div>
-                <!-- 中間：SFC -->
+                <div class="brand-divider"></div>
                 <div class="header-item">
-                    <img src="./SFC.e-removebg-preview.png" alt="SFC.e" style="height: 30px; object-fit: contain; max-width: 100%;">
+                    <img src="./SFC.e-removebg-preview.png" alt="SFC.e" style="height:26px; object-fit:contain; max-width:100%;">
                 </div>
-                <!-- 右側：Growth -->
-                <div class="header-item">
-                    <div style="display: flex; align-items: center;">
-                        <div style="width: 2.5px; height: 22px; background-color: #0f172a; margin-right: 8px; border-radius: 2px;"></div>
-                        <div style="font-size: 18px; font-weight: 900; color: #0f172a; letter-spacing: 0.5px;">Growth</div>
-                    </div>
-                </div>
+                <div class="brand-divider"></div><div class="brand-name">Growth</div>
             </div>
-            <!-- 下方時間戳記整合 -->
-            <div style="text-align: center; color: #64748b; font-size: 12px; font-weight: 700; margin-top: 12px; padding-top: 10px; border-top: 1px dashed #cbd5e1;">
-                🔄 數據最後同步：{tw_now.strftime('%m/%d %H:%M:%S')}
-            </div>
+            <div class="sync">資料同步 · {tw_now.strftime('%m/%d %H:%M')}</div>
         </div>
 
-        <div class="card">
-            <div class="sec-title">📊【 資產總覽 】</div>
-            <div class="info-row">💰 總資產 (Total)：${total_asset:,.0f}</div>
-            <div class="info-row">🌲 淨資產 (Net)：${net_asset:,.0f}</div>
-            <div class="info-row">⚡️ 單日變化：{emoji}{sign}{daily_pct:.1f}% ({sign}${daily_diff:,.0f})</div>
-        </div>
+        <section class="hero">
+            <p class="eyebrow">Portfolio overview</p>
+            <div class="hero-top">
+                <div><div class="metric-label">淨資產 Net Asset</div><div class="hero-value">${net_asset:,.0f}</div></div>
+                <div class="change">今日 {sign}{daily_pct:.1f}% &nbsp;·&nbsp; {sign}${daily_diff:,.0f}</div>
+            </div>
+            <div class="metric-grid">
+                <div class="metric"><span class="metric-label">總資產</span><span class="metric-value">${total_asset:,.0f}</span></div>
+                <div class="metric"><span class="metric-label">總負債</span><span class="metric-value">${total_debt:,.0f}</span></div>
+                <div class="metric"><span class="metric-label">負債比</span><span class="metric-value">{debt_ratio:.1f}%</span></div>
+            </div>
+        </section>
 
         <div class="card">
-            <div class="sec-title">📂【 資產明細 】</div>
+            <div class="sec-title">資產配置 <span class="sec-note">Market value · TWD</span></div>
             <div class="grid-2">
-                <div class="box">🇹🇼 台股現值<b>${tw_stock_value:,.0f}</b></div>
-                <div class="box">🇺🇸 美股現值<b>${us_stock_value_twd:,.0f}</b><small>(約 ${us_stock_value_usd:,.0f} USD)</small></div>
-                <div class="box">💵 現金(TWD)<b>${cash_twd:,.0f}</b></div>
-                <div class="box">💴 現金(USD)<b>${cash_usd * usd_rate:,.0f}</b><small>(約 ${cash_usd:,.0f} USD)</small></div>
-                <div class="box">🐣 基金現值<b>${fund_value:,.0f}</b></div>
-                <div class="box">💸 質押借款<b style="color:#ef4444">-${total_debt:,.0f}</b><small>(內含利息 ${accumulated_interest:,.0f})</small></div>
+                <div class="box">台股<b>${tw_stock_value:,.0f}</b></div>
+                <div class="box">美股<b>${us_stock_value_twd:,.0f}</b><small>約 ${us_stock_value_usd:,.0f} USD</small></div>
+                <div class="box">現金<b>${total_cash_twd:,.0f}</b><small>TWD 與 USD 合計</small></div>
+                <div class="box">基金<b>${fund_value:,.0f}</b></div>
             </div>
         </div>
 
         <div class="card">
-            <div class="sec-title">🛡️【 風險監控 】</div>
+            <div class="sec-title">風險摘要 <span class="sec-note">Current safeguards</span></div>
             <div class="grid-2">
-                <div class="box">⚖️ 總資產Beta<b>{effective_leverage:.2f} 倍</b><small>(凱利安全邊界：{half_kelly_limit:.2f} 倍)</small></div>
-                <div class="box">🐔 TSMC Exposure<b>{tsmc_pct:.1f}%</b></div>
-                <div class="box">🕸️ 資產負債比<b>{debt_ratio:.1f}%</b></div>
-                <div class="box">🦾 質押維持率<b style="color:{'#ef4444' if maintenance_ratio<150 else '#10b981'}">{maintenance_ratio:.1f}%</b><small>(狀態：{ratio_status})</small></div>
+                <div class="box">有效槓桿<b>{effective_leverage:.2f} ×</b><small>凱利安全邊界 {half_kelly_limit:.2f} ×</small></div>
+                <div class="box">TSMC 曝險<b>{tsmc_pct:.1f}%</b></div>
+                <div class="box">質押借款<b class="risk-alert">${total_debt:,.0f}</b><small>含利息 ${accumulated_interest:,.0f}</small></div>
+                <div class="box">質押維持率<b class="{'risk-alert' if maintenance_ratio<150 else 'risk-good'}">{maintenance_ratio:.1f}%</b><small>{ratio_status}</small></div>
             </div>
         </div>
 
         <div class="card">
-            <div class="sec-title">🚀【 歷史增率 】</div>
-            <div class="grid-2" style="font-size: 13px; font-weight:700;">
-                <div>🔺 近一月: {get_growth_str(30)}</div>
-                <div>🔺 近一季: {get_growth_str(90)}</div>
-                <div>🔺 近一年: {get_growth_str(365)}</div>
-                <div>🔺 近三年: {get_growth_str(1095)}</div>
+            <div class="sec-title">成長軌跡 <span class="sec-note">Net asset return</span></div>
+            <div class="grid-2">
+                <div class="box">近一月<b>{get_growth_str(30)}</b></div>
+                <div class="box">近一季<b>{get_growth_str(90)}</b></div>
+                <div class="box">近一年<b>{get_growth_str(365)}</b></div>
+                <div class="box">近三年<b>{get_growth_str(1095)}</b></div>
             </div>
         </div>
 
         <div class="card">
-            <div class="sec-title">🎯【 模型預測 】</div>
-            <div class="info-row">千萬目標達成率：{progress_pct:.1f}%</div>
-            <div style="font-family: monospace; color:#3b82f6; font-size: 14px; font-weight:900;">{bar_str}</div>
-            <div class="info-row" style="margin-top: 10px;">時間軸推算</div>
+            <div class="sec-title">目標進度 <span class="sec-note">10,000,000 TWD</span></div>
+            <div class="info-row">千萬目標達成率 {progress_pct:.1f}%</div>
+            <div class="goal-track"><div class="goal-fill"></div></div>
             <div class="timeline">
                 <ul>
-                    <li>2026-10: 🎖️ 成功嶺退伍日</li>
+                    <li>2026-10：成功嶺退伍日</li>
                     <li>2027-11: 850萬 達標</li>
                     <li>2028-10: 1000萬 達標</li>
                     <li>2035-05: 100萬鎂 達標</li>
@@ -419,7 +428,8 @@ def main():
         </div>
 
         <div class="card">
-            <div class="chart-title">近期資產軌跡 (含月線 20MA)</div>
+            <div class="chart-title">近期資產軌跡</div>
+            <div class="chart-caption">總資產與淨資產 · 目前顯示近 30 個有效快照</div>
             <div class="chart-container" style="height: 250px;">
                 <canvas id="lineChart"></canvas>
             </div>
@@ -431,8 +441,11 @@ def main():
             </div>
         </div>
 
-        <a href="https://hanjhou2000716.github.io/skynet-monitoring/" class="btn btn-alt">Risk Monitor — 市場風險監控</a>
-        <a href="https://forms.gle/9ZEJawwNRGfiXQiV8" class="btn">📝 Growth 表單</a>
+        <div class="actions">
+            <a href="https://hanjhou2000716.github.io/skynet-monitoring/" class="btn btn-alt">開啟 Risk Monitor</a>
+            <a href="https://forms.gle/9ZEJawwNRGfiXQiV8" class="btn">登錄資產異動</a>
+        </div>
+        <footer class="footer">© 2026 PRStK Lab &amp; SFC.e. | All rights reserved.</footer>
 
         <script>
             // 確保網頁讀取完畢後才開始畫圖，並加入 try-catch 防止崩潰
@@ -451,10 +464,10 @@ def main():
                         data: {{
                             labels: {chart_dates_json},
                             datasets: [
-                                {{ label: '總資產', data: {chart_totals_json}, borderColor: '#3b82f6', backgroundColor: '#3b82f6', yAxisID: 'y' }},
-                                {{ label: '淨資產', data: {chart_nets_json}, borderColor: '#ef4444', backgroundColor: '#ef4444', yAxisID: 'y' }},
-                                {{ label: '總資產月線', data: {total_20ma_json}, borderColor: '#eab308', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }},
-                                {{ label: '淨資產月線', data: {net_20ma_json}, borderColor: '#ca8a04', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }}
+                                {{ label: '總資產', data: {chart_totals_json}, borderColor: '#727a6d', backgroundColor: '#727a6d', yAxisID: 'y' }},
+                                {{ label: '淨資產', data: {chart_nets_json}, borderColor: '#ad6658', backgroundColor: '#ad6658', yAxisID: 'y' }},
+                                {{ label: '總資產月線', data: {total_20ma_json}, borderColor: '#9a9387', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }},
+                                {{ label: '淨資產月線', data: {net_20ma_json}, borderColor: '#b58a72', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }}
                             ]
                         }},
                         options: {{
@@ -479,11 +492,11 @@ def main():
                     new Chart(pieCtx, {{
                         type: 'pie',
                         data: {{
-                            labels: ['🇹🇼 現貨台股', '🦆 質押投資', '🇺🇸 現貨美股'],
+                            labels: ['台股', '美股', '現金', '基金'],
                             datasets: [{{
-                                data: [{tw_free_value:.2f}, {total_debt:.2f}, {us_stock_value_twd:.2f}],
-                                backgroundColor: ['#3b82f6', '#fb7185', '#fbbf24'],
-                                borderWidth: 1, borderColor: '#ffffff'
+                                data: [{tw_stock_value:.2f}, {us_stock_value_twd:.2f}, {total_cash_twd:.2f}, {fund_value:.2f}],
+                                backgroundColor: ['#727a6d', '#9a9387', '#c8c1b5', '#b58a72'],
+                                borderWidth: 1, borderColor: '#fbfaf7'
                             }}]
                         }},
                         options: {{
@@ -541,13 +554,38 @@ def main():
     except:
         peak_006208 = 249.85
 
+    allocation_items = [
+        {"label": "台股", "value": round(tw_stock_value, 2), "color": "#727a6d"},
+        {"label": "美股", "value": round(us_stock_value_twd, 2), "color": "#9a9387"},
+        {"label": "現金", "value": round(total_cash_twd, 2), "color": "#c8c1b5"},
+        {"label": "基金", "value": round(fund_value, 2), "color": "#b58a72"},
+    ]
+    for item in allocation_items:
+        item["percent"] = round((item["value"] / total_asset * 100), 1) if total_asset > 0 else 0
+
+    risk_level = "attention" if maintenance_ratio and maintenance_ratio < 150 else "watch" if debt_ratio >= 25 or tsmc_pct >= 35 else "stable"
+    risk_summary = {
+        "level": risk_level,
+        "debtRatio": round(debt_ratio, 1),
+        "maintenanceRatio": round(maintenance_ratio, 1),
+        "tsmcExposureRatio": round(tsmc_pct, 1),
+        "effectiveLeverage": round(effective_leverage, 2),
+    }
+
     data_for_web = {
         "taiex": round(taiex_val, 2),
         "ma200": round(ma200_val, 2),
         "vix": round(vix_val, 2),
         "peak_006208": round(peak_006208, 2),
         "asset_006208": round(price_006208, 2) if price_006208 else 249.1,
-        "lastUpdated": tw_now.strftime("%Y/%m/%d %H:%M:%S")
+        "lastUpdated": tw_now.strftime("%Y/%m/%d %H:%M:%S"),
+        "portfolio": {
+            "totalAsset": round(total_asset, 2),
+            "netAsset": round(net_asset, 2),
+            "totalDebt": round(total_debt, 2),
+            "allocation": allocation_items,
+            "risk": risk_summary,
+        },
     }
 
     data_for_web["status"] = "ok" if total_asset > 0 else "degraded"
