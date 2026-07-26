@@ -427,14 +427,15 @@ def main():
             .header-item {{ display:flex; align-items:center; }}
             .brand-divider {{ width:1px; height:28px; background:var(--line); }}
             .brand-name {{ font-family:'Noto Serif TC', serif; font-size:20px; font-weight:700; letter-spacing:.08em; }}
-            .sync {{ color:var(--navy); font-size:12px; font-weight:700; white-space:nowrap; background:var(--surface); border:1px solid var(--line); border-radius:999px; padding:8px 12px; box-shadow:0 2px 5px rgba(50,54,53,.04); margin-left:auto; }}
             .eyebrow {{ color:var(--muted); font-size:11px; letter-spacing:.14em; text-transform:uppercase; margin:0 0 8px; }}
             .hero {{ position:relative; overflow:hidden; background:var(--navy); border:1px solid #1d3850; border-radius:22px; padding:28px; margin-bottom:14px; color:#f8f6ef; box-shadow:0 10px 24px rgba(36,66,94,.13); }}
             .hero::after {{ content:''; position:absolute; width:210px; height:210px; border:1px solid rgba(255,255,255,.36); border-radius:50%; right:-70px; top:-112px; box-shadow:0 0 0 34px rgba(255,255,255,.055); pointer-events:none; }}
             .hero .eyebrow,.hero .metric-label {{ color:#ccd7dc; }} .hero .metric-value {{ color:#fffdf7; }}
-            .hero-top {{ position:relative; z-index:1; display:flex; align-items:end; justify-content:space-between; gap:16px; border-bottom:1px solid rgba(255,255,255,.22); padding-bottom:20px; margin-bottom:18px; }}
+            .hero-top {{ position:relative; z-index:1; display:flex; align-items:end; justify-content:space-between; gap:16px; }}
             .hero-value {{ font-family:'Noto Serif TC', serif; font-size:clamp(34px, 6vw, 54px); line-height:1; letter-spacing:-.03em; }}
             .change {{ color:{'#91b29d' if daily_diff < 0 else '#ef9a83'}; font-size:14px; font-weight:700; background:#35536d; border:1px solid rgba(255,255,255,.16); border-radius:12px; padding:10px 12px; box-shadow:0 4px 10px rgba(10,24,40,.12); }}
+            .hero-status-row {{ position:relative; z-index:1; display:flex; align-items:center; justify-content:space-between; gap:12px; border-bottom:1px solid rgba(255,255,255,.22); padding:13px 0 20px; margin-bottom:18px; }}
+            .sync {{ color:#d7e2e1; font-size:12px; font-weight:700; white-space:nowrap; background:#2e4b65; border:1px solid rgba(255,255,255,.18); border-radius:12px; padding:10px 12px; box-shadow:0 4px 10px rgba(10,24,40,.12); }}
             .metric-grid {{ position:relative; z-index:1; display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }}
             .metric {{ border-left:2px solid rgba(255,255,255,.33); padding-left:12px; }}
             .metric-label {{ color:var(--muted); font-size:12px; }}
@@ -477,7 +478,7 @@ def main():
             .risk-pair,.exposure-pair {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
             .risk-column,.exposure-row {{ background:#f8faf7; border:1px solid #d8dfd8; border-radius:10px; padding:15px; }} .risk-column strong,.exposure-row strong {{ display:block; color:var(--navy); font-size:23px; line-height:1.2; margin-top:6px; }} .risk-column small,.exposure-row small {{ display:block; margin-top:6px; color:var(--muted); font-size:12px; line-height:1.5; }}
             .maintenance-line {{ border-top:1px solid #d5ddd5; margin-top:12px; padding-top:10px; }} .maintenance-line strong {{ display:inline; font-size:17px; margin:0; }}
-            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; flex-direction:column; gap:10px; }} .sync {{ align-self:flex-end; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} }}
+            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ align-items:stretch; flex-direction:column; }} .sync {{ text-align:center; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} }}
         </style>
     </head>
     <body>
@@ -492,14 +493,16 @@ def main():
                 </div>
                 <div class="brand-divider"></div><div class="brand-name">Growth</div>
             </div>
-            <div class="sync">資料同步 · {tw_now.strftime('%m/%d %H:%M')}</div>
         </div>
 
         <section class="hero">
             <p class="eyebrow">Portfolio overview</p>
             <div class="hero-top">
                 <div><div class="metric-label">淨資產 Net Asset</div><div class="hero-value">${net_asset:,.0f}</div></div>
+            </div>
+            <div class="hero-status-row">
                 <div class="change">今日 {sign}{daily_pct:.1f}% &nbsp;·&nbsp; {sign}${daily_diff:,.0f}</div>
+                <div class="sync">資料同步 · {tw_now.strftime('%m/%d %H:%M')}</div>
             </div>
             <div class="metric-grid">
                 <div class="metric"><span class="metric-label">總資產</span><span class="metric-value">${total_asset:,.0f}</span></div>
