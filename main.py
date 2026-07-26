@@ -301,7 +301,10 @@ def main():
     us_largest_symbol, us_largest_value = max(us_position_values.items(), key=lambda item: item[1], default=("—", 0))
     tw_largest_pct = (tw_largest_value / total_asset * 100) if total_asset else 0
     us_largest_pct = (us_largest_value / total_asset * 100) if total_asset else 0
-    unpledged_tw_value = max(0, tw_stock_value - pledged_value)
+    # 資產板塊採用可動用台股／質押借款／現貨美股的風險視角。
+    # 質押台股此處代表借款金額，而非擔保品的市值。
+    spot_tw_value = max(0, tw_stock_value - total_debt)
+    pledged_loan_value = total_debt
 
     def stressed_maintenance_ratio(decline):
         stressed_collateral = max(0, pledged_value - (pledged_006208_value * decline))
@@ -340,13 +343,12 @@ def main():
             previous = None
         category_daily_changes[key] = None if previous is None else {"amount": round(value - previous, 2), "percent": round((value - previous) / previous * 100, 2) if previous else 0}
 
-    category_labels = {"TW_Stock_Value": "台股", "US_Stock_Value": "美股", "Cash_Value": "現金", "Fund_Value": "基金"}
-    def daily_card(key, change):
+    def inline_daily_change(key):
+        change = category_daily_changes[key]
         if change is None:
-            return f'<div class="daily-card"><span>{category_labels[key]}</span><b class="price-flat">待累積</b><small>尚無前日快照</small></div>'
+            return '<span class="daily-inline price-flat">日變動待累積</span>'
         color = "price-up" if change["amount"] > 0 else "price-down" if change["amount"] < 0 else "price-flat"
-        return f'<div class="daily-card"><span>{category_labels[key]}</span><b class="{color}">{change["percent"]:+.2f}%</b><small>${change["amount"]:+,.0f}</small></div>'
-    daily_cards_html = "".join(daily_card(key, change) for key, change in category_daily_changes.items())
+        return f'<span class="daily-inline {color}">{change["percent"]:+.2f}% · ${change["amount"]:+,.0f}</span>'
 
     snapshot_result = "skipped"
     if total_asset > 0:
@@ -377,19 +379,18 @@ def main():
     chart_dates = [date[5:] for date in sorted_dates]
     chart_totals, chart_nets = all_totals, all_nets
     total_20ma, total_60ma = moving_average(all_totals, 20), moving_average(all_totals, 60)
-    total_120ma, total_240ma = moving_average(all_totals, 120), moving_average(all_totals, 240)
+    total_240ma = moving_average(all_totals, 240)
     net_20ma, net_60ma = moving_average(all_nets, 20), moving_average(all_nets, 60)
-    net_120ma, net_240ma = moving_average(all_nets, 120), moving_average(all_nets, 240)
+    net_240ma = moving_average(all_nets, 240)
 
     chart_dates_json = json.dumps(chart_dates)
     chart_totals_json = json.dumps(chart_totals)
     chart_nets_json = json.dumps(chart_nets)
     total_20ma_json = json.dumps(total_20ma)
     total_60ma_json = json.dumps(total_60ma)
-    total_120ma_json = json.dumps(total_120ma)
     total_240ma_json = json.dumps(total_240ma)
     net_20ma_json, net_60ma_json = json.dumps(net_20ma), json.dumps(net_60ma)
-    net_120ma_json, net_240ma_json = json.dumps(net_120ma), json.dumps(net_240ma)
+    net_240ma_json = json.dumps(net_240ma)
 
     def get_growth_str(days):
         if not sorted_dates: return "+0.0%(模)"
@@ -428,20 +429,23 @@ def main():
             .brand-name {{ font-family:'Noto Serif TC', serif; font-size:20px; font-weight:700; letter-spacing:.08em; }}
             .sync {{ color:var(--muted); font-size:12px; white-space:nowrap; }}
             .eyebrow {{ color:var(--muted); font-size:11px; letter-spacing:.14em; text-transform:uppercase; margin:0 0 8px; }}
-            .hero {{ background:var(--surface); border:1px solid var(--line); padding:26px; margin-bottom:14px; }}
-            .hero-top {{ display:flex; align-items:end; justify-content:space-between; gap:16px; border-bottom:1px solid var(--line); padding-bottom:20px; margin-bottom:18px; }}
-            .hero-value {{ font-family:'Noto Serif TC', serif; font-size:clamp(32px, 6vw, 52px); line-height:1; letter-spacing:-.03em; }}
-            .change {{ color:{'#ad6658' if daily_diff < 0 else '#62705e'}; font-size:14px; font-weight:700; }}
-            .metric-grid {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }}
-            .metric {{ border-left:2px solid var(--line); padding-left:12px; }}
+            .hero {{ position:relative; overflow:hidden; background:var(--navy); border:1px solid #1d3850; padding:28px; margin-bottom:14px; color:#f8f6ef; box-shadow:0 10px 24px rgba(36,66,94,.13); }}
+            .hero::after {{ content:''; position:absolute; width:210px; height:210px; border:1px solid rgba(255,255,255,.36); border-radius:50%; right:-70px; top:-112px; box-shadow:0 0 0 34px rgba(255,255,255,.055); pointer-events:none; }}
+            .hero .eyebrow,.hero .metric-label {{ color:#ccd7dc; }} .hero .metric-value {{ color:#fffdf7; }}
+            .hero-top {{ position:relative; z-index:1; display:flex; align-items:end; justify-content:space-between; gap:16px; border-bottom:1px solid rgba(255,255,255,.22); padding-bottom:20px; margin-bottom:18px; }}
+            .hero-value {{ font-family:'Noto Serif TC', serif; font-size:clamp(34px, 6vw, 54px); line-height:1; letter-spacing:-.03em; }}
+            .change {{ color:{'#5e806d' if daily_diff < 0 else '#e17963'}; font-size:14px; font-weight:700; background:rgba(255,255,255,.10); padding:8px 10px; }}
+            .metric-grid {{ position:relative; z-index:1; display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }}
+            .metric {{ border-left:2px solid rgba(255,255,255,.33); padding-left:12px; }}
             .metric-label {{ color:var(--muted); font-size:12px; }}
             .metric-value {{ display:block; color:var(--ink); font-size:18px; font-weight:700; margin-top:4px; }}
-            .card {{ background:var(--surface); padding:21px; border:1px solid var(--line); margin-bottom:14px; }}
+            .card {{ background:var(--surface); padding:21px; border:1px solid var(--line); border-top:3px solid transparent; margin-bottom:14px; box-shadow:0 4px 12px rgba(50,54,53,.035); }}
+            .card:nth-of-type(2n) {{ border-top-color:var(--sage); }} .card:nth-of-type(3n) {{ border-top-color:var(--orange); }}
             .sec-title {{ display:flex; align-items:center; justify-content:space-between; font-family:'Noto Serif TC', serif; font-size:17px; font-weight:700; margin-bottom:16px; color:var(--ink); }}
             .sec-note {{ color:var(--muted); font-family:'Noto Sans TC', sans-serif; font-size:11px; font-weight:400; }}
             .info-row {{ font-size:14px; font-weight:500; margin-bottom:9px; color:#514f49; }}
             .grid-2 {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
-            .box {{ background:#f4f2ed; padding:14px; border:1px solid #e5e2db; font-size:12px; color:var(--muted); }}
+            .box {{ background:#f4f2ed; padding:14px; border:1px solid #e5e2db; border-radius:3px; font-size:12px; color:var(--muted); }}
             .box b {{ display:block; font-size:19px; color:var(--ink); font-weight:700; margin-top:6px; margin-bottom:2px; }}
             .box small {{ font-size:11px; color:var(--muted); }}
             .risk-good {{ color:#62705e !important; }} .risk-alert {{ color:#ad6658 !important; }}
@@ -464,11 +468,12 @@ def main():
             .stress-impact {{ color:var(--brick); font-family:'Noto Serif TC', serif; font-size:20px; font-weight:700; margin:7px 0 4px; }}
             .stress-detail {{ color:var(--muted); font-size:11px; line-height:1.7; }}
             .footer {{ border-top:1px solid var(--line); padding-top:16px; color:var(--muted); font-size:11px; text-align:center; letter-spacing:.04em; }}
-            .daily-grid {{ display:grid; grid-template-columns:repeat(4, 1fr); gap:10px; margin-top:12px; }}
-            .daily-card {{ background:#eef0ed; border:1px solid #d8ded8; padding:12px; font-size:12px; }} .daily-card b {{ display:block; font-size:18px; margin:4px 0; }} .daily-card small {{ color:var(--muted); }}
             .price-up {{ color:#b84f45 !important; }} .price-down {{ color:#5e806d !important; }} .price-flat {{ color:var(--navy) !important; }}
+            .daily-inline {{ display:inline-block; margin-left:6px; font-size:11px; font-weight:700; vertical-align:middle; white-space:nowrap; }}
             .block-grid {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }}
-            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid {{ gap:8px; }} .daily-grid, .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} }}
+            .exposure-pair {{ display:grid; grid-template-columns:1fr 1fr; gap:1px; background:#d6d3ca; border:1px solid #d6d3ca; }} .exposure-row {{ background:#edf1ed; padding:14px; }} .exposure-row strong {{ display:block; color:var(--navy); font-size:21px; margin-top:5px; }}
+            .allocation-card {{ margin-top:18px; background:#f4f2ed; padding:16px; border:1px solid #e5e2db; }}
+            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .exposure-pair {{ gap:8px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} }}
         </style>
     </head>
     <body>
@@ -502,22 +507,26 @@ def main():
         <div class="card">
             <div class="sec-title">資產配置 <span class="sec-note">Market value · TWD</span></div>
             <div class="grid-2">
-                <div class="box">台股<b>${tw_stock_value:,.0f}</b></div>
-                <div class="box">美股<b>${us_stock_value_twd:,.0f}</b><small>約 ${us_stock_value_usd:,.0f} USD</small></div>
-                <div class="box">現金<b>${total_cash_twd:,.0f}</b><small>TWD 與 USD 合計</small></div>
-                <div class="box">基金<b>${fund_value:,.0f}</b></div>
+                <div class="box">台股<b>${tw_stock_value:,.0f}{inline_daily_change('TW_Stock_Value')}</b></div>
+                <div class="box">美股<b>${us_stock_value_twd:,.0f}{inline_daily_change('US_Stock_Value')}</b><small>約 ${us_stock_value_usd:,.0f} USD</small></div>
+                <div class="box">現金<b>${total_cash_twd:,.0f}{inline_daily_change('Cash_Value')}</b><small>TWD 與 USD 合計</small></div>
+                <div class="box">基金<b>${fund_value:,.0f}{inline_daily_change('Fund_Value')}</b></div>
             </div>
-            <div class="daily-grid">{daily_cards_html}</div>
         </div>
 
         <div class="card">
             <div class="sec-title">風險摘要 <span class="sec-note">Current safeguards</span></div>
             <div class="grid-2">
                 <div class="box">有效槓桿<b>{effective_leverage:.2f} ×</b><small>凱利安全邊界 {half_kelly_limit:.2f} ×</small></div>
-                <div class="box">TSMC 曝險<b>{tsmc_pct:.1f}%</b><small>半導體穿透</small></div>
-                <div class="box">NVDA 曝險<b>{nvda_pct:.1f}%</b><small>含 QQQM／SPYG／VOO</small></div>
                 <div class="box">質押借款<b class="risk-alert">${total_debt:,.0f}</b><small>含利息 ${accumulated_interest:,.0f}</small></div>
                 <div class="box">質押維持率<b class="{'risk-alert' if maintenance_ratio<150 else 'risk-good'}">{maintenance_ratio:.1f}%</b><small>{ratio_status}</small></div>
+            </div>
+            <div class="allocation-card">
+                <div class="sec-title" style="margin-bottom:10px;">曝險 <span class="sec-note">Look-through concentration</span></div>
+                <div class="exposure-pair">
+                    <div class="exposure-row"><span class="metric-label">TSMC 曝險</span><strong>{tsmc_pct:.1f}%</strong><small>台股與 ETF 穿透</small></div>
+                    <div class="exposure-row"><span class="metric-label">NVDA 曝險</span><strong>{nvda_pct:.1f}%</strong><small>含 QQQM／SPYG／VOO</small></div>
+                </div>
             </div>
         </div>
 
@@ -569,15 +578,13 @@ def main():
                 <canvas id="lineChart"></canvas>
             </div>
             
-            <hr style="border:0; border-top:1px solid #e2e8f0; margin: 25px 0;">
-            
-            <div class="chart-container" style="height: 220px;">
+        </div>
+
+        <div class="card">
+            <div class="chart-title">總資產板塊</div>
+            <div class="chart-caption">現貨台股以台股市值扣除質押借款計算；質押台股代表借款金額。</div>
+            <div class="chart-container" style="height: 250px; margin-bottom:0;">
                 <canvas id="pieChart"></canvas>
-            </div>
-            <div class="block-grid">
-                <div class="box">未質押台股<b>${unpledged_tw_value:,.0f}</b></div>
-                <div class="box">質押台股<b>${pledged_value:,.0f}</b></div>
-                <div class="box">現貨美股<b>${us_stock_value_twd:,.0f}</b></div>
             </div>
         </div>
 
@@ -614,11 +621,12 @@ def main():
                             datasets: [
                                 {{ label: '總資產', data: fullTotals, borderColor: '#727a6d', backgroundColor: '#727a6d', borderWidth: 2, pointRadius: 0, yAxisID: 'y' }},
                                 {{ label: '淨資產', data: fullNets, borderColor: '#ad6658', backgroundColor: '#ad6658', borderWidth: 2, pointRadius: 0, yAxisID: 'y' }},
-                                {{ label: '20 日線', data: movingAverages[20], borderColor: '#9a9387', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y' }},
-                                {{ label: '60 日季線', data: movingAverages[60], borderColor: '#b58a72', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y', hidden: true }},
-                                {{ label: '120 日線', data: movingAverages[120], borderColor: '#a59d8f', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y', hidden: true }},
-                                {{ label: '240 日年線', data: movingAverages[240], borderColor: '#77736b', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y', hidden: true }},
-                                {{ label: '淨資產 20 日月線', data: netMovingAverages[20], borderColor: '#d28a76', borderDash: [2, 4], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y' }}
+                                {{ label: '總資產月線', data: movingAverages[20], borderColor: '#9a9387', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y' }},
+                                {{ label: '淨資產月線', data: netMovingAverages[20], borderColor: '#d28a76', borderDash: [2, 4], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y' }},
+                                {{ label: '總資產季線', data: movingAverages[60], borderColor: '#b58a72', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y', hidden: true }},
+                                {{ label: '淨資產季線', data: netMovingAverages[60], borderColor: '#c98a4b', borderDash: [2, 4], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y', hidden: true }},
+                                {{ label: '總資產年線', data: movingAverages[240], borderColor: '#77736b', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y', hidden: true }},
+                                {{ label: '淨資產年線', data: netMovingAverages[240], borderColor: '#687c70', borderDash: [2, 4], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y', hidden: true }}
                             ]
                         }},
                         options: {{
@@ -649,10 +657,15 @@ def main():
                         }}
                     }});
                     const applyTrendLines = (days) => {{
-                        lineChart.data.datasets[2].hidden = days > 90;
-                        lineChart.data.datasets[3].hidden = days <= 90 || days > 365;
-                        lineChart.data.datasets[4].hidden = days <= 365;
-                        lineChart.data.datasets[5].hidden = days <= 365 || fullLabels.length < 240;
+                        const showMonth = days <= 90;
+                        const showSeason = days > 90 && days <= 365;
+                        const showYear = days > 365 && fullLabels.length >= 240;
+                        lineChart.data.datasets[2].hidden = !showMonth;
+                        lineChart.data.datasets[3].hidden = !showMonth;
+                        lineChart.data.datasets[4].hidden = !showSeason;
+                        lineChart.data.datasets[5].hidden = !showSeason;
+                        lineChart.data.datasets[6].hidden = !showYear;
+                        lineChart.data.datasets[7].hidden = !showYear;
                     }};
                     const applyRange = (range) => {{
                         const days = range === 'all' ? fullLabels.length : Math.min(Number(range), fullLabels.length);
@@ -676,9 +689,9 @@ def main():
                     new Chart(pieCtx, {{
                         type: 'pie',
                         data: {{
-                            labels: ['未質押台股', '質押台股', '現貨美股'],
+                            labels: ['現貨台股', '質押台股', '現貨美股'],
                             datasets: [{{
-                                data: [{unpledged_tw_value:.2f}, {pledged_value:.2f}, {us_stock_value_twd:.2f}],
+                                data: [{spot_tw_value:.2f}, {pledged_loan_value:.2f}, {us_stock_value_twd:.2f}],
                                 backgroundColor: ['#24425e', '#687c70', '#c98a4b'],
                                 borderWidth: 1, borderColor: '#fbfaf7'
                             }}]
