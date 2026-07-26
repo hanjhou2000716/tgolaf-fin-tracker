@@ -260,35 +260,27 @@ def main():
             
     daily_net_history[tw_now.strftime("%Y-%m-%d")], daily_total_history[tw_now.strftime("%Y-%m-%d")] = net_asset, total_asset
     sorted_dates = sorted(daily_net_history.keys())
-    recent_dates = sorted_dates[-30:]
-    
-    chart_dates, chart_totals, chart_nets, total_20ma, net_20ma, twii_ma = [], [], [], [], [], []
     all_totals, all_nets = [daily_total_history[d] for d in sorted_dates], [daily_net_history[d] for d in sorted_dates]
-    
-    try:
-        twii_hist = yf.Ticker("0050.TW").history(period="3mo")
-        if twii_hist.empty: twii_hist = yf.Ticker("^TWII").history(period="3mo")
-        twii_hist['20MA'] = twii_hist['Close'].rolling(window=20).mean()
-        twii_map = {idx.strftime("%Y-%m-%d"): row['20MA'] for idx, row in twii_hist.iterrows() if not math.isnan(row['20MA'])}
-        last_ma = list(twii_map.values())[-1] if twii_map else 0
-    except: twii_map, last_ma = {}, 0
 
-    for i, d in enumerate(sorted_dates):
-        if d in recent_dates:
-            chart_dates.append(d[5:])
-            chart_totals.append(daily_total_history[d])
-            chart_nets.append(daily_net_history[d])
-            start = max(0, i - 19)
-            total_20ma.append(sum(all_totals[start:i+1]) / len(all_totals[start:i+1]))
-            net_20ma.append(sum(all_nets[start:i+1]) / len(all_nets[start:i+1]))
-            twii_ma.append(twii_map.get(d, last_ma))
+    def moving_average(values, window):
+        return [
+            round(sum(values[index - window + 1:index + 1]) / window, 2) if index >= window - 1 else None
+            for index in range(len(values))
+        ]
+
+    # Keep every daily snapshot for interactive time ranges on the web dashboard.
+    chart_dates = [date[5:] for date in sorted_dates]
+    chart_totals, chart_nets = all_totals, all_nets
+    total_20ma, total_60ma = moving_average(all_totals, 20), moving_average(all_totals, 60)
+    total_120ma, total_240ma = moving_average(all_totals, 120), moving_average(all_totals, 240)
 
     chart_dates_json = json.dumps(chart_dates)
     chart_totals_json = json.dumps(chart_totals)
     chart_nets_json = json.dumps(chart_nets)
     total_20ma_json = json.dumps(total_20ma)
-    net_20ma_json = json.dumps(net_20ma)
-    twii_ma_json = json.dumps(twii_ma)
+    total_60ma_json = json.dumps(total_60ma)
+    total_120ma_json = json.dumps(total_120ma)
+    total_240ma_json = json.dumps(total_240ma)
 
     def get_growth_str(days):
         if not sorted_dates: return "+0.0%(模)"
@@ -314,6 +306,7 @@ def main():
         <title>PRStK SFC.e</title>
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0"></script>
+        <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
         <style>
             @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&display=swap');
             :root {{ --paper: #f5f4ef; --surface: #fbfaf7; --ink: #34332f; --muted: #77736b; --line: #dedbd3; --sage: #727a6d; --brick: #ad6658; }}
@@ -351,8 +344,12 @@ def main():
             .chart-container {{ position:relative; width:100%; height:280px; margin-bottom:20px; }}
             .chart-title {{ font-family:'Noto Serif TC', serif; font-weight:700; font-size:16px; margin-bottom:5px; color:var(--ink); }}
             .chart-caption {{ color:var(--muted); font-size:12px; margin-bottom:14px; }}
+            .chart-controls {{ display:flex; align-items:center; flex-wrap:wrap; gap:7px; margin:0 0 14px; }}
+            .range-btn {{ appearance:none; background:transparent; border:1px solid var(--line); color:var(--muted); cursor:pointer; font:inherit; font-size:11px; padding:6px 9px; }}
+            .range-btn:hover, .range-btn.is-active {{ background:#e9e6de; color:var(--ink); border-color:#c9c4b9; }}
+            .chart-hint {{ color:var(--muted); font-size:11px; margin-left:auto; }}
             .footer {{ border-top:1px solid var(--line); padding-top:16px; color:var(--muted); font-size:11px; text-align:center; letter-spacing:.04em; }}
-            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2 {{ gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} }}
+            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2 {{ gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} }}
         </style>
     </head>
     <body>
@@ -429,7 +426,15 @@ def main():
 
         <div class="card">
             <div class="chart-title">近期資產軌跡</div>
-            <div class="chart-caption">總資產與淨資產 · 目前顯示近 30 個有效快照</div>
+            <div class="chart-caption">總資產與淨資產 · 可回看完整每日快照</div>
+            <div class="chart-controls" aria-label="資產軌跡時間範圍">
+                <button class="range-btn is-active" type="button" data-range="30">1M</button>
+                <button class="range-btn" type="button" data-range="90">3M</button>
+                <button class="range-btn" type="button" data-range="365">1Y</button>
+                <button class="range-btn" type="button" data-range="all">全部</button>
+                <button class="range-btn" type="button" id="resetZoom">重設縮放</button>
+                <span class="chart-hint">滾輪／雙指縮放 · 拖曳回看</span>
+            </div>
             <div class="chart-container" style="height: 250px;">
                 <canvas id="lineChart"></canvas>
             </div>
@@ -457,17 +462,26 @@ def main():
                 }}
 
                 try {{
-                    // 繪製折線圖
+                    // Full history is kept in the browser; ranges only change what is visible.
                     const lineCtx = document.getElementById('lineChart').getContext('2d');
-                    new Chart(lineCtx, {{
+                    const fullLabels = {chart_dates_json};
+                    const fullTotals = {chart_totals_json};
+                    const fullNets = {chart_nets_json};
+                    const movingAverages = {{
+                        20: {total_20ma_json}, 60: {total_60ma_json},
+                        120: {total_120ma_json}, 240: {total_240ma_json}
+                    }};
+                    const lineChart = new Chart(lineCtx, {{
                         type: 'line',
                         data: {{
-                            labels: {chart_dates_json},
+                            labels: fullLabels,
                             datasets: [
-                                {{ label: '總資產', data: {chart_totals_json}, borderColor: '#727a6d', backgroundColor: '#727a6d', yAxisID: 'y' }},
-                                {{ label: '淨資產', data: {chart_nets_json}, borderColor: '#ad6658', backgroundColor: '#ad6658', yAxisID: 'y' }},
-                                {{ label: '總資產月線', data: {total_20ma_json}, borderColor: '#9a9387', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }},
-                                {{ label: '淨資產月線', data: {net_20ma_json}, borderColor: '#b58a72', borderDash: [5, 5], pointRadius: 0, yAxisID: 'y' }}
+                                {{ label: '總資產', data: fullTotals, borderColor: '#727a6d', backgroundColor: '#727a6d', borderWidth: 2, pointRadius: 0, yAxisID: 'y' }},
+                                {{ label: '淨資產', data: fullNets, borderColor: '#ad6658', backgroundColor: '#ad6658', borderWidth: 2, pointRadius: 0, yAxisID: 'y' }},
+                                {{ label: '20 日線', data: movingAverages[20], borderColor: '#9a9387', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y' }},
+                                {{ label: '60 日季線', data: movingAverages[60], borderColor: '#b58a72', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y', hidden: true }},
+                                {{ label: '120 日線', data: movingAverages[120], borderColor: '#a59d8f', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y', hidden: true }},
+                                {{ label: '240 日年線', data: movingAverages[240], borderColor: '#77736b', borderDash: [5, 5], borderWidth: 1.5, pointRadius: 0, yAxisID: 'y', hidden: true }}
                             ]
                         }},
                         options: {{
@@ -475,13 +489,46 @@ def main():
                             interaction: {{ mode: 'index', intersect: false }},
                             plugins: {{
                                 legend: {{ position: 'top', labels: {{ boxWidth: 12, font: {{size: 10}} }} }},
-                                datalabels: {{ display: false }} // 折線圖不顯示直接數字
+                                datalabels: {{ display: false }},
+                                zoom: {{
+                                    pan: {{ enabled: true, mode: 'x' }},
+                                    zoom: {{ wheel: {{ enabled: true }}, pinch: {{ enabled: true }}, mode: 'x' }},
+                                    onPanComplete: ({{chart}}) => {{
+                                        const visibleDays = Math.max(1, Math.round(chart.scales.x.max - chart.scales.x.min + 1));
+                                        applyTrendLines(visibleDays);
+                                        chart.update('none');
+                                    }},
+                                    onZoomComplete: ({{chart}}) => {{
+                                        const visibleDays = Math.max(1, Math.round(chart.scales.x.max - chart.scales.x.min + 1));
+                                        applyTrendLines(visibleDays);
+                                        chart.update('none');
+                                    }}
+                                }}
                             }},
                             scales: {{
+                                x: {{ ticks: {{ maxTicksLimit: 8 }} }},
                                 y: {{ type: 'linear', display: true, position: 'left', ticks: {{ callback: function(val) {{ return val>=1000000 ? (val/1000000).toFixed(1)+'M' : val; }} }} }}
                             }}
                         }}
                     }});
+                    const applyTrendLines = (days) => {{
+                        lineChart.data.datasets[2].hidden = days > 90;
+                        lineChart.data.datasets[3].hidden = days <= 90 || days > 365;
+                        lineChart.data.datasets[4].hidden = days <= 365;
+                        lineChart.data.datasets[5].hidden = days <= 365 || fullLabels.length < 240;
+                    }};
+                    const applyRange = (range) => {{
+                        const days = range === 'all' ? fullLabels.length : Math.min(Number(range), fullLabels.length);
+                        const start = Math.max(0, fullLabels.length - days);
+                        lineChart.options.scales.x.min = start;
+                        lineChart.options.scales.x.max = fullLabels.length - 1;
+                        applyTrendLines(days);
+                        lineChart.update();
+                        document.querySelectorAll('.range-btn[data-range]').forEach((button) => button.classList.toggle('is-active', button.dataset.range === String(range)));
+                    }};
+                    document.querySelectorAll('.range-btn[data-range]').forEach((button) => button.addEventListener('click', () => applyRange(button.dataset.range)));
+                    document.getElementById('resetZoom').addEventListener('click', () => applyRange('30'));
+                    applyRange('30');
                 }} catch (error) {{
                     console.error("折線圖繪製失敗:", error);
                 }}
