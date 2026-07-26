@@ -315,25 +315,28 @@ def main():
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
         <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0"></script>
         <style>
-            @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700;900&display=swap');
-            body {{ font-family: 'Noto Sans TC', sans-serif; background-color: #f1f5f9; margin: 0; padding: 15px; padding-bottom: 30px; color: #1e293b; }}
+            @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&display=swap');
+            :root {{ --paper: #f5f4ef; --surface: #fbfaf7; --ink: #34332f; --muted: #77736b; --line: #dedbd3; --sage: #727a6d; --brick: #ad6658; }}
+            * {{ box-sizing: border-box; }}
+            body {{ font-family: 'Noto Sans TC', sans-serif; background-color: var(--paper); margin: 0 auto; max-width: 1080px; padding: 28px 18px 44px; color: var(--ink); letter-spacing: .01em; }}
             
-            .header-wrapper {{ background: white; border-radius: 12px; padding: 16px 12px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; margin-bottom: 16px; }}
+            .header-wrapper {{ background: transparent; border-radius: 0; padding: 2px 0 18px; box-shadow: none; border: 0; border-bottom: 1px solid var(--line); margin-bottom: 22px; }}
             .header-container {{ display: flex; align-items: center; justify-content: space-around; width: 100%; }}
             .header-item {{ display: flex; align-items: center; justify-content: center; }}
             
-            .card {{ background: white; border-radius: 12px; padding: 16px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; margin-bottom: 16px; }}
-            .sec-title {{ font-size: 16px; font-weight: 900; margin-bottom: 12px; color: #0f172a; border-bottom: 2px solid #f1f5f9; padding-bottom: 8px; }}
-            .info-row {{ font-size: 14px; font-weight: 700; margin-bottom: 8px; color: #334155; }}
+            .card {{ background: var(--surface); border-radius: 2px; padding: 20px; box-shadow: none; border: 1px solid var(--line); margin-bottom: 14px; }}
+            .sec-title {{ font-family: 'Noto Serif TC', serif; font-size: 17px; font-weight: 700; margin-bottom: 15px; color: var(--ink); border-bottom: 1px solid var(--line); padding-bottom: 10px; }}
+            .info-row {{ font-size: 14px; font-weight: 500; margin-bottom: 9px; color: #514f49; }}
             .grid-2 {{ display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }}
-            .box {{ background: #f8fafc; border-radius: 8px; padding: 12px; border: 1px solid #e2e8f0; font-size: 13px; color: #475569; }}
-            .box b {{ display: block; font-size: 17px; color: #0f172a; font-weight: 900; margin-top: 4px; margin-bottom: 2px; }}
-            .box small {{ font-size: 11px; color: #64748b; }}
-            .timeline ul {{ padding-left: 20px; margin: 10px 0 0 0; font-size: 13px; font-weight: 500; color: #334155; line-height: 1.6; }}
-            .btn {{ display: block; text-align: center; background: #0f172a; color: white; text-decoration: none; padding: 12px; border-radius: 8px; font-weight: 700; margin-bottom: 10px; }}
-            .btn-alt {{ background: #3b82f6; }}
+            .box {{ background: #f4f2ed; border-radius: 0; padding: 13px; border: 1px solid #e5e2db; font-size: 13px; color: var(--muted); }}
+            .box b {{ display: block; font-size: 18px; color: var(--ink); font-weight: 700; margin-top: 5px; margin-bottom: 2px; }}
+            .box small {{ font-size: 11px; color: var(--muted); }}
+            .timeline ul {{ padding-left: 20px; margin: 10px 0 0 0; font-size: 13px; font-weight: 500; color: #514f49; line-height: 1.75; }}
+            .btn {{ display: block; text-align: center; background: #45443f; color: white; text-decoration: none; padding: 13px; border-radius: 2px; font-weight: 500; letter-spacing: .08em; margin-bottom: 10px; }}
+            .btn-alt {{ background: var(--sage); }}
             .chart-container {{ position: relative; width: 100%; height: 280px; margin-bottom: 20px; }}
-            .chart-title {{ text-align: center; font-weight: 900; font-size: 15px; margin-bottom: 10px; }}
+            .chart-title {{ font-family: 'Noto Serif TC', serif; text-align: left; font-weight: 700; font-size: 16px; margin-bottom: 14px; color: var(--ink); }}
+            @media (max-width: 540px) {{ body {{ padding: 20px 13px 32px; }} .card {{ padding: 16px; }} .grid-2 {{ gap: 8px; }} .box {{ padding: 10px; }} .header-container {{ justify-content: space-between; }} }}
         </style>
     </head>
     <body>
@@ -428,6 +431,7 @@ def main():
             </div>
         </div>
 
+        <a href="https://hanjhou2000716.github.io/skynet-monitoring/" class="btn btn-alt">Risk Monitor — 市場風險監控</a>
         <a href="https://forms.gle/9ZEJawwNRGfiXQiV8" class="btn">📝 Growth 表單</a>
 
         <script>
