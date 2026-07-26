@@ -832,15 +832,12 @@ def main():
         # daily_pct 本身就是負數，所以直接顯示即可
         msg_body = f"💸 可憐的阿洲，今天賠了 {abs(int(daily_diff)):,} 元 ({daily_pct:.1f}%)"
 
-    # 移除了日期前後的括號
-    tg_text = f"✅ {display_date} 結算完畢！\n{msg_body}\n\n@PRStK Lab & SFC.e. All right reserve"
+    tg_text = f"✅ {display_date} 結算完畢！\n{msg_body}"
 
     # --- 傳送 Telegram 訊息 ---
     keyboard = {
         "inline_keyboard": [
             [{"text": "🦎 Growth 儀表板", "web_app": {"url": WEB_APP_URL}}],
-            # 填入您剛架設好的 Skynet GitHub Pages 網址！
-            [{"text": "📡 Skynet Monitoring", "web_app": {"url": "https://hanjhou2000716.github.io/skynet-monitoring/"}}]
         ]
     }
     
