@@ -184,6 +184,7 @@ def main():
         
     usd_rate = get_usd_twd_rate()
     tw_stock_value, us_stock_value_usd, tsmc_exposure_twd, price_006208, leveraged_etf_value = 0, 0, 0, 0, 0
+    position_values_twd = {}
     cash_twd, cash_usd = inventory["現金_TWD"].get("TWD", 0), inventory["現金_USD"].get("USD", 0)
     fund_value = sum(v for k, v in inventory["基金"].items() if k != "History")
 
@@ -192,16 +193,29 @@ def main():
         price = get_tw_stock_price(symbol)
         value = price * shares
         tw_stock_value += value 
+        position_values_twd[symbol] = value
         if symbol == '2330': tsmc_exposure_twd += (value * 1.0)
         elif symbol == '006208': tsmc_exposure_twd += (value * 0.594); price_006208 = price
         elif symbol == '00685L': tsmc_exposure_twd += (value * 0.728); leveraged_etf_value = value
 
-    pledged_value = sum((price_006208 if sym == '006208' and price_006208 > 0 else get_tw_stock_price(sym)) * shares for sym, shares in inventory["擔保品"].items() if sym != "History" and shares > 0)
+    if price_006208 <= 0 and inventory["擔保品"].get("006208", 0) > 0:
+        price_006208 = get_tw_stock_price("006208")
+
+    pledged_value, pledged_006208_value = 0, 0
+    for symbol, shares in inventory["擔保品"].items():
+        if symbol == "History" or shares <= 0:
+            continue
+        price = price_006208 if symbol == "006208" and price_006208 > 0 else get_tw_stock_price(symbol)
+        value = price * shares
+        pledged_value += value
+        if symbol == "006208":
+            pledged_006208_value += value
 
     for symbol, shares in inventory["美股"].items():
         if symbol == "History" or shares <= 0: continue
         value = get_us_stock_price(symbol) * shares
         us_stock_value_usd += value
+        position_values_twd[symbol] = value * usd_rate
         if symbol == 'TSM': tsmc_exposure_twd += (value * usd_rate * 1.0)
 
     us_stock_value_twd = us_stock_value_usd * usd_rate
@@ -234,6 +248,22 @@ def main():
 
     tw_free_value = max(0, tw_stock_value - total_debt)
     tsmc_pct = (tsmc_exposure_twd / total_asset) * 100 if total_asset > 0 else 0
+    largest_symbol, largest_position_value = max(position_values_twd.items(), key=lambda item: item[1], default=("—", 0))
+    largest_position_pct = (largest_position_value / total_asset * 100) if total_asset > 0 else 0
+    largest_position_status = "警示" if largest_position_pct >= 35 else "觀察" if largest_position_pct >= 20 else "正常"
+    asset_006208_value = position_values_twd.get("006208", 0)
+    qqqm_value = position_values_twd.get("QQQM", 0)
+
+    def stressed_maintenance_ratio(decline):
+        stressed_collateral = max(0, pledged_value - (pledged_006208_value * decline))
+        return (stressed_collateral / total_debt * 100) if total_debt > 0 else 0
+
+    stress_scenarios = [
+        {"label": "006208 下跌 10%", "netImpact": asset_006208_value * -0.10, "netAsset": net_asset - asset_006208_value * 0.10, "maintenance": stressed_maintenance_ratio(0.10)},
+        {"label": "006208 下跌 20%", "netImpact": asset_006208_value * -0.20, "netAsset": net_asset - asset_006208_value * 0.20, "maintenance": stressed_maintenance_ratio(0.20)},
+        {"label": "QQQM 下跌 10%", "netImpact": qqqm_value * -0.10, "netAsset": net_asset - qqqm_value * 0.10, "maintenance": None},
+        {"label": "QQQM 下跌 20%", "netImpact": qqqm_value * -0.20, "netAsset": net_asset - qqqm_value * 0.20, "maintenance": None},
+    ]
 
     yesterday_net = next((float(str(row.get('Net_Asset', 0)).replace(',', '')) for row in reversed(history_records) if float(str(row.get('Net_Asset', 0)).replace(',', '')) > 0 and str(row.get('Date', ''))[-5:] != today_str), 0)
     daily_diff = net_asset - yesterday_net if yesterday_net else 0
@@ -243,6 +273,15 @@ def main():
     progress_pct = (net_asset / 10000000) * 100 if net_asset > 0 else 0
     bar_blocks = max(0, min(10, int(progress_pct / 10)))
     bar_str = "[" + "█" * bar_blocks + "░" * (10 - bar_blocks) + f"] {progress_pct:.1f}%"
+    stress_cards_html = "".join(
+        f'''<div class="stress-card">
+                <div class="stress-label">{scenario["label"]}</div>
+                <div class="stress-impact">${scenario["netImpact"]:,.0f}</div>
+                <div class="stress-detail">壓力後淨資產 ${scenario["netAsset"]:,.0f}</div>
+                <div class="stress-detail">{f"維持率 {scenario['maintenance']:.1f}%" if scenario["maintenance"] is not None else "不影響質押維持率"}</div>
+            </div>'''
+        for scenario in stress_scenarios
+    )
 
     snapshot_result = "skipped"
     if total_asset > 0:
@@ -348,8 +387,14 @@ def main():
             .range-btn {{ appearance:none; background:transparent; border:1px solid var(--line); color:var(--muted); cursor:pointer; font:inherit; font-size:11px; padding:6px 9px; }}
             .range-btn:hover, .range-btn.is-active {{ background:#e9e6de; color:var(--ink); border-color:#c9c4b9; }}
             .chart-hint {{ color:var(--muted); font-size:11px; margin-left:auto; }}
+            .exposure-status {{ font-size:11px; padding:4px 7px; border:1px solid var(--line); color:var(--muted); }}
+            .stress-grid {{ display:grid; grid-template-columns:repeat(2, 1fr); gap:10px; }}
+            .stress-card {{ background:#f4f2ed; border:1px solid #e5e2db; padding:14px; }}
+            .stress-label {{ color:var(--ink); font-size:13px; font-weight:700; }}
+            .stress-impact {{ color:var(--brick); font-family:'Noto Serif TC', serif; font-size:20px; font-weight:700; margin:7px 0 4px; }}
+            .stress-detail {{ color:var(--muted); font-size:11px; line-height:1.7; }}
             .footer {{ border-top:1px solid var(--line); padding-top:16px; color:var(--muted); font-size:11px; text-align:center; letter-spacing:.04em; }}
-            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2 {{ gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} }}
+            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid {{ gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} }}
         </style>
     </head>
     <body>
@@ -398,6 +443,15 @@ def main():
                 <div class="box">質押借款<b class="risk-alert">${total_debt:,.0f}</b><small>含利息 ${accumulated_interest:,.0f}</small></div>
                 <div class="box">質押維持率<b class="{'risk-alert' if maintenance_ratio<150 else 'risk-good'}">{maintenance_ratio:.1f}%</b><small>{ratio_status}</small></div>
             </div>
+        </div>
+
+        <div class="card">
+            <div class="sec-title">集中度與壓力測試 <span class="exposure-status">{largest_position_status}</span></div>
+            <div class="grid-2" style="margin-bottom:12px;">
+                <div class="box">最大單一標的<b>{largest_symbol} · {largest_position_pct:.1f}%</b><small>${largest_position_value:,.0f} ／ 總資產</small></div>
+                <div class="box">TSMC 穿透曝險<b>{tsmc_pct:.1f}%</b><small>單一標的 ≥20% 觀察；≥35% 警示</small></div>
+            </div>
+            <div class="stress-grid">{stress_cards_html}</div>
         </div>
 
         <div class="card">
@@ -610,13 +664,14 @@ def main():
     for item in allocation_items:
         item["percent"] = round((item["value"] / total_asset * 100), 1) if total_asset > 0 else 0
 
-    risk_level = "attention" if maintenance_ratio and maintenance_ratio < 150 else "watch" if debt_ratio >= 25 or tsmc_pct >= 35 else "stable"
+    risk_level = "attention" if ((maintenance_ratio and maintenance_ratio < 150) or largest_position_pct >= 35) else "watch" if (debt_ratio >= 25 or tsmc_pct >= 35 or largest_position_pct >= 20) else "stable"
     risk_summary = {
         "level": risk_level,
         "debtRatio": round(debt_ratio, 1),
         "maintenanceRatio": round(maintenance_ratio, 1),
         "tsmcExposureRatio": round(tsmc_pct, 1),
         "effectiveLeverage": round(effective_leverage, 2),
+        "largestPosition": {"symbol": largest_symbol, "value": round(largest_position_value, 2), "percent": round(largest_position_pct, 1), "status": largest_position_status},
     }
 
     data_for_web = {
@@ -632,6 +687,7 @@ def main():
             "totalDebt": round(total_debt, 2),
             "allocation": allocation_items,
             "risk": risk_summary,
+            "stressTests": stress_scenarios,
         },
     }
 
