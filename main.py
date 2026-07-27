@@ -283,10 +283,24 @@ def main():
     invested_assets = tw_stock_value + us_stock_value_twd + fund_value
     effective_leverage = ((invested_assets + leveraged_etf_value) / net_asset) if net_asset > 0 else 0
     half_kelly_limit = 0.08 / (2 * (0.18 ** 2))
+    beta_capacity = (effective_leverage / half_kelly_limit * 100) if half_kelly_limit > 0 else 0
+    if beta_capacity > 115:
+        beta_status, beta_status_class = "🔴 加原型補現金", "risk-alert"
+    elif beta_capacity >= 95:
+        beta_status, beta_status_class = "🟡 Beta維持", "risk-watch"
+    else:
+        beta_status, beta_status_class = "🟢 可加槓桿", "risk-good"
     
     debt_ratio = ((total_debt / total_asset) * 100) if total_asset > 0 else 0
     maintenance_ratio = (pledged_value / total_debt) * 100 if total_debt > 0 else 0
-    ratio_status = "🟢安全" if maintenance_ratio >= 190 else "🟡注意" if maintenance_ratio >= 150 else "🔴警戒" if maintenance_ratio >= 130 else "🆘危險" if maintenance_ratio > 0 else "✅無借款"
+    if total_debt <= 0:
+        ratio_status, maintenance_status_class = "✅ 無借款", "risk-good"
+    elif maintenance_ratio >= 190:
+        ratio_status, maintenance_status_class = "🟢 可加槓桿", "risk-good"
+    elif maintenance_ratio >= 150:
+        ratio_status, maintenance_status_class = "🟡 注意槓桿", "risk-watch"
+    else:
+        ratio_status, maintenance_status_class = "🔴 補擔保品", "risk-alert"
 
     tw_free_value = max(0, tw_stock_value - total_debt)
     tsmc_pct = (tsmc_exposure_twd / total_asset) * 100 if total_asset > 0 else 0
@@ -346,9 +360,14 @@ def main():
     def inline_daily_change(key):
         change = category_daily_changes[key]
         if change is None:
-            return '<span class="daily-inline price-flat">日變動待累積</span>'
-        color = "price-up" if change["amount"] > 0 else "price-down" if change["amount"] < 0 else "price-flat"
-        return f'<span class="daily-inline {color}">{change["percent"]:+.2f}% · ${change["amount"]:+,.0f}</span>'
+            return '<span class="daily-inline price-flat">🟰 日變動待累積</span>'
+        if change["percent"] > 1:
+            marker, color = "📈", "price-up"
+        elif change["percent"] < -1:
+            marker, color = "📉", "price-down"
+        else:
+            marker, color = "🟰", "price-flat"
+        return f'<span class="daily-inline {color}">{marker} {change["percent"]:+.2f}% · ${change["amount"]:+,.0f}</span>'
 
     snapshot_result = "skipped"
     if total_asset > 0:
@@ -452,7 +471,7 @@ def main():
             .box {{ background:#f4f2ed; padding:14px; border:1px solid #e5e2db; border-radius:3px; font-size:12px; color:var(--muted); }}
             .box b {{ display:block; font-size:19px; color:var(--ink); font-weight:700; margin-top:6px; margin-bottom:2px; }}
             .box small {{ font-size:11px; color:var(--muted); }}
-            .risk-good {{ color:#62705e !important; }} .risk-alert {{ color:#ad6658 !important; }}
+            .risk-good {{ color:#5e806d !important; }} .risk-watch {{ color:#b78435 !important; }} .risk-alert {{ color:#b84f45 !important; }}
             .timeline ul {{ padding-left:18px; margin:10px 0 0; font-size:13px; color:#514f49; line-height:1.9; }}
             .goal-track {{ height:6px; background:#e5e2db; margin:12px 0 8px; }} .goal-fill {{ height:100%; background:var(--sage); width:{min(progress_pct, 100):.1f}%; }}
             .actions {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:16px 0 30px; }}
@@ -475,11 +494,12 @@ def main():
             .price-up {{ color:#b84f45 !important; }} .price-down {{ color:#5e806d !important; }} .price-flat {{ color:var(--navy) !important; }}
             .daily-inline {{ display:inline-block; margin-left:6px; font-size:11px; font-weight:700; vertical-align:middle; white-space:nowrap; }}
             .block-grid {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }}
-            .risk-section {{ background:#f4f2ed; border:1px solid #e5e2db; border-radius:14px; padding:16px; }} .risk-section + .risk-section {{ margin-top:12px; }}
+            .risk-section {{ background:#f4f2ed; border:1px solid #e5e2db; border-radius:16px; padding:15px; }} .risk-section + .risk-section {{ margin-top:12px; }}
             .risk-pair,.exposure-pair {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
-            .risk-column,.exposure-row {{ background:#f8faf7; border:1px solid #d8dfd8; border-radius:10px; padding:15px; }} .risk-column strong,.exposure-row strong {{ display:block; color:var(--navy); font-size:23px; line-height:1.2; margin-top:6px; }} .risk-column small,.exposure-row small {{ display:block; margin-top:6px; color:var(--muted); font-size:12px; line-height:1.5; }}
-            .maintenance-line {{ border-top:1px solid #d5ddd5; margin-top:12px; padding-top:10px; }} .maintenance-line strong {{ display:inline; font-size:17px; margin:0; }}
-            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ grid-template-columns:minmax(0, 1.12fr) minmax(0, .88fr); gap:8px; }} .change,.sync {{ padding:10px 9px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} }}
+            .risk-column,.exposure-row {{ background:#f8faf7; border:1px solid #d8dfd8; border-radius:12px; padding:15px 13px; min-width:0; }} .risk-column strong,.exposure-row strong {{ display:block; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; margin-top:7px; letter-spacing:-.02em; }} .risk-column small,.exposure-row small {{ display:block; margin-top:6px; color:var(--muted); font-size:12px; line-height:1.45; }}
+            .risk-detail {{ border-top:1px solid #d5ddd5; margin-top:12px; padding-top:10px; }} .risk-detail-label {{ display:block; color:var(--muted); font-size:11px; }} .risk-detail-value {{ display:block; margin-top:4px; color:var(--ink); font-size:13px; font-weight:700; line-height:1.45; }} .risk-detail-value .status {{ white-space:nowrap; }}
+            .risk-section .sec-title {{ margin-bottom:11px !important; }}
+            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ grid-template-columns:minmax(0, 1.12fr) minmax(0, .88fr); gap:8px; }} .change,.sync {{ padding:10px 9px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .risk-section {{ padding:13px; }} .risk-column,.exposure-row {{ padding:14px 12px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} }}
         </style>
     </head>
     <body>
@@ -546,21 +566,21 @@ def main():
             <div class="risk-section">
                 <div class="sec-title" style="margin-bottom:10px;">槓桿 <span class="sec-note">Leverage &amp; collateral</span></div>
                 <div class="risk-pair">
-                    <div class="risk-column"><span class="metric-label">有效槓桿</span><strong>{effective_leverage:.2f} ×</strong><small>凱利安全邊界 {half_kelly_limit:.2f} ×</small></div>
-                    <div class="risk-column"><span class="metric-label">質押借款</span><strong class="risk-alert">${total_debt:,.0f}</strong><small>含利息 ${accumulated_interest:,.0f}</small><div class="maintenance-line"><span class="metric-label">質押維持率</span> <strong class="{'risk-alert' if maintenance_ratio<150 else 'risk-good'}">{maintenance_ratio:.1f}%</strong> <small style="display:inline;">| {ratio_status}</small></div></div>
+                    <div class="risk-column"><span class="metric-label">有效Beta</span><strong>{effective_leverage:.2f} ×</strong><div class="risk-detail"><span class="risk-detail-label">凱利安全邊界</span><span class="risk-detail-value">{half_kelly_limit:.2f} 倍 <span class="status {beta_status_class}">| {beta_status} 容量: {beta_capacity:.1f}%</span></span></div></div>
+                    <div class="risk-column"><span class="metric-label">質押借款</span><strong class="risk-alert">${total_debt:,.0f}</strong><small>含利息 ${accumulated_interest:,.0f}</small><div class="risk-detail"><span class="risk-detail-label">質押維持率</span><span class="risk-detail-value"><span class="{maintenance_status_class}">{maintenance_ratio:.1f}%</span> <span class="status {maintenance_status_class}">| {ratio_status}</span></span></div></div>
                 </div>
             </div>
             <div class="risk-section">
                 <div class="sec-title" style="margin-bottom:10px;">曝險 <span class="sec-note">Look-through concentration</span></div>
                 <div class="exposure-pair">
-                    <div class="exposure-row"><span class="metric-label">TSMC 曝險</span><strong>{tsmc_pct:.1f}%</strong><small>台美股與 ETF 統合曝險</small></div>
-                    <div class="exposure-row"><span class="metric-label">NVDA 曝險</span><strong>{nvda_pct:.1f}%</strong><small>美股與 ETF 統合曝險</small></div>
+                    <div class="exposure-row"><span class="metric-label">TSMC 曝險</span><strong>{tsmc_pct:.1f}%</strong><small>含台美股 &amp; ETF 綜合曝險</small></div>
+                    <div class="exposure-row"><span class="metric-label">NVDA 曝險</span><strong>{nvda_pct:.1f}%</strong><small>純美股 &amp; ETF 綜合曝險</small></div>
                 </div>
             </div>
         </div>
 
         <div class="card">
-            <div class="sec-title">集中度與壓力測試 <span class="exposure-status">20% 觀察 · 35% 警示</span></div>
+            <div class="sec-title">集中度與壓力測試</div>
             <div class="grid-2" style="margin-bottom:12px;">
                 <div class="box">台股最大單一標的<b>{tw_largest_symbol} · {tw_largest_pct:.1f}%</b><small>${tw_largest_value:,.0f} ／ 總資產</small></div>
                 <div class="box">美股最大單一標的<b>{us_largest_symbol} · {us_largest_pct:.1f}%</b><small>${us_largest_value:,.0f} ／ 總資產</small></div>
@@ -619,7 +639,7 @@ def main():
             <a href="https://hanjhou2000716.github.io/skynet-monitoring/" class="btn btn-alt">開啟 Risk Monitor</a>
             <a href="https://forms.gle/9ZEJawwNRGfiXQiV8" class="btn">登錄資產異動</a>
         </div>
-        <footer class="footer">@2026 PRStK Lab &amp; D.INV | All right reserved.</footer>
+        <footer class="footer">@2026 PRStK Lab &amp; SFC.e. | All right reserved.</footer>
 
         <script>
             // 確保網頁讀取完畢後才開始畫圖，並加入 try-catch 防止崩潰
