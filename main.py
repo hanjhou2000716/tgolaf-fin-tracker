@@ -452,10 +452,10 @@ def main():
             .hero .eyebrow,.hero .metric-label {{ color:#ccd7dc; }} .hero .metric-value {{ color:#fffdf7; }}
             .hero-top {{ position:relative; z-index:1; display:flex; align-items:end; justify-content:space-between; gap:16px; }}
             .hero-value {{ font-family:'Noto Serif TC', serif; font-size:clamp(34px, 6vw, 52px); line-height:1; letter-spacing:-.03em; }}
-            .change,.sync {{ display:flex; align-items:center; min-width:0; white-space:nowrap; border:1px solid rgba(255,255,255,.16); border-radius:12px; padding:11px 14px; box-shadow:0 4px 10px rgba(10,24,40,.12); }}
+            .change,.sync {{ display:flex; align-items:center; flex:0 0 auto; width:fit-content; white-space:nowrap; border:1px solid rgba(255,255,255,.16); border-radius:12px; padding:11px 14px; box-shadow:0 4px 10px rgba(10,24,40,.12); }}
             .change {{ color:{'#91b29d' if daily_diff < 0 else '#ef9a83'}; font-size:clamp(11px, 2vw, 14px); font-weight:700; background:#35536d; }}
-            .hero-status-row {{ position:relative; z-index:1; display:grid; grid-template-columns:minmax(0, 1.12fr) minmax(0, .88fr); gap:10px; border-bottom:1px solid rgba(255,255,255,.22); padding:13px 0 18px; margin-bottom:17px; }}
-            .sync {{ justify-content:center; color:#d7e2e1; font-size:clamp(11px, 1.8vw, 12px); font-weight:700; background:#2e4b65; }}
+            .hero-status-row {{ position:relative; z-index:1; display:flex; align-items:center; gap:10px; border-bottom:1px solid rgba(255,255,255,.22); padding:13px 0 18px; margin-bottom:17px; }}
+            .sync {{ justify-content:center; color:#d7e2e1; font-size:clamp(11px, 1.8vw, 12px); font-weight:700; background:#2e4b65; margin-left:auto; }}
             .metric-grid {{ position:relative; z-index:1; display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }}
             .metric {{ border-left:2px solid rgba(255,255,255,.33); padding-left:12px; }}
             .metric-label {{ color:var(--muted); font-size:12px; }}
@@ -497,9 +497,9 @@ def main():
             .risk-section {{ background:#f4f2ed; border:1px solid #e5e2db; border-radius:16px; padding:15px; }} .risk-section + .risk-section {{ margin-top:12px; }}
             .risk-pair,.exposure-pair {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
             .risk-column,.exposure-row {{ background:#f8faf7; border:1px solid #d8dfd8; border-radius:12px; padding:15px 13px; min-width:0; }} .risk-column strong,.exposure-row strong {{ display:block; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; margin-top:7px; letter-spacing:-.02em; }} .risk-column small,.exposure-row small {{ display:block; margin-top:6px; color:var(--muted); font-size:12px; line-height:1.45; }}
-            .risk-detail {{ border-top:1px solid #d5ddd5; margin-top:12px; padding-top:10px; }} .risk-detail-label {{ display:block; color:var(--muted); font-size:11px; }} .risk-detail-value {{ display:block; margin-top:4px; color:var(--ink); font-size:13px; font-weight:700; line-height:1.45; }} .risk-detail-value .status {{ white-space:nowrap; }}
+            .risk-detail {{ border-top:1px solid #d5ddd5; margin-top:12px; padding-top:10px; }} .risk-detail-label {{ display:block; color:var(--muted); font-size:11px; }} .risk-detail-value {{ display:block; margin-top:4px; color:var(--ink); font-size:13px; font-weight:700; line-height:1.45; }} .risk-detail .status,.risk-detail .capacity {{ display:block; margin-top:4px; font-size:12px; font-weight:700; line-height:1.35; white-space:normal; }}
             .risk-section .sec-title {{ margin-bottom:11px !important; }}
-            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ grid-template-columns:minmax(0, 1.12fr) minmax(0, .88fr); gap:8px; }} .change,.sync {{ padding:10px 9px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .risk-section {{ padding:13px; }} .risk-column,.exposure-row {{ padding:14px 12px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} }}
+            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ gap:7px; }} .change,.sync {{ padding:9px 8px; font-size:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .risk-section {{ padding:13px; }} .risk-column,.exposure-row {{ padding:14px 12px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} }}
         </style>
     </head>
     <body>
@@ -519,7 +519,7 @@ def main():
         <section class="hero">
             <p class="eyebrow">Portfolio overview</p>
             <div class="hero-top">
-                <div><div class="metric-label">淨資產 Net Asset</div><div class="hero-value">${net_asset:,.0f}</div></div>
+                <div><div class="metric-label">淨資產 Net</div><div class="hero-value">${net_asset:,.0f}</div></div>
             </div>
             <div class="hero-status-row">
                 <div class="change">今日 {sign}{daily_pct:.1f}% &nbsp;·&nbsp; {sign}${daily_diff:,.0f}</div>
@@ -566,14 +566,14 @@ def main():
             <div class="risk-section">
                 <div class="sec-title" style="margin-bottom:10px;">槓桿 <span class="sec-note">Leverage &amp; collateral</span></div>
                 <div class="risk-pair">
-                    <div class="risk-column"><span class="metric-label">有效Beta</span><strong>{effective_leverage:.2f} ×</strong><div class="risk-detail"><span class="risk-detail-label">凱利安全邊界</span><span class="risk-detail-value">{half_kelly_limit:.2f} 倍 <span class="status {beta_status_class}">| {beta_status} 容量: {beta_capacity:.1f}%</span></span></div></div>
-                    <div class="risk-column"><span class="metric-label">質押借款</span><strong class="risk-alert">${total_debt:,.0f}</strong><small>含利息 ${accumulated_interest:,.0f}</small><div class="risk-detail"><span class="risk-detail-label">質押維持率</span><span class="risk-detail-value"><span class="{maintenance_status_class}">{maintenance_ratio:.1f}%</span> <span class="status {maintenance_status_class}">| {ratio_status}</span></span></div></div>
+                    <div class="risk-column"><span class="metric-label">有效Beta</span><strong>{effective_leverage:.2f} ×</strong><div class="risk-detail"><span class="risk-detail-label">凱利安全邊界</span><span class="risk-detail-value">{half_kelly_limit:.2f} 倍</span><span class="status {beta_status_class}">{beta_status}</span><span class="capacity {beta_status_class}">容量: {beta_capacity:.1f}%</span></div></div>
+                    <div class="risk-column"><span class="metric-label">質押借款</span><strong class="risk-alert">${total_debt:,.0f}</strong><small>含利息 ${accumulated_interest:,.0f}</small><div class="risk-detail"><span class="risk-detail-label">質押維持率</span><span class="risk-detail-value {maintenance_status_class}">{maintenance_ratio:.1f}%</span><span class="status {maintenance_status_class}">{ratio_status}</span></div></div>
                 </div>
             </div>
             <div class="risk-section">
                 <div class="sec-title" style="margin-bottom:10px;">曝險 <span class="sec-note">Look-through concentration</span></div>
                 <div class="exposure-pair">
-                    <div class="exposure-row"><span class="metric-label">TSMC 曝險</span><strong>{tsmc_pct:.1f}%</strong><small>含台美股 &amp; ETF 綜合曝險</small></div>
+                    <div class="exposure-row"><span class="metric-label">TSMC 曝險</span><strong>{tsmc_pct:.1f}%</strong><small>台美股 &amp; ETF 綜合曝險</small></div>
                     <div class="exposure-row"><span class="metric-label">NVDA 曝險</span><strong>{nvda_pct:.1f}%</strong><small>純美股 &amp; ETF 綜合曝險</small></div>
                 </div>
             </div>
