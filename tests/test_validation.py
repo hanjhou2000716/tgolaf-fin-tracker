@@ -39,7 +39,7 @@ class ValidationTests(unittest.TestCase):
             validate_quote("2330", 0)
 
     def test_requires_history_schema(self):
-        self.assertTrue(validate_history_sheet(FakeHistorySheet(["Date", "Total_Asset", "Net_Asset", "Total_Debt"])))
+        self.assertTrue(validate_history_sheet(FakeHistorySheet(["Date", "Total_Asset", "Net_Asset"])))
         with self.assertRaises(ValueError):
             validate_history_sheet(FakeHistorySheet(["Date", "Net_Asset"]))
 

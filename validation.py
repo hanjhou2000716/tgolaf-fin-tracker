@@ -6,7 +6,9 @@ import math
 REQUIRED_INVENTORY_KEYS = {
     "台股", "美股", "基金", "現金_TWD", "現金_USD", "質押負債", "質押利率", "擔保品"
 }
-REQUIRED_HISTORY_COLUMNS = {"Date", "Total_Asset", "Net_Asset", "Total_Debt"}
+# These are the only legacy History fields consumed by the performance charts.
+# Debt is calculated from the transaction ledger, not read from History.
+REQUIRED_HISTORY_COLUMNS = {"Date", "Total_Asset", "Net_Asset"}
 
 
 def _number(value, label, minimum=0):
