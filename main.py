@@ -7,6 +7,7 @@ import re
 import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
+from quotes import get_tw_stock_price
 from risk import (
     HALF_KELLY_LIMIT,
     beta_capacity as calculate_beta_capacity,
@@ -245,11 +246,6 @@ def get_us_stock_price(symbol):
         try: return yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1]
         except: return 0
 
-def get_tw_stock_price(symbol):
-    start_date = (datetime.date.today() - datetime.timedelta(days=7)).strftime("%Y-%m-%d")
-    try: return requests.get("https://api.finmindtrade.com/api/v4/data", params={"dataset": "TaiwanStockPrice", "data_id": str(symbol), "start_date": start_date, "token": FINMIND_TOKEN}).json()["data"][-1]["close"]
-    except: return 0
-
 # ==========================================
 # 4. 主程序與 HTML (Web App) 生成
 # ==========================================
@@ -272,7 +268,7 @@ def main():
 
     for symbol, shares in inventory["台股"].items():
         if symbol == "History" or shares <= 0: continue
-        price = validate_quote(symbol, get_tw_stock_price(symbol))
+        price = validate_quote(symbol, get_tw_stock_price(symbol, FINMIND_TOKEN))
         value = price * shares
         tw_stock_value += value 
         position_values_twd[symbol] = value
@@ -282,13 +278,13 @@ def main():
         elif symbol == '00685L': tsmc_exposure_twd += (value * 0.728); leveraged_etf_value = value
 
     if price_006208 <= 0 and inventory["擔保品"].get("006208", 0) > 0:
-        price_006208 = get_tw_stock_price("006208")
+        price_006208 = get_tw_stock_price("006208", FINMIND_TOKEN)
 
     pledged_value, pledged_006208_value = 0, 0
     for symbol, shares in inventory["擔保品"].items():
         if symbol == "History" or shares <= 0:
             continue
-        price = price_006208 if symbol == "006208" and price_006208 > 0 else validate_quote(symbol, get_tw_stock_price(symbol))
+        price = price_006208 if symbol == "006208" and price_006208 > 0 else validate_quote(symbol, get_tw_stock_price(symbol, FINMIND_TOKEN))
         value = price * shares
         pledged_value += value
         if symbol == "006208":
