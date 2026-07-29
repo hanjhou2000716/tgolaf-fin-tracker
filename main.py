@@ -18,7 +18,7 @@ GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
 WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/"
 
 
-HISTORY_EXTRA_COLUMNS = ["TW_Stock_Value", "US_Stock_Value", "Cash_Value", "Fund_Value", "NVDA_QQQM_Weight", "NVDA_SPYG_Weight", "NVDA_VOO_Weight"]
+HISTORY_EXTRA_COLUMNS = ["TW_Stock_Value", "US_Stock_Value", "Cash_Value", "Fund_Value", "NVDA_QQQM_Weight", "NVDA_SPYG_Weight", "NVDA_VOO_Weight", "Settlement_Notification_Sent_At"]
 ETF_NVDA_WEIGHT_FALLBACKS = {"QQQM": 0.095, "SPYG": 0.075, "VOO": 0.070}
 
 
@@ -50,6 +50,36 @@ def upsert_history_snapshot(history_sheet, snapshot_date, values):
     return "created"
 
 
+def settlement_notification_sent(history_sheet, snapshot_date):
+    """Read the durable per-day notification marker from the History sheet."""
+    if history_sheet is None:
+        return False
+    header = history_sheet.row_values(1)
+    try:
+        marker_index = header.index("Settlement_Notification_Sent_At")
+    except ValueError:
+        return False
+    for row in reversed(history_sheet.get_all_values()[1:]):
+        if row and str(row[0]).strip()[:10] == snapshot_date:
+            return len(row) > marker_index and bool(str(row[marker_index]).strip())
+    return False
+
+
+def mark_settlement_notification_sent(history_sheet, snapshot_date, sent_at):
+    if history_sheet is None:
+        return
+    header = history_sheet.row_values(1)
+    try:
+        marker_column = header.index("Settlement_Notification_Sent_At") + 1
+    except ValueError:
+        return
+    for row_number in range(len(history_sheet.get_all_values()), 1, -1):
+        row = history_sheet.row_values(row_number)
+        if row and str(row[0]).strip()[:10] == snapshot_date:
+            history_sheet.update_cell(row_number, marker_column, sent_at)
+            return
+
+
 def get_etf_nvda_weight(symbol, history_records):
     """Read current ETF holding weight, then historical value, then conservative fallback."""
     try:
@@ -75,7 +105,9 @@ def get_etf_nvda_weight(symbol, history_records):
 
 
 def write_json(path, payload):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
 
@@ -412,7 +444,8 @@ def main():
     net_240ma_json = json.dumps(net_240ma)
 
     def get_growth_str(days):
-        if not sorted_dates: return "+0.0%(模)"
+        if not sorted_dates:
+            return "資料累積中"
         target = tw_now.date() - datetime.timedelta(days=days)
         closest, min_diff = None, 9999
         for d in sorted_dates:
@@ -421,7 +454,7 @@ def main():
         if closest and min_diff <= max(7, days * 0.2):
             rate = ((net_asset - daily_net_history[closest]) / daily_net_history[closest]) * 100
             return f"{'+' if rate>=0 else ''}{rate:.1f}%(實)"
-        return "-4.7%(實)" if days==30 else "+215.9%(模)" if days==90 else "+83.1%(模)" if days==365 else "+195.7%(模)"
+        return "資料累積中"
 
     html_content = f"""
     <!DOCTYPE html>
@@ -837,16 +870,32 @@ def main():
         },
     }
 
-    data_for_web["status"] = "ok" if total_asset > 0 else "degraded"
-    data_for_web["generatedAt"] = tw_now.isoformat()
-    data_for_web["snapshotResult"] = snapshot_result
-    write_json("public/data.json", data_for_web)
-    write_json("public/status.json", {
-        "status": "ok" if total_asset > 0 else "degraded",
+    data_status = "ok" if total_asset > 0 and net_asset > 0 else "degraded"
+    status_payload = {
+        "status": data_status,
         "generatedAt": tw_now.isoformat(),
         "snapshotResult": snapshot_result,
         "portfolioValueAvailable": total_asset > 0,
-    })
+        "freshness": {
+            "expectedCadenceHours": 12,
+            "staleAfterHours": 18,
+            "timezone": "Asia/Taipei",
+        },
+        "sources": {
+            "googleSheet": "ok" if inventory else "unavailable",
+            "marketQuotes": "ok" if total_asset > 0 else "unavailable",
+        },
+    }
+    data_for_web["status"] = data_status
+    data_for_web["generatedAt"] = tw_now.isoformat()
+    data_for_web["snapshotResult"] = snapshot_result
+    data_for_web["dataQuality"] = status_payload
+    # Keep the status endpoint public at the Pages root so external schedulers
+    # and health checks can verify freshness without parsing the HTML page.
+    for path in ("public/data.json", "data.json"):
+        write_json(path, data_for_web)
+    for path in ("public/status.json", "status.json"):
+        write_json(path, status_payload)
     # =================================
 
     # --- 判斷每日損益，動態生成推播文字 ---
@@ -865,12 +914,28 @@ def main():
         ]
     }
     
-    requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
-        "chat_id": TELEGRAM_CHAT_ID, 
-        "text": tg_text,
-        "parse_mode": "Markdown",
-        "reply_markup": keyboard
-    })
+    # Settlement is sent after the Taiwan close. The History marker makes this
+    # idempotent even when Cron retries or a user manually reruns the workflow.
+    snapshot_date = tw_now.strftime("%Y-%m-%d")
+    notification_already_sent = settlement_notification_sent(history_sheet, snapshot_date)
+    in_settlement_window = 14 <= tw_now.hour < 17
+    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID and in_settlement_window and not notification_already_sent:
+        try:
+            response = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": tg_text,
+                "parse_mode": "Markdown",
+                "reply_markup": keyboard,
+            }, timeout=10)
+            response.raise_for_status()
+            mark_settlement_notification_sent(history_sheet, snapshot_date, tw_now.isoformat())
+        except requests.RequestException as error:
+            print(f"Telegram notification failed: {error}")
+    else:
+        print(
+            "Telegram notification skipped; "
+            f"window={in_settlement_window}, alreadySent={notification_already_sent}, snapshotResult={snapshot_result}"
+        )
 
 if __name__ == "__main__":
     main()
