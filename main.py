@@ -7,6 +7,15 @@ import re
 import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
+from risk import (
+    HALF_KELLY_LIMIT,
+    beta_capacity as calculate_beta_capacity,
+    beta_status as classify_beta_capacity,
+    maintenance_ratio as calculate_maintenance_ratio,
+    maintenance_status,
+    stress_scenarios as build_stress_scenarios,
+)
+from validation import validate_history_sheet, validate_inventory, validate_quote
 
 # ==========================================
 # 1. 環境變數與金鑰設定
@@ -250,11 +259,12 @@ def main():
     display_date = tw_now.strftime("%m/%d")
         
     inventory, history_sheet = calculate_current_assets()
-    try: history_records = history_sheet.get_all_records()
-    except: history_records = []
+    validate_inventory(inventory)
+    validate_history_sheet(history_sheet)
+    history_records = history_sheet.get_all_records()
     etf_nvda_weights = {symbol: get_etf_nvda_weight(symbol, history_records) for symbol in ETF_NVDA_WEIGHT_FALLBACKS}
         
-    usd_rate = get_usd_twd_rate()
+    usd_rate = validate_quote("USD/TWD", get_usd_twd_rate())
     tw_stock_value, us_stock_value_usd, tsmc_exposure_twd, price_006208, leveraged_etf_value = 0, 0, 0, 0, 0
     position_values_twd, tw_position_values, us_position_values = {}, {}, {}
     cash_twd, cash_usd = inventory["現金_TWD"].get("TWD", 0), inventory["現金_USD"].get("USD", 0)
@@ -262,7 +272,7 @@ def main():
 
     for symbol, shares in inventory["台股"].items():
         if symbol == "History" or shares <= 0: continue
-        price = get_tw_stock_price(symbol)
+        price = validate_quote(symbol, get_tw_stock_price(symbol))
         value = price * shares
         tw_stock_value += value 
         position_values_twd[symbol] = value
@@ -278,7 +288,7 @@ def main():
     for symbol, shares in inventory["擔保品"].items():
         if symbol == "History" or shares <= 0:
             continue
-        price = price_006208 if symbol == "006208" and price_006208 > 0 else get_tw_stock_price(symbol)
+        price = price_006208 if symbol == "006208" and price_006208 > 0 else validate_quote(symbol, get_tw_stock_price(symbol))
         value = price * shares
         pledged_value += value
         if symbol == "006208":
@@ -286,7 +296,7 @@ def main():
 
     for symbol, shares in inventory["美股"].items():
         if symbol == "History" or shares <= 0: continue
-        value = get_us_stock_price(symbol) * shares
+        value = validate_quote(symbol, get_us_stock_price(symbol)) * shares
         us_stock_value_usd += value
         position_values_twd[symbol] = value * usd_rate
         us_position_values[symbol] = value * usd_rate
@@ -314,25 +324,13 @@ def main():
     
     invested_assets = tw_stock_value + us_stock_value_twd + fund_value
     effective_leverage = ((invested_assets + leveraged_etf_value) / net_asset) if net_asset > 0 else 0
-    half_kelly_limit = 0.08 / (2 * (0.18 ** 2))
-    beta_capacity = (effective_leverage / half_kelly_limit * 100) if half_kelly_limit > 0 else 0
-    if beta_capacity > 115:
-        beta_status, beta_status_class = "🔴 加原型補現金", "risk-alert"
-    elif beta_capacity >= 95:
-        beta_status, beta_status_class = "🟡 Beta維持", "risk-watch"
-    else:
-        beta_status, beta_status_class = "🟢 可加槓桿", "risk-good"
+    half_kelly_limit = HALF_KELLY_LIMIT
+    beta_capacity = calculate_beta_capacity(effective_leverage, half_kelly_limit)
+    beta_status, beta_status_class = classify_beta_capacity(beta_capacity)
     
     debt_ratio = ((total_debt / total_asset) * 100) if total_asset > 0 else 0
-    maintenance_ratio = (pledged_value / total_debt) * 100 if total_debt > 0 else 0
-    if total_debt <= 0:
-        ratio_status, maintenance_status_class = "✅ 無借款", "risk-good"
-    elif maintenance_ratio >= 190:
-        ratio_status, maintenance_status_class = "🟢 可加槓桿", "risk-good"
-    elif maintenance_ratio >= 150:
-        ratio_status, maintenance_status_class = "🟡 注意槓桿", "risk-watch"
-    else:
-        ratio_status, maintenance_status_class = "🔴 補擔保品", "risk-alert"
+    maintenance_ratio = calculate_maintenance_ratio(pledged_value, total_debt)
+    ratio_status, maintenance_status_class = maintenance_status(total_debt, maintenance_ratio)
 
     tw_free_value = max(0, tw_stock_value - total_debt)
     tsmc_pct = (tsmc_exposure_twd / total_asset) * 100 if total_asset > 0 else 0
@@ -352,14 +350,9 @@ def main():
     spot_tw_value = max(0, tw_stock_value - total_debt)
     pledged_loan_value = total_debt
 
-    def stressed_maintenance_ratio(decline):
-        stressed_collateral = max(0, pledged_value - (pledged_006208_value * decline))
-        return (stressed_collateral / total_debt * 100) if total_debt > 0 else 0
-
-    stress_scenarios = [
-        {"label": "006208 下跌 10%", "netImpact": asset_006208_value * -0.10, "netAsset": net_asset - asset_006208_value * 0.10, "maintenance": stressed_maintenance_ratio(0.10)},
-        {"label": "006208 下跌 20%", "netImpact": asset_006208_value * -0.20, "netAsset": net_asset - asset_006208_value * 0.20, "maintenance": stressed_maintenance_ratio(0.20)},
-    ]
+    stress_scenarios = build_stress_scenarios(
+        asset_006208_value, net_asset, pledged_value, pledged_006208_value, total_debt
+    )
 
     yesterday_net = next((float(str(row.get('Net_Asset', 0)).replace(',', '')) for row in reversed(history_records) if float(str(row.get('Net_Asset', 0)).replace(',', '')) > 0 and str(row.get('Date', ''))[-5:] != today_str), 0)
     daily_diff = net_asset - yesterday_net if yesterday_net else 0
