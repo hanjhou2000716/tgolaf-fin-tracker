@@ -32,6 +32,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests yfinance gspread google-auth
 
+      - name: Run formula and data validation tests
+        run: python -m unittest discover -s tests -v
+
       - name: Run Tracker Script (Generate index.html)
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
