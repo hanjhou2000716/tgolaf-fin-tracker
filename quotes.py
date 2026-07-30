@@ -7,6 +7,16 @@ class QuoteUnavailableError(RuntimeError):
     pass
 
 
+OTC_SYMBOLS = {"00886"}
+
+
+def yahoo_market_symbols(symbol):
+    """Prefer the known market, then try the alternate Yahoo Taiwan suffix."""
+    preferred = "TWO" if symbol in OTC_SYMBOLS else "TW"
+    alternate = "TW" if preferred == "TWO" else "TWO"
+    return (f"{symbol}.{preferred}", f"{symbol}.{alternate}")
+
+
 def _positive_price(value):
     try:
         price = float(value)
@@ -53,34 +63,37 @@ def get_tw_stock_price(symbol, finmind_token, http_get=None, ticker_factory=None
     else:
         failures.append("FinMind: token missing")
 
-    try:
-        response = http_get(
-            f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}.TW?interval=1d&range=5d",
-            headers={"User-Agent": "Mozilla/5.0"},
-            timeout=10,
-        )
-        response.raise_for_status()
-        result = response.json()["chart"]["result"][0]
-        prices = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
-        price = next((candidate for candidate in reversed([_positive_price(value) for value in prices]) if candidate), None)
-        if price is not None:
-            print(f"TW quote {symbol}: Yahoo chart")
-            return price
-        failures.append("Yahoo chart: empty/invalid close")
-    except Exception as error:
-        failures.append(f"Yahoo chart: {type(error).__name__}")
+    market_symbols = yahoo_market_symbols(symbol)
+    for market_symbol in market_symbols:
+        try:
+            response = http_get(
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{market_symbol}?interval=1d&range=5d",
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            result = response.json()["chart"]["result"][0]
+            prices = result.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+            price = next((candidate for candidate in reversed([_positive_price(value) for value in prices]) if candidate), None)
+            if price is not None:
+                print(f"TW quote {symbol}: Yahoo chart ({market_symbol})")
+                return price
+            failures.append(f"Yahoo chart {market_symbol}: empty/invalid close")
+        except Exception as error:
+            failures.append(f"Yahoo chart {market_symbol}: {type(error).__name__}")
 
-    try:
-        if ticker_factory is None:
-            import yfinance as yf
-            ticker_factory = yf.Ticker
-        prices = ticker_factory(f"{symbol}.TW").history(period="5d")["Close"].dropna()
-        price = _positive_price(prices.iloc[-1] if not prices.empty else None)
-        if price is not None:
-            print(f"TW quote {symbol}: yfinance")
-            return price
-        failures.append("yfinance: empty/invalid close")
-    except Exception as error:
-        failures.append(f"yfinance: {type(error).__name__}")
+    if ticker_factory is None:
+        import yfinance as yf
+        ticker_factory = yf.Ticker
+    for market_symbol in market_symbols:
+        try:
+            prices = ticker_factory(market_symbol).history(period="5d")["Close"].dropna()
+            price = _positive_price(prices.iloc[-1] if not prices.empty else None)
+            if price is not None:
+                print(f"TW quote {symbol}: yfinance ({market_symbol})")
+                return price
+            failures.append(f"yfinance {market_symbol}: empty/invalid close")
+        except Exception as error:
+            failures.append(f"yfinance {market_symbol}: {type(error).__name__}")
 
     raise QuoteUnavailableError(f"Taiwan quote unavailable for {symbol}; " + "; ".join(failures))
