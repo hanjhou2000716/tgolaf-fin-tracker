@@ -1,6 +1,6 @@
 import unittest
 
-from quotes import QuoteUnavailableError, get_tw_stock_price
+from quotes import QuoteUnavailableError, get_tw_stock_price, yahoo_market_symbols
 
 
 class FakeResponse:
@@ -32,13 +32,24 @@ class QuoteFallbackTests(unittest.TestCase):
             FakeResponse({"data": []}), FakeResponse({"data": []}),
             FakeResponse({"chart": {"result": [{"indicators": {"quote": [{"close": [None, 19.8]}]}}]}}),
         ]
-        price = get_tw_stock_price(
-            "00886", "token", http_get=lambda *args, **kwargs: responses.pop(0), sleep=lambda _: None
-        )
+        urls = []
+        def http_get(url, **kwargs):
+            urls.append(url)
+            return responses.pop(0)
+        price = get_tw_stock_price("00886", "token", http_get=http_get, sleep=lambda _: None)
         self.assertEqual(price, 19.8)
+        self.assertIn("00886.TWO", urls[-1])
+
+    def test_uses_otc_suffix_before_listing_suffix(self):
+        self.assertEqual(yahoo_market_symbols("00886"), ("00886.TWO", "00886.TW"))
+        self.assertEqual(yahoo_market_symbols("006208"), ("006208.TW", "006208.TWO"))
 
     def test_reports_all_sources_unavailable(self):
-        responses = [FakeResponse({"data": []}), FakeResponse({"data": []}), FakeResponse({"chart": {"result": [{"indicators": {"quote": [{"close": []}]}}]}})]
+        responses = [
+            FakeResponse({"data": []}), FakeResponse({"data": []}),
+            FakeResponse({"chart": {"result": [{"indicators": {"quote": [{"close": []}]}}]}}),
+            FakeResponse({"chart": {"result": [{"indicators": {"quote": [{"close": []}]}}]}}),
+        ]
 
         class EmptyTicker:
             def history(self, period):
