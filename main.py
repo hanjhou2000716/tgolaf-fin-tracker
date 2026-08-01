@@ -346,6 +346,31 @@ def main():
     spot_tw_value = max(0, tw_stock_value - total_debt)
     pledged_loan_value = total_debt
 
+    total_market_value = tw_stock_value + us_stock_value_twd + fund_value
+    market_mix_values = {
+        "台股市值型 (006208)": tw_position_values.get("006208", 0),
+        "美股市值型 (QQQM、QQQ、SPYG、VOO、VTI)": sum(
+            us_position_values.get(symbol, 0) for symbol in ("QQQM", "QQQ", "SPYG", "VOO", "VTI")
+        ),
+        "台積電 (2330、TSM ADR)": tw_position_values.get("2330", 0) + us_position_values.get("TSM", 0),
+        "台股槓桿型 (00685L)": tw_position_values.get("00685L", 0),
+    }
+    market_mix_values["其它"] = max(0, total_market_value - sum(market_mix_values.values()))
+    market_mix = [{"label": label, "value": round(value, 2)} for label, value in market_mix_values.items()]
+    market_mix_json = json.dumps(market_mix, ensure_ascii=False)
+
+    try:
+        taiex_val = float(yf.Ticker("^TWII").history(period="1d")["Close"].iloc[-1])
+    except Exception:
+        taiex_val = None
+    try:
+        nasdaq_val = float(yf.Ticker("^IXIC").history(period="1d")["Close"].iloc[-1])
+    except Exception:
+        nasdaq_val = None
+    taiex_display = f"{taiex_val:,.2f}" if taiex_val is not None else "—"
+    nasdaq_display = f"{nasdaq_val:,.2f}" if nasdaq_val is not None else "—"
+    benchmark_updated = tw_now.strftime("%Y/%m/%d %H:%M")
+
     stress_scenarios = build_stress_scenarios(
         asset_006208_value, net_asset, pledged_value, pledged_006208_value, total_debt
     )
@@ -500,6 +525,19 @@ def main():
             .btn {{ display:block; text-align:center; background:#45443f; color:white; text-decoration:none; padding:14px; font-size:13px; font-weight:500; letter-spacing:.05em; border:1px solid #45443f; transition:background .2s; }}
             .btn:hover {{ background:#30302c; }} .btn-alt {{ background:transparent; color:var(--ink); border-color:var(--line); }} .btn-alt:hover {{ background:#ece9e1; }}
             .chart-container {{ position:relative; width:100%; height:280px; margin-bottom:20px; }}
+            .market-mix-card {{ background:#f4f2ed; border:1px solid #e5e2db; }}
+            .market-mix-layout {{ display:grid; grid-template-columns:minmax(230px, 1fr) minmax(190px, .9fr); align-items:center; gap:18px; }}
+            .market-donut-wrap {{ position:relative; width:min(100%, 320px); aspect-ratio:1; margin:auto; }}
+            .market-donut-wrap canvas {{ position:relative; z-index:1; }}
+            .market-donut-center {{ position:absolute; inset:27%; z-index:2; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; pointer-events:none; color:var(--muted); }}
+            .market-donut-center span {{ font-size:11px; letter-spacing:.08em; }}
+            .market-donut-center strong {{ color:var(--ink); font-family:'Noto Serif TC', serif; font-size:clamp(20px, 4vw, 27px); line-height:1.15; margin:4px 0; white-space:nowrap; }}
+            .market-donut-center small {{ font-size:10px; line-height:1.45; white-space:nowrap; }}
+            .market-mix-legend {{ display:grid; gap:9px; margin:0; padding:0; list-style:none; }}
+            .market-mix-legend li {{ display:flex; align-items:flex-start; gap:8px; color:var(--ink); font-size:11px; line-height:1.35; }}
+            .market-mix-legend i {{ flex:0 0 10px; width:10px; height:10px; margin-top:2px; border-radius:50%; }}
+            .market-mix-legend b {{ display:block; font-size:12px; }}
+            .market-mix-legend span {{ color:var(--muted); }}
             .chart-title {{ font-family:'Noto Serif TC', serif; font-weight:700; font-size:16px; margin-bottom:5px; color:var(--ink); }}
             .chart-caption {{ color:var(--muted); font-size:12px; margin-bottom:14px; }}
             .chart-controls {{ display:flex; align-items:center; flex-wrap:wrap; gap:7px; margin:0 0 14px; }}
@@ -521,7 +559,7 @@ def main():
             .risk-column,.exposure-row {{ background:#f8faf7; border:1px solid #d8dfd8; border-radius:12px; padding:15px 13px; min-width:0; }} .risk-column strong,.exposure-row strong {{ display:block; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; margin-top:7px; letter-spacing:-.02em; }} .risk-column small,.exposure-row small {{ display:block; margin-top:6px; color:var(--muted); font-size:12px; line-height:1.45; }}
             .risk-detail {{ border-top:1px solid #d5ddd5; margin-top:12px; padding-top:10px; }} .risk-detail-label {{ display:block; color:var(--muted); font-size:11px; }} .risk-detail-value {{ display:block; margin-top:4px; color:var(--ink); font-size:13px; font-weight:700; line-height:1.45; }} .risk-detail .status,.risk-detail .capacity {{ display:block; margin-top:4px; font-size:12px; font-weight:700; line-height:1.35; white-space:normal; }}
             .risk-section .sec-title {{ margin-bottom:11px !important; }}
-            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ gap:7px; }} .change,.sync {{ padding:9px 8px; font-size:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .risk-section {{ padding:13px; }} .risk-column,.exposure-row {{ padding:14px 12px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} }}
+            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ gap:7px; }} .change,.sync {{ padding:9px 8px; font-size:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .risk-section {{ padding:13px; }} .risk-column,.exposure-row {{ padding:14px 12px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} .market-mix-layout {{ grid-template-columns:1fr; gap:14px; }} .market-donut-wrap {{ width:min(100%, 280px); }} .market-mix-legend {{ grid-template-columns:1fr 1fr; gap:8px; }} }}
         </style>
     </head>
     <body>
@@ -577,6 +615,30 @@ def main():
             <div class="chart-caption">現貨台股以台股市值扣除質押借款計算；質押台股代表借款金額。</div>
             <div class="chart-container" style="height: 250px; margin-bottom:0;">
                 <canvas id="pieChart"></canvas>
+            </div>
+        </div>
+
+        <div class="card market-mix-card">
+            <div class="chart-title">總市值組成</div>
+            <div class="chart-caption">依持倉標的分類；總市值不含現金與質押負債。</div>
+            <div class="market-mix-layout">
+                <div class="market-donut-wrap">
+                    <canvas id="marketMixChart" aria-label="總市值組成圓環圖"></canvas>
+                    <div class="market-donut-center">
+                        <span>總市值 (台幣)</span>
+                        <strong>NT${total_market_value:,.0f}</strong>
+                        <small>台股加權 {taiex_display}</small>
+                        <small>Nasdaq {nasdaq_display}</small>
+                        <small>更新 {benchmark_updated}</small>
+                    </div>
+                </div>
+                <ul class="market-mix-legend" aria-label="總市值分類">
+                    <li><i style="background:#24425e"></i><div><b>台股市值型</b><span>006208</span></div></li>
+                    <li><i style="background:#3d6f9f"></i><div><b>美股市值型</b><span>QQQM、QQQ、SPYG、VOO、VTI</span></div></li>
+                    <li><i style="background:#c4674f"></i><div><b>台積電</b><span>2330、TSM ADR</span></div></li>
+                    <li><i style="background:#687c70"></i><div><b>台股槓桿型</b><span>00685L</span></div></li>
+                    <li><i style="background:#c98a4b"></i><div><b>其它</b><span>其餘持倉與基金</span></div></li>
+                </ul>
             </div>
         </div>
         </section>
@@ -785,6 +847,34 @@ def main():
                             }}
                         }}
                     }});
+                    const marketMix = {market_mix_json};
+                    const marketMixCtx = document.getElementById('marketMixChart').getContext('2d');
+                    new Chart(marketMixCtx, {{
+                        type: 'doughnut',
+                        data: {{
+                            labels: marketMix.map(item => item.label),
+                            datasets: [{{
+                                data: marketMix.map(item => item.value),
+                                backgroundColor: ['#24425e', '#3d6f9f', '#c4674f', '#687c70', '#c98a4b'],
+                                borderColor: '#f4f2ed', borderWidth: 3, hoverOffset: 5,
+                            }}]
+                        }},
+                        options: {{
+                            responsive: true, maintainAspectRatio: false,
+                            cutout: '65%',
+                            plugins: {{
+                                legend: {{ display: false }},
+                                datalabels: {{
+                                    color: '#fffdf7',
+                                    font: {{ weight: '700', size: 11 }},
+                                    formatter: (value, ctx) => {{
+                                        const sum = ctx.chart.data.datasets[0].data.reduce((total, item) => total + Number(item), 0);
+                                        return sum > 0 && value / sum >= 0.04 ? (value * 100 / sum).toFixed(0) + '%' : '';
+                                    }}
+                                }}
+                            }}
+                        }}
+                    }});
                 }} catch (error) {{
                     console.error("圓餅圖繪製失敗:", error);
                 }}
@@ -802,11 +892,10 @@ def main():
         os.makedirs('public')
     
     try:
-        # 自動抓取真實加權指數與 200MA
-        taiex_val = yf.Ticker("^TWII").history(period="1d")['Close'].iloc[-1]
-        ma200_val = yf.Ticker("^TWII").history(period="200d")['Close'].mean()
-    except:
-        taiex_val, ma200_val = 22000, 20000
+        # 200MA is a separate context metric; preserve null when unavailable.
+        ma200_val = float(yf.Ticker("^TWII").history(period="200d")["Close"].mean())
+    except Exception:
+        ma200_val = None
 
     try:
         # 自動抓取真實 VIX 恐慌指數
@@ -841,8 +930,9 @@ def main():
     }
 
     data_for_web = {
-        "taiex": round(taiex_val, 2),
-        "ma200": round(ma200_val, 2),
+        "taiex": round(taiex_val, 2) if taiex_val is not None else None,
+        "nasdaq": round(nasdaq_val, 2) if nasdaq_val is not None else None,
+        "ma200": round(ma200_val, 2) if ma200_val is not None else None,
         "vix": round(vix_val, 2),
         "peak_006208": round(peak_006208, 2),
         "asset_006208": round(price_006208, 2) if price_006208 else 249.1,
@@ -851,6 +941,8 @@ def main():
             "totalAsset": round(total_asset, 2),
             "netAsset": round(net_asset, 2),
             "totalDebt": round(total_debt, 2),
+            "totalMarketValue": round(total_market_value, 2),
+            "marketMix": market_mix,
             "allocation": allocation_items,
             "risk": risk_summary,
             "stressTests": stress_scenarios,
