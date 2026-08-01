@@ -60,8 +60,8 @@ def upsert_history_snapshot(history_sheet, snapshot_date, values):
     return "created"
 
 
-def settlement_notification_sent(history_sheet, snapshot_date):
-    """Read the durable per-day notification marker from the History sheet."""
+def settlement_notification_sent(history_sheet, snapshot_date, window_key):
+    """Read the durable per-day/per-window notification marker from History."""
     if history_sheet is None:
         return False
     header = history_sheet.row_values(1)
@@ -71,11 +71,20 @@ def settlement_notification_sent(history_sheet, snapshot_date):
         return False
     for row in reversed(history_sheet.get_all_values()[1:]):
         if row and str(row[0]).strip()[:10] == snapshot_date:
-            return len(row) > marker_index and bool(str(row[marker_index]).strip())
+            raw_marker = str(row[marker_index]).strip() if len(row) > marker_index else ""
+            if not raw_marker:
+                return False
+            try:
+                markers = json.loads(raw_marker)
+            except json.JSONDecodeError:
+                # Legacy single-timestamp markers do not identify a window;
+                # allow both new settlement windows to send once after rollout.
+                return False
+            return isinstance(markers, dict) and bool(markers.get(window_key))
     return False
 
 
-def mark_settlement_notification_sent(history_sheet, snapshot_date, sent_at):
+def mark_settlement_notification_sent(history_sheet, snapshot_date, window_key, sent_at):
     if history_sheet is None:
         return
     header = history_sheet.row_values(1)
@@ -83,10 +92,23 @@ def mark_settlement_notification_sent(history_sheet, snapshot_date, sent_at):
         marker_column = header.index("Settlement_Notification_Sent_At") + 1
     except ValueError:
         return
-    for row_number in range(len(history_sheet.get_all_values()), 1, -1):
+    all_rows = history_sheet.get_all_values()
+    for row_number in range(len(all_rows), 1, -1):
         row = history_sheet.row_values(row_number)
         if row and str(row[0]).strip()[:10] == snapshot_date:
-            history_sheet.update_cell(row_number, marker_column, sent_at)
+            raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
+            try:
+                markers = json.loads(raw_marker) if raw_marker else {}
+            except json.JSONDecodeError:
+                markers = {}
+            if not isinstance(markers, dict):
+                markers = {}
+            markers[window_key] = sent_at
+            history_sheet.update_cell(
+                row_number,
+                marker_column,
+                json.dumps(markers, ensure_ascii=False, separators=(",", ":")),
+            )
             return
 
 
@@ -995,12 +1017,22 @@ def main():
         ]
     }
     
-    # Settlement is sent after the Taiwan close. The History marker makes this
-    # idempotent even when Cron retries or a user manually reruns the workflow.
+    # Send once in each settlement window. The History marker is keyed by
+    # window so the US morning and Taiwan afternoon notifications can both be
+    # delivered while remaining idempotent across Cron retries.
     snapshot_date = tw_now.strftime("%Y-%m-%d")
-    notification_already_sent = settlement_notification_sent(history_sheet, snapshot_date)
-    in_settlement_window = 14 <= tw_now.hour < 17
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID and in_settlement_window and not notification_already_sent:
+    if 5 <= tw_now.hour < 7:
+        settlement_window = "us"
+    elif 14 <= tw_now.hour < 17:
+        settlement_window = "tw"
+    else:
+        settlement_window = None
+    notification_already_sent = (
+        settlement_notification_sent(history_sheet, snapshot_date, settlement_window)
+        if settlement_window
+        else False
+    )
+    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID and settlement_window and not notification_already_sent:
         try:
             response = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
                 "chat_id": TELEGRAM_CHAT_ID,
@@ -1009,13 +1041,13 @@ def main():
                 "reply_markup": keyboard,
             }, timeout=10)
             response.raise_for_status()
-            mark_settlement_notification_sent(history_sheet, snapshot_date, tw_now.isoformat())
+            mark_settlement_notification_sent(history_sheet, snapshot_date, settlement_window, tw_now.isoformat())
         except requests.RequestException as error:
             print(f"Telegram notification failed: {error}")
     else:
         print(
             "Telegram notification skipped; "
-            f"window={in_settlement_window}, alreadySent={notification_already_sent}, snapshotResult={snapshot_result}"
+            f"window={settlement_window}, alreadySent={notification_already_sent}, snapshotResult={snapshot_result}"
         )
 
 if __name__ == "__main__":
