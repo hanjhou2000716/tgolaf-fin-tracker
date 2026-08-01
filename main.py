@@ -633,11 +633,11 @@ def main():
                     </div>
                 </div>
                 <ul class="market-mix-legend" aria-label="總市值分類">
-                    <li><i style="background:#24425e"></i><div><b>台股市值型</b><span>006208</span></div></li>
-                    <li><i style="background:#3d6f9f"></i><div><b>美股市值型</b><span>QQQM、QQQ、SPYG、VOO、VTI</span></div></li>
-                    <li><i style="background:#c4674f"></i><div><b>台積電</b><span>2330、TSM ADR</span></div></li>
-                    <li><i style="background:#687c70"></i><div><b>台股槓桿型</b><span>00685L</span></div></li>
-                    <li><i style="background:#c98a4b"></i><div><b>其它</b><span>其餘持倉與基金</span></div></li>
+                    <li><i style="background:#24425e"></i><b>台股市值型</b></li>
+                    <li><i style="background:#3d6f9f"></i><b>美股市值型</b></li>
+                    <li><i style="background:#c4674f"></i><b>台積電</b></li>
+                    <li><i style="background:#687c70"></i><b>台股槓桿型</b></li>
+                    <li><i style="background:#c98a4b"></i><b>其它</b></li>
                 </ul>
             </div>
         </div>
