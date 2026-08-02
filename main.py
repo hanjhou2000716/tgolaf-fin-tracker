@@ -25,6 +25,7 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 FINMIND_TOKEN = os.getenv("FINMIND_TOKEN")
 GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
+FORCE_TELEGRAM = os.getenv("FORCE_TELEGRAM", "false").strip().lower() in {"1", "true", "yes", "on"}
 WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/"
 
 
@@ -845,28 +846,32 @@ def main():
                                 data: assetBlocks.map(item => item.value),
                                 backgroundColor: ['#24425e', '#687c70', '#3d6f9f', '#c8c1b5'],
                                 borderColor: '#f4f2ed', borderWidth: 3,
-                                radius: '72%', cutout: '36%', hoverOffset: 5,
+                                radius: '68%', cutout: '34%', hoverOffset: 5,
                             }}, {{
                                 label: '總市值組成（外圈）',
                                 labels: marketMix.map(item => item.label),
                                 data: marketMix.map(item => item.value),
                                 backgroundColor: ['#24425e', '#3d6f9f', '#c4674f', '#687c70', '#c98a4b'],
                                 borderColor: '#f4f2ed', borderWidth: 3,
-                                radius: '100%', cutout: '78%', hoverOffset: 5,
+                                radius: '100%', cutout: '72%', hoverOffset: 5,
                             }}]
                         }},
                         options: {{
                             responsive: true, maintainAspectRatio: false,
+                            interaction: {{ mode: 'nearest', intersect: true }},
                             plugins: {{
                                 legend: {{ display: false }},
                                 tooltip: {{
-                                    backgroundColor: 'rgba(36,66,94,.97)',
+                                    position: 'nearest',
+                                    backgroundColor: '#24425e',
                                     borderColor: '#c98a4b',
-                                    borderWidth: 1,
+                                    borderWidth: 2,
                                     titleColor: '#fffdf7',
                                     bodyColor: '#fffdf7',
                                     displayColors: true,
                                     padding: 10,
+                                    caretPadding: 8,
+                                    bodySpacing: 4,
                                     titleFont: {{ weight: '700', size: 12 }},
                                     bodyFont: {{ size: 11 }},
                                     callbacks: {{
@@ -882,8 +887,12 @@ def main():
                                     }}
                                 }},
                                 datalabels: {{
+                                    anchor: 'center',
+                                    align: 'center',
+                                    clamp: true,
+                                    clip: false,
                                     color: '#fffdf7',
-                                    font: {{ weight: '700', size: 11 }},
+                                    font: {{ weight: '700', size: (ctx) => ctx.datasetIndex === 1 ? 11 : 10 }},
                                     formatter: (value, ctx) => {{
                                         const sum = ctx.dataset.data.reduce((total, item) => total + Number(item), 0);
                                         return sum > 0 && value / sum >= 0.04 ? (value * 100 / sum).toFixed(0) + '%' : '';
@@ -1015,9 +1024,12 @@ def main():
     
     # Send once in each settlement window. The History marker is keyed by
     # window so the US morning and Taiwan afternoon notifications can both be
-    # delivered while remaining idempotent across Cron retries.
+    # delivered while remaining idempotent across Cron retries. Manual force
+    # mode intentionally bypasses both the time window and the dedupe marker.
     snapshot_date = tw_now.strftime("%Y-%m-%d")
-    if 5 <= tw_now.hour < 7:
+    if FORCE_TELEGRAM:
+        settlement_window = "manual"
+    elif 5 <= tw_now.hour < 7:
         settlement_window = "us"
     elif 14 <= tw_now.hour < 17:
         settlement_window = "tw"
@@ -1025,7 +1037,7 @@ def main():
         settlement_window = None
     notification_already_sent = (
         settlement_notification_sent(history_sheet, snapshot_date, settlement_window)
-        if settlement_window
+        if settlement_window and not FORCE_TELEGRAM
         else False
     )
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID and settlement_window and not notification_already_sent:

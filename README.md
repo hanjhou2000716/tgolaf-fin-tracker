@@ -235,6 +235,10 @@ Growth workflow 會接受 `repository_dispatch` 的 `trigger_update`。`main.py`
 
 推送內容為當日淨資產損益，並附上唯一的 Growth Dashboard Web App 按鈕。通知會寫入 History 的 `Settlement_Notification_Sent_At`；同一日期同一窗口重試不會重複發送，但早上 `us` 與下午 `tw` 各會發送一次。
 
+### 手動測試通知
+
+GitHub Actions 的 `workflow_dispatch` 提供 `force_telegram` 勾選項。勾選後會忽略時間窗口與去重標記，立即發送一次測試通知；未勾選時，手動執行仍遵守正常的 05:00–06:59／14:00–16:59 規則。
+
 ### 健康告警
 
 `health-watchdog.yml` 會在台灣時間約 06:00 與 17:00 檢查 Growth、Skynet 的 `status.json`。以下任一條件成立就透過 Telegram 告警：
@@ -251,7 +255,7 @@ Growth workflow 會接受 `repository_dispatch` 的 `trigger_update`。`main.py`
 ### Growth `cron.yml`
 
 - `repository_dispatch`：`trigger_update`，由外部 Cornjob 觸發。
-- `workflow_dispatch`：GitHub 手動執行。
+- `workflow_dispatch`：GitHub 手動執行；可勾選 `force_telegram` 測試 Telegram。
 - 目前沒有啟用內建 schedule。
 - 流程：安裝 Python → 執行 14 項測試 → 執行 `main.py` → 驗證 JSON → 發佈 `gh-pages`。
 - `concurrency` 使用 `growth-dashboard` 且不取消前一個執行，避免兩次結算同時寫入 Google Sheets。

@@ -4,6 +4,12 @@ on:
   repository_dispatch:
     types: [trigger_update]
   workflow_dispatch:
+    inputs:
+      force_telegram:
+        description: '強制發送一次 Telegram 結算通知（忽略時間窗口與去重）'
+        required: false
+        default: false
+        type: boolean
   # 如果您需要每天自動執行，可以把下面兩行的註解(#)拿掉
   # schedule:
   #   - cron: '30 14 * * *'
@@ -41,6 +47,7 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          FORCE_TELEGRAM: ${{ inputs.force_telegram || false }}
         run: python main.py
       - name: Verify generated dashboard data
         run: |
