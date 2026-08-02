@@ -567,6 +567,12 @@ def main():
             .market-donut-center span {{ font-size:10px; letter-spacing:.08em; }}
             .market-donut-center strong {{ color:var(--ink); font-family:'Noto Serif TC', serif; font-size:clamp(19px, 3.8vw, 26px); line-height:1.15; margin:3px 0; white-space:nowrap; }}
             .market-donut-center small {{ font-size:9px; line-height:1.4; white-space:nowrap; }}
+            .market-chart-tooltip {{ position:absolute; z-index:4; min-width:176px; max-width:228px; transform:translate(-50%,-50%); padding:8px 10px; border:2px solid var(--orange); border-radius:8px; background:#1b3248; color:#fffdf7; box-shadow:0 8px 18px rgba(27,50,72,.3); pointer-events:none; font-size:11px; line-height:1.4; text-align:left; }}
+            .market-chart-tooltip[hidden] {{ display:none; }}
+            .market-chart-tooltip strong,.market-chart-tooltip span,.market-chart-tooltip b {{ display:block; }}
+            .market-chart-tooltip strong {{ color:#f6cf9a; font-size:11px; }}
+            .market-chart-tooltip span {{ margin-top:2px; }}
+            .market-chart-tooltip b {{ margin-top:4px; color:#fffdf7; font-size:12px; }}
             .chart-title {{ font-family:'Noto Serif TC', serif; font-weight:700; font-size:16px; margin-bottom:5px; color:var(--ink); }}
             .chart-caption {{ color:var(--muted); font-size:12px; margin-bottom:14px; }}
             .chart-controls {{ display:flex; align-items:center; flex-wrap:wrap; gap:7px; margin:0 0 14px; }}
@@ -588,7 +594,7 @@ def main():
             .risk-column,.exposure-row {{ background:#f8faf7; border:1px solid #d8dfd8; border-radius:12px; padding:15px 13px; min-width:0; }} .risk-column strong,.exposure-row strong {{ display:block; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; margin-top:7px; letter-spacing:-.02em; }} .risk-column small,.exposure-row small {{ display:block; margin-top:6px; color:var(--muted); font-size:12px; line-height:1.45; }}
             .risk-detail {{ border-top:1px solid #d5ddd5; margin-top:12px; padding-top:10px; }} .risk-detail-label {{ display:block; color:var(--muted); font-size:11px; }} .risk-detail-value {{ display:block; margin-top:4px; color:var(--ink); font-size:13px; font-weight:700; line-height:1.45; }} .risk-detail .status,.risk-detail .capacity {{ display:block; margin-top:4px; font-size:12px; font-weight:700; line-height:1.35; white-space:normal; }}
             .risk-section .sec-title {{ margin-bottom:11px !important; }}
-            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ gap:7px; }} .change,.sync {{ padding:9px 8px; font-size:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .risk-section {{ padding:13px; }} .risk-column,.exposure-row {{ padding:14px 12px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} .market-donut-wrap {{ width:min(100%, 320px); }} }}
+            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ gap:7px; }} .change,.sync {{ padding:9px 8px; font-size:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .risk-section {{ padding:13px; }} .risk-column,.exposure-row {{ padding:14px 12px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} .market-donut-wrap {{ width:min(100%, 320px); }} .market-chart-tooltip {{ min-width:150px; max-width:190px; padding:7px 8px; font-size:10px; }} .market-chart-tooltip b {{ font-size:11px; }} }}
         </style>
     </head>
     <body>
@@ -640,11 +646,11 @@ def main():
         </div>
 
         <div class="card market-mix-card">
-            <div class="chart-title">總資產板塊與總市值組成</div>
+            <div class="chart-title">總資產板塊</div>
             <div class="chart-caption">內圈為完整總資產板塊；外圈為不含現金與質押負債的投資市值組成。</div>
             <div class="market-mix-layout">
                 <div class="market-donut-wrap">
-                    <canvas id="marketMixChart" aria-label="總資產板塊與總市值組成雙層圓環圖"></canvas>
+                    <canvas id="marketMixChart" aria-label="總資產板塊雙層圓環圖"></canvas>
                     <div class="market-donut-center">
                         <span>總資產 (台幣)</span>
                         <strong>NT${total_asset:,.0f}</strong>
@@ -653,6 +659,7 @@ def main():
                         <small>Nasdaq {nasdaq_display}</small>
                         <small>更新 {benchmark_updated}</small>
                     </div>
+                    <div class="market-chart-tooltip" hidden aria-live="polite"></div>
                 </div>
             </div>
         </div>
@@ -854,7 +861,7 @@ def main():
                                 data: marketMix.map(item => item.value),
                                 backgroundColor: ['#24425e', '#3d6f9f', '#c4674f', '#687c70', '#c98a4b'],
                                 borderColor: '#f4f2ed', borderWidth: 3,
-                                radius: '100%', cutout: '66%', hoverOffset: 7,
+                                radius: '100%', cutout: '60%', hoverOffset: 7,
                                 hoverBorderColor: '#fffdf7', hoverBorderWidth: 3,
                             }}]
                         }},
@@ -864,32 +871,40 @@ def main():
                             plugins: {{
                                 legend: {{ display: false }},
                                 tooltip: {{
-                                    position: 'nearest',
-                                    xAlign: 'center',
-                                    yAlign: 'bottom',
-                                    backgroundColor: '#1b3248',
-                                    borderColor: '#c98a4b',
-                                    borderWidth: 3,
-                                    cornerRadius: 8,
-                                    titleColor: '#fffdf7',
-                                    bodyColor: '#fffdf7',
-                                    displayColors: true,
-                                    padding: 10,
-                                    caretPadding: 8,
-                                    bodySpacing: 4,
-                                    animation: false,
-                                    titleFont: {{ weight: '700', size: 12 }},
-                                    bodyFont: {{ size: 11 }},
-                                    callbacks: {{
-                                        title: (items) => items.length
-                                            ? items[0].dataset.label + ' · ' + items[0].dataset.labels[items[0].dataIndex]
-                                            : '',
-                                        label: (context) => {{
-                                            const total = context.dataset.data.reduce((sum, item) => sum + Number(item), 0);
-                                            const value = Number(context.raw || 0);
-                                            const percent = total > 0 ? (value * 100 / total).toFixed(1) : '0.0';
-                                            return ' ' + value.toLocaleString('zh-TW') + ' TWD · ' + percent + '%';
+                                    enabled: false,
+                                    external: (context) => {{
+                                        const chart = context.chart;
+                                        const tooltip = context.tooltip;
+                                        const panel = chart.canvas.parentNode.querySelector('.market-chart-tooltip');
+                                        if (!panel) return;
+                                        if (tooltip.opacity === 0 || !tooltip.dataPoints || !tooltip.dataPoints.length) {{
+                                            panel.hidden = true;
+                                            return;
                                         }}
+                                        const point = tooltip.dataPoints[0];
+                                        const dataset = point.dataset;
+                                        const value = Number(point.raw || 0);
+                                        const total = dataset.data.reduce((sum, item) => sum + Number(item), 0);
+                                        const percent = total > 0 ? (value * 100 / total).toFixed(1) : '0.0';
+                                        const label = (dataset.labels && dataset.labels[point.dataIndex]) || '';
+                                        panel.innerHTML = '<strong>' + dataset.label + '</strong>'
+                                            + '<span>' + label + '</span>'
+                                            + '<b>' + value.toLocaleString('zh-TW') + ' TWD · ' + percent + '%</b>';
+                                        const centerX = chart.width / 2;
+                                        const centerY = chart.height / 2;
+                                        const dx = tooltip.caretX - centerX;
+                                        const dy = tooltip.caretY - centerY;
+                                        const distance = Math.sqrt(dx * dx + dy * dy) || 1;
+                                        const outward = 72;
+                                        const targetX = tooltip.caretX + (dx / distance) * outward;
+                                        const targetY = tooltip.caretY + (dy / distance) * outward;
+                                        const minX = panel.offsetWidth / 2 + 8;
+                                        const maxX = Math.max(minX, chart.width - panel.offsetWidth / 2 - 8);
+                                        const x = Math.min(Math.max(targetX, minX), maxX);
+                                        const y = Math.min(Math.max(targetY, 48), chart.height - 48);
+                                        panel.style.left = x + 'px';
+                                        panel.style.top = y + 'px';
+                                        panel.hidden = false;
                                     }}
                                 }},
                                 datalabels: {{
