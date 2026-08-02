@@ -563,10 +563,10 @@ def main():
             .market-mix-layout {{ display:block; }}
             .market-donut-wrap {{ position:relative; width:min(100%, 420px); aspect-ratio:1; margin:auto; }}
             .market-donut-wrap canvas {{ position:relative; z-index:1; }}
-            .market-donut-center {{ position:absolute; inset:31%; z-index:2; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; pointer-events:none; color:var(--muted); background:rgba(251,250,247,.96); border:1px solid #e5e2db; border-radius:50%; padding:4px; box-shadow:0 2px 8px rgba(36,66,94,.06); }}
-            .market-donut-center span {{ font-size:10px; letter-spacing:.08em; }}
-            .market-donut-center strong {{ color:var(--ink); font-family:'Noto Serif TC', serif; font-size:clamp(15px, 3.8vw, 20px); line-height:1.15; margin:3px 0; letter-spacing:-.04em; white-space:nowrap; }}
-            .market-donut-center small {{ font-size:8px; line-height:1.35; white-space:nowrap; }}
+            .market-donut-center {{ position:absolute; inset:22%; z-index:2; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; pointer-events:none; color:var(--muted); background:rgba(251,250,247,.96); border:1px solid #e5e2db; border-radius:50%; padding:6px; box-shadow:0 2px 8px rgba(36,66,94,.06); }}
+            .market-donut-center span {{ font-size:11px; letter-spacing:.08em; }}
+            .market-donut-center strong {{ color:var(--ink); font-family:'Noto Serif TC', serif; font-size:clamp(20px, 4.2vw, 27px); line-height:1.15; margin:4px 0; letter-spacing:-.04em; white-space:nowrap; }}
+            .market-donut-center small {{ font-size:9px; line-height:1.4; white-space:nowrap; }}
             .market-chart-tooltip {{ position:absolute; z-index:4; min-width:176px; max-width:228px; transform:translate(-50%,-50%); padding:8px 10px; border:2px solid var(--orange); border-radius:8px; background:#1b3248; color:#fffdf7; box-shadow:0 8px 18px rgba(27,50,72,.3); pointer-events:none; font-size:11px; line-height:1.4; text-align:left; }}
             .market-chart-tooltip[hidden] {{ display:none; }}
             .market-chart-tooltip strong,.market-chart-tooltip span,.market-chart-tooltip b {{ display:block; }}
@@ -858,7 +858,7 @@ def main():
                                     const value = Number(dataset.data[index] || 0);
                                     if (!arc || value <= 0) return;
                                     const angle = (arc.startAngle + arc.endAngle) / 2;
-                                    const labelRatio = datasetIndex === 0 ? 0.78 : 0.5;
+                                    const labelRatio = datasetIndex === 0 ? 0.9 : 0.72;
                                     const radius = arc.innerRadius + (arc.outerRadius - arc.innerRadius) * labelRatio;
                                     const x = arc.x + Math.cos(angle) * radius;
                                     const y = arc.y + Math.sin(angle) * radius;
