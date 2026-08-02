@@ -367,6 +367,17 @@ def main():
     # 質押台股此處代表借款金額，而非擔保品的市值。
     spot_tw_value = max(0, tw_stock_value - total_debt)
     pledged_loan_value = total_debt
+    other_asset_value = max(
+        0,
+        total_asset - spot_tw_value - pledged_loan_value - us_stock_value_twd,
+    )
+    asset_blocks = [
+        {"label": "現貨台股", "value": round(spot_tw_value, 2)},
+        {"label": "質押台股", "value": round(pledged_loan_value, 2)},
+        {"label": "現貨美股", "value": round(us_stock_value_twd, 2)},
+        {"label": "現金／基金／其它", "value": round(other_asset_value, 2)},
+    ]
+    asset_blocks_json = json.dumps(asset_blocks, ensure_ascii=False)
 
     total_market_value = tw_stock_value + us_stock_value_twd + fund_value
     market_mix_values = {
@@ -551,10 +562,10 @@ def main():
             .market-mix-layout {{ display:block; }}
             .market-donut-wrap {{ position:relative; width:min(100%, 420px); aspect-ratio:1; margin:auto; }}
             .market-donut-wrap canvas {{ position:relative; z-index:1; }}
-            .market-donut-center {{ position:absolute; inset:27%; z-index:2; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; pointer-events:none; color:var(--muted); }}
-            .market-donut-center span {{ font-size:11px; letter-spacing:.08em; }}
-            .market-donut-center strong {{ color:var(--ink); font-family:'Noto Serif TC', serif; font-size:clamp(20px, 4vw, 27px); line-height:1.15; margin:4px 0; white-space:nowrap; }}
-            .market-donut-center small {{ font-size:10px; line-height:1.45; white-space:nowrap; }}
+            .market-donut-center {{ position:absolute; inset:23%; z-index:2; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; pointer-events:none; color:var(--muted); }}
+            .market-donut-center span {{ font-size:10px; letter-spacing:.08em; }}
+            .market-donut-center strong {{ color:var(--ink); font-family:'Noto Serif TC', serif; font-size:clamp(19px, 3.8vw, 26px); line-height:1.15; margin:3px 0; white-space:nowrap; }}
+            .market-donut-center small {{ font-size:9px; line-height:1.4; white-space:nowrap; }}
             .chart-title {{ font-family:'Noto Serif TC', serif; font-weight:700; font-size:16px; margin-bottom:5px; color:var(--ink); }}
             .chart-caption {{ color:var(--muted); font-size:12px; margin-bottom:14px; }}
             .chart-controls {{ display:flex; align-items:center; flex-wrap:wrap; gap:7px; margin:0 0 14px; }}
@@ -627,23 +638,16 @@ def main():
             </div>
         </div>
 
-        <div class="card">
-            <div class="chart-title">總資產板塊</div>
-            <div class="chart-caption">現貨台股以台股市值扣除質押借款計算；質押台股代表借款金額。</div>
-            <div class="chart-container" style="height: 250px; margin-bottom:0;">
-                <canvas id="pieChart"></canvas>
-            </div>
-        </div>
-
         <div class="card market-mix-card">
-            <div class="chart-title">總市值組成</div>
-            <div class="chart-caption">依持倉標的分類；總市值不含現金與質押負債。</div>
+            <div class="chart-title">總資產板塊與總市值組成</div>
+            <div class="chart-caption">內圈為完整總資產板塊；外圈為不含現金與質押負債的投資市值組成。</div>
             <div class="market-mix-layout">
                 <div class="market-donut-wrap">
-                    <canvas id="marketMixChart" aria-label="總市值組成圓環圖"></canvas>
+                    <canvas id="marketMixChart" aria-label="總資產板塊與總市值組成雙層圓環圖"></canvas>
                     <div class="market-donut-center">
-                        <span>總市值 (台幣)</span>
-                        <strong>NT${total_market_value:,.0f}</strong>
+                        <span>總資產 (台幣)</span>
+                        <strong>NT${total_asset:,.0f}</strong>
+                        <small>投資市值 NT${total_market_value:,.0f}</small>
                         <small>台股加權 {taiex_display}</small>
                         <small>Nasdaq {nasdaq_display}</small>
                         <small>更新 {benchmark_updated}</small>
@@ -825,53 +829,34 @@ def main():
                 }}
 
                 try {{
-                    // 繪製圓餅圖
-                    const pieCtx = document.getElementById('pieChart').getContext('2d');
-                    new Chart(pieCtx, {{
-                        type: 'pie',
-                        data: {{
-                            labels: ['現貨台股', '質押台股', '現貨美股'],
-                            datasets: [{{
-                                data: [{spot_tw_value:.2f}, {pledged_loan_value:.2f}, {us_stock_value_twd:.2f}],
-                                backgroundColor: ['#24425e', '#687c70', '#c98a4b'],
-                                borderWidth: 1, borderColor: '#fbfaf7'
-                            }}]
-                        }},
-                        options: {{
-                            responsive: true, maintainAspectRatio: false,
-                            plugins: {{
-                                legend: {{ display: false }}, // 隱藏預設圖例，使用 datalabels 顯示
-                                datalabels: {{
-                                    color: '#ffffff',
-                                    font: {{ weight: 'bold', size: 12 }},
-                                    formatter: (value, ctx) => {{
-                                        // 安全地計算總和，避免 NaN 崩潰
-                                        let dataArr = ctx.chart.data.datasets[0].data;
-                                        let sum = 0;
-                                        dataArr.forEach(d => sum += Number(d));
-                                        let percentage = sum > 0 ? (value * 100 / sum).toFixed(0) + "%" : "0%";
-                                        return ctx.chart.data.labels[ctx.dataIndex] + '\\n' + percentage;
-                                    }},
-                                    textAlign: 'center'
-                                }}
-                            }}
-                        }}
-                    }});
+                    const assetBlocks = {asset_blocks_json};
                     const marketMix = {market_mix_json};
                     const marketMixCtx = document.getElementById('marketMixChart').getContext('2d');
                     new Chart(marketMixCtx, {{
                         type: 'doughnut',
                         data: {{
-                            labels: marketMix.map(item => item.label),
+                            labels: [
+                                ...assetBlocks.map(item => item.label),
+                                ...marketMix.map(item => item.label),
+                            ],
                             datasets: [{{
+                                label: '總資產板塊（內圈）',
+                                labels: assetBlocks.map(item => item.label),
+                                data: assetBlocks.map(item => item.value),
+                                backgroundColor: ['#24425e', '#687c70', '#3d6f9f', '#c8c1b5'],
+                                borderColor: '#f4f2ed', borderWidth: 3,
+                                radius: '72%', cutout: '36%', hoverOffset: 5,
+                            }}, {{
+                                label: '總市值組成（外圈）',
+                                labels: marketMix.map(item => item.label),
                                 data: marketMix.map(item => item.value),
                                 backgroundColor: ['#24425e', '#3d6f9f', '#c4674f', '#687c70', '#c98a4b'],
-                                borderColor: '#f4f2ed', borderWidth: 3, hoverOffset: 5,
+                                borderColor: '#f4f2ed', borderWidth: 3,
+                                radius: '100%', cutout: '78%', hoverOffset: 5,
                             }}]
                         }},
                         options: {{
                             responsive: true, maintainAspectRatio: false,
-                            cutout: '65%',
                             plugins: {{
                                 legend: {{ display: false }},
                                 tooltip: {{
@@ -885,8 +870,11 @@ def main():
                                     titleFont: {{ weight: '700', size: 12 }},
                                     bodyFont: {{ size: 11 }},
                                     callbacks: {{
+                                        title: (items) => items.length
+                                            ? `${{items[0].dataset.label}} · ${{items[0].dataset.labels[items[0].dataIndex]}}`
+                                            : '',
                                         label: (context) => {{
-                                            const total = context.chart.data.datasets[0].data.reduce((sum, item) => sum + Number(item), 0);
+                                            const total = context.dataset.data.reduce((sum, item) => sum + Number(item), 0);
                                             const value = Number(context.raw || 0);
                                             const percent = total > 0 ? (value * 100 / total).toFixed(1) : '0.0';
                                             return ` ${value.toLocaleString('zh-TW')} TWD · ${percent}%`;
@@ -897,7 +885,7 @@ def main():
                                     color: '#fffdf7',
                                     font: {{ weight: '700', size: 11 }},
                                     formatter: (value, ctx) => {{
-                                        const sum = ctx.chart.data.datasets[0].data.reduce((total, item) => total + Number(item), 0);
+                                        const sum = ctx.dataset.data.reduce((total, item) => total + Number(item), 0);
                                         return sum > 0 && value / sum >= 0.04 ? (value * 100 / sum).toFixed(0) + '%' : '';
                                     }}
                                 }}
@@ -905,7 +893,7 @@ def main():
                         }}
                     }});
                 }} catch (error) {{
-                    console.error("圓餅圖繪製失敗:", error);
+                    console.error("雙層圓環圖繪製失敗:", error);
                 }}
             }});
         </script>
@@ -971,6 +959,7 @@ def main():
             "netAsset": round(net_asset, 2),
             "totalDebt": round(total_debt, 2),
             "totalMarketValue": round(total_market_value, 2),
+            "assetBlocks": asset_blocks,
             "marketMix": market_mix,
             "allocation": allocation_items,
             "risk": risk_summary,
