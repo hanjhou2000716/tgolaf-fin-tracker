@@ -17,6 +17,7 @@ from risk import (
     stress_scenarios as build_stress_scenarios,
 )
 from validation import validate_history_sheet, validate_inventory, validate_quote
+from asset_tree import build_asset_tree
 
 # ==========================================
 # 1. 環境變數與金鑰設定
@@ -393,6 +394,20 @@ def main():
     market_mix = [{"label": label, "value": round(value, 2)} for label, value in market_mix_values.items()]
     market_mix_json = json.dumps(market_mix, ensure_ascii=False)
 
+    asset_tree = build_asset_tree(
+        tw_position_values,
+        us_position_values,
+        total_cash_twd,
+        inventory["基金"],
+    )
+    asset_tree_json = json.dumps(asset_tree, ensure_ascii=False)
+    liabilities_payload = {
+        "debt": round(total_debt, 2),
+        "interest": round(accumulated_interest, 2),
+        "netAsset": round(net_asset, 2),
+    }
+    liabilities_json = json.dumps(liabilities_payload, ensure_ascii=False)
+
     try:
         taiex_val = float(yf.Ticker("^TWII").history(period="1d")["Close"].iloc[-1])
     except Exception:
@@ -560,6 +575,27 @@ def main():
             .btn:hover {{ background:#30302c; }} .btn-alt {{ background:transparent; color:var(--ink); border-color:var(--line); }} .btn-alt:hover {{ background:#ece9e1; }}
             .chart-container {{ position:relative; width:100%; height:280px; margin-bottom:20px; }}
             .card.market-mix-card {{ background:#f4f2ed; border:1px solid #e5e2db; border-top:3px solid var(--orange); }}
+            .asset-treemap-toolbar {{ display:flex; align-items:center; justify-content:space-between; gap:10px; margin:0 0 10px; }}
+            .asset-treemap-breadcrumb {{ color:var(--muted); font-size:11px; letter-spacing:.04em; }}
+            .asset-treemap-back {{ appearance:none; border:1px solid var(--line); border-radius:999px; background:var(--surface); color:var(--navy); cursor:pointer; font:inherit; font-size:11px; padding:6px 10px; }}
+            .asset-treemap-back:disabled {{ cursor:default; opacity:.42; }}
+            .asset-treemap {{ position:relative; width:100%; min-height:390px; overflow:hidden; border:1px solid #e0ddd5; border-radius:14px; background:#ece9e1; }}
+            .asset-treemap-node {{ position:absolute; overflow:hidden; box-sizing:border-box; transition:left .22s ease, top .22s ease, width .22s ease, height .22s ease, filter .18s ease; }}
+            .asset-treemap-node.is-group {{ padding:8px; border:3px solid #f4f2ed; border-radius:12px; color:#fffdf7; cursor:pointer; box-shadow:inset 0 0 0 1px rgba(255,255,255,.12); }}
+            .asset-treemap-node.is-group:hover,.asset-treemap-node.is-leaf:hover {{ filter:brightness(1.06); }}
+            .asset-treemap-node.is-leaf {{ display:flex; flex-direction:column; justify-content:flex-end; padding:8px; border:2px solid rgba(244,242,237,.72); border-radius:8px; background:rgba(251,250,247,.18); color:#fffdf7; cursor:pointer; }}
+            .asset-treemap-node.is-group > .asset-treemap-title {{ font-weight:700; font-size:13px; line-height:1.2; }}
+            .asset-treemap-node.is-leaf > .asset-treemap-title {{ font-weight:700; font-size:12px; line-height:1.2; }}
+            .asset-treemap-title {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-shadow:0 1px 2px rgba(36,66,94,.45); }}
+            .asset-treemap-value {{ margin-top:4px; font-family:'Noto Sans TC', sans-serif; font-size:11px; font-weight:700; white-space:nowrap; }}
+            .asset-treemap-percent {{ margin-top:2px; font-size:10px; opacity:.84; white-space:nowrap; }}
+            .asset-treemap-children {{ position:absolute; inset:34px 6px 6px; }}
+            .asset-treemap-note {{ display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:10px; color:var(--muted); font-size:11px; line-height:1.45; }}
+            .asset-treemap-note strong {{ color:var(--ink); }}
+            .asset-treemap-hint {{ margin-top:8px; color:var(--muted); font-size:11px; }}
+            .asset-treemap-tooltip {{ position:relative; transform:none; min-width:0; max-width:none; margin-top:10px; }}
+            .asset-treemap-tooltip-title {{ display:block; color:#f6cf9a; font-size:12px; font-weight:700; }}
+            .asset-treemap-tooltip-value,.asset-treemap-tooltip-percent {{ display:block; margin-top:3px; color:#fffdf7; font-size:11px; }}
             .market-mix-layout {{ display:block; }}
             .market-donut-wrap {{ position:relative; width:min(100%, 420px); aspect-ratio:1; margin:auto; }}
             .market-donut-wrap canvas {{ position:relative; z-index:1; }}
@@ -598,7 +634,7 @@ def main():
             .risk-column,.exposure-row {{ background:#f8faf7; border:1px solid #d8dfd8; border-radius:12px; padding:15px 13px; min-width:0; }} .risk-column strong,.exposure-row strong {{ display:block; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; margin-top:7px; letter-spacing:-.02em; }} .risk-column small,.exposure-row small {{ display:block; margin-top:6px; color:var(--muted); font-size:12px; line-height:1.45; }}
             .risk-detail {{ border-top:1px solid #d5ddd5; margin-top:12px; padding-top:10px; }} .risk-detail-label {{ display:block; color:var(--muted); font-size:11px; }} .risk-detail-value {{ display:block; margin-top:4px; color:var(--ink); font-size:13px; font-weight:700; line-height:1.45; }} .risk-detail .status,.risk-detail .capacity {{ display:block; margin-top:4px; font-size:12px; font-weight:700; line-height:1.35; white-space:normal; }}
             .risk-section .sec-title {{ margin-bottom:11px !important; }}
-            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ gap:7px; }} .change,.sync {{ padding:9px 8px; font-size:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .risk-section {{ padding:13px; }} .risk-column,.exposure-row {{ padding:14px 12px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} .market-donut-wrap {{ width:min(100%, 320px); }} .market-chart-tooltip {{ min-width:150px; max-width:190px; padding:7px 8px; font-size:10px; }} .market-chart-tooltip b {{ font-size:11px; }} }}
+            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ gap:7px; }} .change,.sync {{ padding:9px 8px; font-size:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .risk-section {{ padding:13px; }} .risk-column,.exposure-row {{ padding:14px 12px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} .asset-treemap {{ min-height:340px; }} .asset-treemap-node.is-group {{ padding:6px; }} .asset-treemap-node.is-leaf {{ padding:6px; }} .asset-treemap-node.is-group > .asset-treemap-title,.asset-treemap-node.is-leaf > .asset-treemap-title {{ font-size:10px; }} .asset-treemap-value {{ font-size:9px; }} .asset-treemap-percent {{ font-size:9px; }} .asset-treemap-children {{ inset:30px 4px 4px; }} .market-chart-tooltip {{ min-width:150px; max-width:190px; padding:7px 8px; font-size:10px; }} .market-chart-tooltip b {{ font-size:11px; }} }}
         </style>
     </head>
     <body>
@@ -650,23 +686,20 @@ def main():
         </div>
 
         <div class="card market-mix-card">
-            <div class="chart-title">總資產板塊</div>
-            <div class="chart-caption">內圈為完整總資產板塊；外圈為不含現金與質押負債的投資市值組成。</div>
-            <div class="market-mix-layout">
-                <div class="market-donut-wrap">
-                    <canvas id="marketMixChart" aria-label="總資產板塊雙層圓環圖"></canvas>
-                    <div class="market-donut-labels" aria-hidden="true"></div>
-                    <div class="market-donut-center">
-                        <span>總資產 (台幣)</span>
-                        <strong>NT${total_asset:,.0f}</strong>
-                        <small>投資市值 NT${total_market_value:,.0f}</small>
-                        <small>台股加權 {taiex_display}</small>
-                        <small>Nasdaq {nasdaq_display}</small>
-                        <small>更新 {benchmark_updated}</small>
-                    </div>
-                    <div class="market-chart-tooltip" hidden aria-live="polite"></div>
-                </div>
+            <div class="chart-title">總資產配置</div>
+            <div class="chart-caption">依市值比例呈現資產階層；點擊分類可查看個別標的，負債不納入資產面積。</div>
+            <div class="asset-treemap-toolbar">
+                <span id="assetTreemapBreadcrumb" class="asset-treemap-breadcrumb">總資產</span>
+                <button id="assetTreemapBack" class="asset-treemap-back" type="button" disabled>← 返回上一層</button>
             </div>
+            <div id="assetTreemap" class="asset-treemap" role="img" aria-label="總資產配置 Treemap"></div>
+            <div id="assetTreemapHint" class="asset-treemap-hint">點擊色塊查看下一層；移入或點擊標的查看詳細資訊。</div>
+            <div class="asset-treemap-note">
+                <span><strong>淨資產</strong> NT${net_asset:,.0f}</span>
+                <span><strong>質押借款</strong> NT${total_debt:,.0f}（含利息）</span>
+                <span><strong>更新</strong> {benchmark_updated}</span>
+            </div>
+            <div id="assetTreemapTooltip" class="market-chart-tooltip asset-treemap-tooltip" hidden aria-live="polite"></div>
         </div>
         </section>
 
@@ -841,7 +874,8 @@ def main():
                     console.error("折線圖繪製失敗:", error);
                 }}
 
-                try {{
+                if (document.getElementById('marketMixChart')) {{
+                    try {{
                     const assetBlocks = {asset_blocks_json};
                     const marketMix = {market_mix_json};
                     const marketMixLabels = {{
@@ -949,7 +983,108 @@ def main():
                 }} catch (error) {{
                     console.error("雙層圓環圖繪製失敗:", error);
                 }}
+                }}
             }});
+                try {{
+                    const assetTree = {asset_tree_json};
+                    const assetTreemap = document.getElementById('assetTreemap');
+                    const assetTreemapTooltip = document.getElementById('assetTreemapTooltip');
+                    const assetTreemapBreadcrumb = document.getElementById('assetTreemapBreadcrumb');
+                    const assetTreemapBack = document.getElementById('assetTreemapBack');
+                    const assetTreeRoot = assetTree;
+                    let assetTreePath = [assetTreeRoot];
+                    const palette = {{
+                        '現貨台股': '#24425e', '現貨美股': '#3d6f9f', '現金與基金': '#687c70',
+                        '台股市值型': '#24425e', '台積電': '#ad6658', '台股槓桿型': '#c98a4b',
+                        '其它台股': '#6f8292', '美股市值型': '#3d6f9f', '台積電 ADR': '#ad6658',
+                        '其它美股': '#7891a8', '現金': '#687c70', '基金': '#b58a72'
+                    }};
+                    const formatMoney = (value) => 'NT$' + Math.round(Number(value || 0)).toLocaleString('zh-TW');
+                    const percentOfRoot = (node) => assetTreeRoot.value > 0 ? (Number(node.value || 0) * 100 / assetTreeRoot.value).toFixed(1) : '0.0';
+                    const nodeColor = (node) => palette[node.category] || palette[node.label] || '#8a877f';
+                    const visibleChildren = (node) => (node.children || []).filter((child) => Number(child.value || 0) > 0);
+                    const layoutNodes = (nodes, x, y, width, height) => {{
+                        const sorted = nodes.slice().sort((a, b) => Number(b.value || 0) - Number(a.value || 0));
+                        if (!sorted.length) return [];
+                        if (sorted.length === 1) return [{{ node: sorted[0], x, y, width, height }}];
+                        const total = sorted.reduce((sum, node) => sum + Number(node.value || 0), 0) || 1;
+                        const first = [];
+                        let firstTotal = 0;
+                        for (let index = 0; index < sorted.length - 1; index += 1) {{
+                            first.push(sorted[index]);
+                            firstTotal += Number(sorted[index].value || 0);
+                            if (firstTotal >= total / 2) break;
+                        }}
+                        const second = sorted.slice(first.length);
+                        const ratio = firstTotal / total;
+                        if (width >= height) {{
+                            const firstWidth = width * ratio;
+                            return layoutNodes(first, x, y, firstWidth, height).concat(layoutNodes(second, x + firstWidth, y, width - firstWidth, height));
+                        }}
+                        const firstHeight = height * ratio;
+                        return layoutNodes(first, x, y, width, firstHeight).concat(layoutNodes(second, x, y + firstHeight, width, height - firstHeight));
+                    }};
+                    const appendText = (element, className, text) => {{
+                        const child = document.createElement('span');
+                        child.className = className;
+                        child.textContent = text;
+                        element.appendChild(child);
+                    }};
+                    const showTreemapTooltip = (node) => {{
+                        assetTreemapTooltip.innerHTML = '';
+                        appendText(assetTreemapTooltip, 'asset-treemap-tooltip-title', node.label);
+                        appendText(assetTreemapTooltip, 'asset-treemap-tooltip-value', (node.kind === 'leaf' ? '市值 ' : '分類市值 ') + formatMoney(node.value));
+                        appendText(assetTreemapTooltip, 'asset-treemap-tooltip-percent', '占總資產 ' + percentOfRoot(node) + '%');
+                        assetTreemapTooltip.hidden = false;
+                    }};
+                    const renderTreemapNode = (item, parent) => {{
+                        const node = item.node;
+                        const children = visibleChildren(node);
+                        const element = document.createElement('div');
+                        element.className = 'asset-treemap-node ' + (children.length ? 'is-group' : 'is-leaf');
+                        element.style.left = item.x + '%';
+                        element.style.top = item.y + '%';
+                        element.style.width = item.width + '%';
+                        element.style.height = item.height + '%';
+                        element.style.backgroundColor = nodeColor(node);
+                        element.setAttribute('role', children.length ? 'button' : 'img');
+                        element.setAttribute('tabindex', '0');
+                        element.setAttribute('aria-label', node.label + ' ' + formatMoney(node.value) + '，占總資產 ' + percentOfRoot(node) + '%');
+                        appendText(element, 'asset-treemap-title', node.label);
+                        appendText(element, 'asset-treemap-value', formatMoney(node.value));
+                        appendText(element, 'asset-treemap-percent', percentOfRoot(node) + '%');
+                        if (children.length) {{
+                            const childLayer = document.createElement('div');
+                            childLayer.className = 'asset-treemap-children';
+                            element.appendChild(childLayer);
+                            layoutNodes(children, 0, 0, 100, 100).forEach((childItem) => renderTreemapNode(childItem, childLayer));
+                            const openNode = () => {{ assetTreePath.push(node); renderTreemap(); }};
+                            element.addEventListener('click', openNode);
+                            element.addEventListener('keydown', (event) => {{ if (event.key === 'Enter' || event.key === ' ') {{ event.preventDefault(); openNode(); }} }});
+                        }} else {{
+                            element.addEventListener('mouseenter', () => showTreemapTooltip(node));
+                            element.addEventListener('click', () => showTreemapTooltip(node));
+                            element.addEventListener('keydown', (event) => {{ if (event.key === 'Enter' || event.key === ' ') {{ event.preventDefault(); showTreemapTooltip(node); }} }});
+                        }}
+                        parent.appendChild(element);
+                    }};
+                    const renderTreemap = () => {{
+                        const currentNode = assetTreePath[assetTreePath.length - 1];
+                        const children = visibleChildren(currentNode);
+                        assetTreemap.innerHTML = '';
+                        assetTreemapBreadcrumb.textContent = assetTreePath.map((node) => node.label).join(' / ');
+                        assetTreemapBack.disabled = assetTreePath.length === 1;
+                        if (!children.length) {{
+                            assetTreemap.textContent = '目前沒有可視化資產資料';
+                            return;
+                        }}
+                        layoutNodes(children, 0, 0, 100, 100).forEach((item) => renderTreemapNode(item, assetTreemap));
+                    }};
+                    assetTreemapBack.addEventListener('click', () => {{ if (assetTreePath.length > 1) {{ assetTreePath.pop(); renderTreemap(); }} }});
+                    renderTreemap();
+                }} catch (error) {{
+                    console.error("資產配置 Treemap 載入失敗:", error);
+                }}
         </script>
     </body>
     </html>
@@ -1015,6 +1150,8 @@ def main():
             "totalMarketValue": round(total_market_value, 2),
             "assetBlocks": asset_blocks,
             "marketMix": market_mix,
+            "assetTree": asset_tree,
+            "liabilities": liabilities_payload,
             "allocation": allocation_items,
             "risk": risk_summary,
             "stressTests": stress_scenarios,
