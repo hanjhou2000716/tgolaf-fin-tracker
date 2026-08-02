@@ -858,7 +858,7 @@ def main():
                                     const value = Number(dataset.data[index] || 0);
                                     if (!arc || value <= 0) return;
                                     const angle = (arc.startAngle + arc.endAngle) / 2;
-                                    const labelRatio = datasetIndex === 0 ? 0.82 : 0.72;
+                                    const labelRatio = 0.72;
                                     const radius = arc.innerRadius + (arc.outerRadius - arc.innerRadius) * labelRatio;
                                     const x = arc.x + Math.cos(angle) * radius;
                                     const y = arc.y + Math.sin(angle) * radius;
@@ -888,7 +888,7 @@ def main():
                                 data: assetBlocks.map(item => item.value),
                                 backgroundColor: ['#24425e', '#687c70', '#3d6f9f', '#c8c1b5'],
                                 borderColor: '#f4f2ed', borderWidth: 5,
-                                radius: '64%', cutout: '24%', hoverOffset: 6,
+                                radius: '64%', cutout: '16%', hoverOffset: 6,
                                 hoverBorderColor: '#fffdf7', hoverBorderWidth: 3,
                             }}, {{
                                 label: '總市值組成（外圈）',
@@ -896,7 +896,7 @@ def main():
                                 data: marketMix.map(item => item.value),
                                 backgroundColor: ['#24425e', '#3d6f9f', '#c4674f', '#687c70', '#c98a4b'],
                                 borderColor: '#f4f2ed', borderWidth: 5,
-                                radius: '100%', cutout: '58%', hoverOffset: 7,
+                                radius: '100%', cutout: '52%', hoverOffset: 7,
                                 hoverBorderColor: '#fffdf7', hoverBorderWidth: 3,
                             }}]
                         }},
