@@ -839,8 +839,39 @@ def main():
                 try {{
                     const assetBlocks = {asset_blocks_json};
                     const marketMix = {market_mix_json};
+                    const marketMixLabels = {{
+                        id: 'marketMixLabels',
+                        afterDatasetsDraw: (chart) => {{
+                            const ctx = chart.ctx;
+                            chart.data.datasets.forEach((dataset, datasetIndex) => {{
+                                const meta = chart.getDatasetMeta(datasetIndex);
+                                const total = dataset.data.reduce((sum, item) => sum + Number(item || 0), 0);
+                                if (!meta || !meta.data || total <= 0) return;
+                                meta.data.forEach((arc, index) => {{
+                                    const value = Number(dataset.data[index] || 0);
+                                    if (!arc || value <= 0) return;
+                                    const angle = (arc.startAngle + arc.endAngle) / 2;
+                                    const radius = (arc.innerRadius + arc.outerRadius) / 2;
+                                    const x = arc.x + Math.cos(angle) * radius;
+                                    const y = arc.y + Math.sin(angle) * radius;
+                                    const percent = (value * 100 / total).toFixed(0) + '%';
+                                    ctx.save();
+                                    ctx.font = '700 ' + (datasetIndex === 1 ? '12px' : '10px') + " 'Noto Sans TC', sans-serif";
+                                    ctx.textAlign = 'center';
+                                    ctx.textBaseline = 'middle';
+                                    ctx.lineWidth = 3;
+                                    ctx.strokeStyle = 'rgba(36,66,94,.38)';
+                                    ctx.strokeText(percent, x, y);
+                                    ctx.fillStyle = (datasetIndex === 0 && index === 3) ? '#24425e' : '#fffdf7';
+                                    ctx.fillText(percent, x, y);
+                                    ctx.restore();
+                                }});
+                            }});
+                        }}
+                    }};
                     const marketMixCtx = document.getElementById('marketMixChart').getContext('2d');
                     new Chart(marketMixCtx, {{
+                        plugins: [marketMixLabels],
                         type: 'doughnut',
                         data: {{
                             labels: [
@@ -907,21 +938,7 @@ def main():
                                         panel.hidden = false;
                                     }}
                                 }},
-                                datalabels: {{
-                                    display: (ctx) => Number(ctx.dataset.data[ctx.dataIndex]) > 0,
-                                    anchor: 'center',
-                                    align: 'center',
-                                    clamp: true,
-                                    clip: false,
-                                    color: (ctx) => ctx.datasetIndex === 0 && ctx.dataIndex === 3 ? '#24425e' : '#fffdf7',
-                                    textStrokeColor: 'rgba(36,66,94,.28)',
-                                    textStrokeWidth: 1,
-                                    font: {{ weight: '700', size: (ctx) => ctx.datasetIndex === 1 ? 12 : 10 }},
-                                    formatter: (value, ctx) => {{
-                                        const sum = ctx.dataset.data.reduce((total, item) => total + Number(item), 0);
-                                        return sum > 0 && Number(value) > 0 ? (value * 100 / sum).toFixed(0) + '%' : '';
-                                    }}
-                                }}
+                                datalabels: {{ display: false }}
                             }}
                         }}
                     }});
