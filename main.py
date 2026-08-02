@@ -871,13 +871,13 @@ def main():
                                     bodyFont: {{ size: 11 }},
                                     callbacks: {{
                                         title: (items) => items.length
-                                            ? `${{items[0].dataset.label}} · ${{items[0].dataset.labels[items[0].dataIndex]}}`
+                                            ? items[0].dataset.label + ' · ' + items[0].dataset.labels[items[0].dataIndex]
                                             : '',
                                         label: (context) => {{
                                             const total = context.dataset.data.reduce((sum, item) => sum + Number(item), 0);
                                             const value = Number(context.raw || 0);
                                             const percent = total > 0 ? (value * 100 / total).toFixed(1) : '0.0';
-                                            return ` ${value.toLocaleString('zh-TW')} TWD · ${percent}%`;
+                                            return ' ' + value.toLocaleString('zh-TW') + ' TWD · ' + percent + '%';
                                         }}
                                     }}
                                 }},
