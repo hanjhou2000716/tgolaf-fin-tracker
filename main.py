@@ -573,6 +573,10 @@ def main():
             .market-chart-tooltip strong {{ color:#f6cf9a; font-size:11px; }}
             .market-chart-tooltip span {{ margin-top:2px; }}
             .market-chart-tooltip b {{ margin-top:4px; color:#fffdf7; font-size:12px; }}
+            .market-donut-labels {{ position:absolute; inset:0; z-index:3; pointer-events:none; overflow:hidden; }}
+            .market-donut-label {{ position:absolute; transform:translate(-50%,-50%); color:#fffdf7; font-size:11px; font-weight:700; line-height:1; letter-spacing:-.03em; text-shadow:0 1px 2px rgba(36,66,94,.8); white-space:nowrap; }}
+            .market-donut-label.is-inner {{ font-size:10px; }}
+            .market-donut-label.is-muted {{ color:#24425e; text-shadow:0 1px 2px rgba(255,255,255,.8); }}
             .chart-title {{ font-family:'Noto Serif TC', serif; font-weight:700; font-size:16px; margin-bottom:5px; color:var(--ink); }}
             .chart-caption {{ color:var(--muted); font-size:12px; margin-bottom:14px; }}
             .chart-controls {{ display:flex; align-items:center; flex-wrap:wrap; gap:7px; margin:0 0 14px; }}
@@ -651,6 +655,7 @@ def main():
             <div class="market-mix-layout">
                 <div class="market-donut-wrap">
                     <canvas id="marketMixChart" aria-label="總資產板塊雙層圓環圖"></canvas>
+                    <div class="market-donut-labels" aria-hidden="true"></div>
                     <div class="market-donut-center">
                         <span>總資產 (台幣)</span>
                         <strong>NT${total_asset:,.0f}</strong>
@@ -842,7 +847,9 @@ def main():
                     const marketMixLabels = {{
                         id: 'marketMixLabels',
                         afterDatasetsDraw: (chart) => {{
-                            const ctx = chart.ctx;
+                            const layer = chart.canvas.parentNode.querySelector('.market-donut-labels');
+                            if (!layer) return;
+                            layer.innerHTML = '';
                             chart.data.datasets.forEach((dataset, datasetIndex) => {{
                                 const meta = chart.getDatasetMeta(datasetIndex);
                                 const total = dataset.data.reduce((sum, item) => sum + Number(item || 0), 0);
@@ -851,21 +858,17 @@ def main():
                                     const value = Number(dataset.data[index] || 0);
                                     if (!arc || value <= 0) return;
                                     const angle = (arc.startAngle + arc.endAngle) / 2;
-                                    const labelRatio = datasetIndex === 0 ? 0.92 : 0.7;
+                                    const labelRatio = datasetIndex === 0 ? 0.78 : 0.5;
                                     const radius = arc.innerRadius + (arc.outerRadius - arc.innerRadius) * labelRatio;
                                     const x = arc.x + Math.cos(angle) * radius;
                                     const y = arc.y + Math.sin(angle) * radius;
                                     const percent = (value * 100 / total).toFixed(0) + '%';
-                                    ctx.save();
-                                    ctx.font = '700 ' + (datasetIndex === 1 ? '12px' : '10px') + " 'Noto Sans TC', sans-serif";
-                                    ctx.textAlign = 'center';
-                                    ctx.textBaseline = 'middle';
-                                    ctx.lineWidth = 3;
-                                    ctx.strokeStyle = 'rgba(36,66,94,.38)';
-                                    ctx.strokeText(percent, x, y);
-                                    ctx.fillStyle = (datasetIndex === 0 && index === 3) ? '#24425e' : '#fffdf7';
-                                    ctx.fillText(percent, x, y);
-                                    ctx.restore();
+                                    const label = document.createElement('span');
+                                    label.className = 'market-donut-label ' + (datasetIndex === 0 ? 'is-inner' : '') + ((datasetIndex === 0 && index === 3) ? ' is-muted' : '');
+                                    label.textContent = percent;
+                                    label.style.left = (x / chart.width * 100) + '%';
+                                    label.style.top = (y / chart.height * 100) + '%';
+                                    layer.appendChild(label);
                                 }});
                             }});
                         }}
