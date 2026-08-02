@@ -563,7 +563,7 @@ def main():
             .market-mix-layout {{ display:block; }}
             .market-donut-wrap {{ position:relative; width:min(100%, 420px); aspect-ratio:1; margin:auto; }}
             .market-donut-wrap canvas {{ position:relative; z-index:1; }}
-            .market-donut-center {{ position:absolute; inset:23%; z-index:2; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; pointer-events:none; color:var(--muted); }}
+            .market-donut-center {{ position:absolute; inset:23%; z-index:2; display:flex; flex-direction:column; align-items:center; justify-content:center; text-align:center; pointer-events:none; color:var(--muted); background:rgba(251,250,247,.96); border:1px solid #e5e2db; border-radius:50%; padding:5px; box-shadow:0 2px 8px rgba(36,66,94,.06); }}
             .market-donut-center span {{ font-size:10px; letter-spacing:.08em; }}
             .market-donut-center strong {{ color:var(--ink); font-family:'Noto Serif TC', serif; font-size:clamp(19px, 3.8vw, 26px); line-height:1.15; margin:3px 0; white-space:nowrap; }}
             .market-donut-center small {{ font-size:9px; line-height:1.4; white-space:nowrap; }}
@@ -846,14 +846,16 @@ def main():
                                 data: assetBlocks.map(item => item.value),
                                 backgroundColor: ['#24425e', '#687c70', '#3d6f9f', '#c8c1b5'],
                                 borderColor: '#f4f2ed', borderWidth: 3,
-                                radius: '68%', cutout: '34%', hoverOffset: 5,
+                                radius: '68%', cutout: '34%', hoverOffset: 6,
+                                hoverBorderColor: '#fffdf7', hoverBorderWidth: 3,
                             }}, {{
                                 label: '總市值組成（外圈）',
                                 labels: marketMix.map(item => item.label),
                                 data: marketMix.map(item => item.value),
                                 backgroundColor: ['#24425e', '#3d6f9f', '#c4674f', '#687c70', '#c98a4b'],
                                 borderColor: '#f4f2ed', borderWidth: 3,
-                                radius: '100%', cutout: '72%', hoverOffset: 5,
+                                radius: '100%', cutout: '66%', hoverOffset: 7,
+                                hoverBorderColor: '#fffdf7', hoverBorderWidth: 3,
                             }}]
                         }},
                         options: {{
@@ -863,15 +865,19 @@ def main():
                                 legend: {{ display: false }},
                                 tooltip: {{
                                     position: 'nearest',
-                                    backgroundColor: '#24425e',
+                                    xAlign: 'center',
+                                    yAlign: 'bottom',
+                                    backgroundColor: '#1b3248',
                                     borderColor: '#c98a4b',
-                                    borderWidth: 2,
+                                    borderWidth: 3,
+                                    cornerRadius: 8,
                                     titleColor: '#fffdf7',
                                     bodyColor: '#fffdf7',
                                     displayColors: true,
                                     padding: 10,
                                     caretPadding: 8,
                                     bodySpacing: 4,
+                                    animation: false,
                                     titleFont: {{ weight: '700', size: 12 }},
                                     bodyFont: {{ size: 11 }},
                                     callbacks: {{
@@ -887,15 +893,18 @@ def main():
                                     }}
                                 }},
                                 datalabels: {{
+                                    display: (ctx) => Number(ctx.dataset.data[ctx.dataIndex]) > 0,
                                     anchor: 'center',
                                     align: 'center',
                                     clamp: true,
                                     clip: false,
-                                    color: '#fffdf7',
-                                    font: {{ weight: '700', size: (ctx) => ctx.datasetIndex === 1 ? 11 : 10 }},
+                                    color: (ctx) => ctx.datasetIndex === 0 && ctx.dataIndex === 3 ? '#24425e' : '#fffdf7',
+                                    textStrokeColor: 'rgba(36,66,94,.28)',
+                                    textStrokeWidth: 1,
+                                    font: {{ weight: '700', size: (ctx) => ctx.datasetIndex === 1 ? 12 : 10 }},
                                     formatter: (value, ctx) => {{
                                         const sum = ctx.dataset.data.reduce((total, item) => total + Number(item), 0);
-                                        return sum > 0 && value / sum >= 0.04 ? (value * 100 / sum).toFixed(0) + '%' : '';
+                                        return sum > 0 && Number(value) > 0 ? (value * 100 / sum).toFixed(0) + '%' : '';
                                     }}
                                 }}
                             }}
