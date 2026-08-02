@@ -851,7 +851,7 @@ def main():
                                     const value = Number(dataset.data[index] || 0);
                                     if (!arc || value <= 0) return;
                                     const angle = (arc.startAngle + arc.endAngle) / 2;
-                                    const labelRatio = datasetIndex === 0 ? 0.35 : 0.78;
+                                    const labelRatio = datasetIndex === 0 ? 0.92 : 0.7;
                                     const radius = arc.innerRadius + (arc.outerRadius - arc.innerRadius) * labelRatio;
                                     const x = arc.x + Math.cos(angle) * radius;
                                     const y = arc.y + Math.sin(angle) * radius;
@@ -884,16 +884,16 @@ def main():
                                 labels: assetBlocks.map(item => item.label),
                                 data: assetBlocks.map(item => item.value),
                                 backgroundColor: ['#24425e', '#687c70', '#3d6f9f', '#c8c1b5'],
-                                borderColor: '#f4f2ed', borderWidth: 3,
-                                radius: '74%', cutout: '24%', hoverOffset: 6,
+                                borderColor: '#f4f2ed', borderWidth: 4,
+                                radius: '64%', cutout: '32%', hoverOffset: 6,
                                 hoverBorderColor: '#fffdf7', hoverBorderWidth: 3,
                             }}, {{
                                 label: '總市值組成（外圈）',
                                 labels: marketMix.map(item => item.label),
                                 data: marketMix.map(item => item.value),
                                 backgroundColor: ['#24425e', '#3d6f9f', '#c4674f', '#687c70', '#c98a4b'],
-                                borderColor: '#f4f2ed', borderWidth: 3,
-                                radius: '100%', cutout: '48%', hoverOffset: 7,
+                                borderColor: '#f4f2ed', borderWidth: 4,
+                                radius: '100%', cutout: '68%', hoverOffset: 7,
                                 hoverBorderColor: '#fffdf7', hoverBorderWidth: 3,
                             }}]
                         }},
