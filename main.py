@@ -349,6 +349,7 @@ def main():
     beta_status, beta_status_class = classify_beta_capacity(beta_capacity)
     
     debt_ratio = ((total_debt / total_asset) * 100) if total_asset > 0 else 0
+    net_asset_pct = ((net_asset / total_asset) * 100) if total_asset > 0 else 0
     maintenance_ratio = calculate_maintenance_ratio(pledged_value, total_debt)
     ratio_status, maintenance_status_class = maintenance_status(total_debt, maintenance_ratio)
 
@@ -584,18 +585,16 @@ def main():
             .asset-treemap-node.is-group {{ padding:8px; border:3px solid #f4f2ed; border-radius:12px; color:#fffdf7; cursor:pointer; box-shadow:inset 0 0 0 1px rgba(255,255,255,.12); }}
             .asset-treemap-node.is-group:hover,.asset-treemap-node.is-leaf:hover {{ filter:brightness(1.06); }}
             .asset-treemap-node.is-leaf {{ display:flex; flex-direction:column; justify-content:flex-end; padding:8px; border:2px solid rgba(244,242,237,.72); border-radius:8px; background:rgba(251,250,247,.18); color:#fffdf7; cursor:pointer; }}
+            .asset-treemap-node.is-compact {{ padding:5px; }}
+            .asset-treemap-node.is-compact .asset-treemap-value,.asset-treemap-node.is-compact .asset-treemap-percent {{ display:none; }}
             .asset-treemap-node.is-group > .asset-treemap-title {{ font-weight:700; font-size:13px; line-height:1.2; }}
             .asset-treemap-node.is-leaf > .asset-treemap-title {{ font-weight:700; font-size:12px; line-height:1.2; }}
             .asset-treemap-title {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-shadow:0 1px 2px rgba(36,66,94,.45); }}
             .asset-treemap-value {{ margin-top:4px; font-family:'Noto Sans TC', sans-serif; font-size:11px; font-weight:700; white-space:nowrap; }}
             .asset-treemap-percent {{ margin-top:2px; font-size:10px; opacity:.84; white-space:nowrap; }}
-            .asset-treemap-children {{ position:absolute; inset:34px 6px 6px; }}
             .asset-treemap-note {{ display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:10px; color:var(--muted); font-size:11px; line-height:1.45; }}
             .asset-treemap-note strong {{ color:var(--ink); }}
             .asset-treemap-hint {{ margin-top:8px; color:var(--muted); font-size:11px; }}
-            .asset-treemap-tooltip {{ position:relative; transform:none; min-width:0; max-width:none; margin-top:10px; }}
-            .asset-treemap-tooltip-title {{ display:block; color:#f6cf9a; font-size:12px; font-weight:700; }}
-            .asset-treemap-tooltip-value,.asset-treemap-tooltip-percent {{ display:block; margin-top:3px; color:#fffdf7; font-size:11px; }}
             .market-mix-layout {{ display:block; }}
             .market-donut-wrap {{ position:relative; width:min(100%, 420px); aspect-ratio:1; margin:auto; }}
             .market-donut-wrap canvas {{ position:relative; z-index:1; }}
@@ -634,7 +633,7 @@ def main():
             .risk-column,.exposure-row {{ background:#f8faf7; border:1px solid #d8dfd8; border-radius:12px; padding:15px 13px; min-width:0; }} .risk-column strong,.exposure-row strong {{ display:block; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; margin-top:7px; letter-spacing:-.02em; }} .risk-column small,.exposure-row small {{ display:block; margin-top:6px; color:var(--muted); font-size:12px; line-height:1.45; }}
             .risk-detail {{ border-top:1px solid #d5ddd5; margin-top:12px; padding-top:10px; }} .risk-detail-label {{ display:block; color:var(--muted); font-size:11px; }} .risk-detail-value {{ display:block; margin-top:4px; color:var(--ink); font-size:13px; font-weight:700; line-height:1.45; }} .risk-detail .status,.risk-detail .capacity {{ display:block; margin-top:4px; font-size:12px; font-weight:700; line-height:1.35; white-space:normal; }}
             .risk-section .sec-title {{ margin-bottom:11px !important; }}
-            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ gap:7px; }} .change,.sync {{ padding:9px 8px; font-size:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .risk-section {{ padding:13px; }} .risk-column,.exposure-row {{ padding:14px 12px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} .asset-treemap {{ min-height:340px; }} .asset-treemap-node.is-group {{ padding:6px; }} .asset-treemap-node.is-leaf {{ padding:6px; }} .asset-treemap-node.is-group > .asset-treemap-title,.asset-treemap-node.is-leaf > .asset-treemap-title {{ font-size:10px; }} .asset-treemap-value {{ font-size:9px; }} .asset-treemap-percent {{ font-size:9px; }} .asset-treemap-children {{ inset:30px 4px 4px; }} .market-chart-tooltip {{ min-width:150px; max-width:190px; padding:7px 8px; font-size:10px; }} .market-chart-tooltip b {{ font-size:11px; }} }}
+            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ gap:7px; }} .change,.sync {{ padding:9px 8px; font-size:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .risk-section {{ padding:13px; }} .risk-column,.exposure-row {{ padding:14px 12px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} .asset-treemap {{ min-height:340px; }} .asset-treemap-node.is-group {{ padding:6px; }} .asset-treemap-node.is-leaf {{ padding:6px; }} .asset-treemap-node.is-group > .asset-treemap-title,.asset-treemap-node.is-leaf > .asset-treemap-title {{ font-size:10px; }} .asset-treemap-value {{ font-size:9px; }} .asset-treemap-percent {{ font-size:9px; }} .market-chart-tooltip {{ min-width:150px; max-width:190px; padding:7px 8px; font-size:10px; }} .market-chart-tooltip b {{ font-size:11px; }} }}
         </style>
     </head>
     <body>
@@ -693,13 +692,12 @@ def main():
                 <button id="assetTreemapBack" class="asset-treemap-back" type="button" disabled>← 返回上一層</button>
             </div>
             <div id="assetTreemap" class="asset-treemap" role="img" aria-label="總資產配置 Treemap"></div>
-            <div id="assetTreemapHint" class="asset-treemap-hint">點擊色塊查看下一層；移入或點擊標的查看詳細資訊。</div>
+            <div id="assetTreemapHint" class="asset-treemap-hint">點擊色塊查看下一層；每個色塊顯示市值與占比。</div>
             <div class="asset-treemap-note">
-                <span><strong>淨資產</strong> NT${net_asset:,.0f}</span>
-                <span><strong>質押借款</strong> NT${total_debt:,.0f}（含利息）</span>
+                <span><strong>淨資產</strong> NT${net_asset:,.0f}（{net_asset_pct:.1f}%）</span>
+                <span><strong>質押借款</strong> NT${total_debt:,.0f}（含利息，{debt_ratio:.1f}%）</span>
                 <span><strong>更新</strong> {benchmark_updated}</span>
             </div>
-            <div id="assetTreemapTooltip" class="market-chart-tooltip asset-treemap-tooltip" hidden aria-live="polite"></div>
         </div>
         </section>
 
@@ -988,7 +986,6 @@ def main():
                 try {{
                     const assetTree = {asset_tree_json};
                     const assetTreemap = document.getElementById('assetTreemap');
-                    const assetTreemapTooltip = document.getElementById('assetTreemapTooltip');
                     const assetTreemapBreadcrumb = document.getElementById('assetTreemapBreadcrumb');
                     const assetTreemapBack = document.getElementById('assetTreemapBack');
                     const assetTreeRoot = assetTree;
@@ -1030,18 +1027,12 @@ def main():
                         child.textContent = text;
                         element.appendChild(child);
                     }};
-                    const showTreemapTooltip = (node) => {{
-                        assetTreemapTooltip.innerHTML = '';
-                        appendText(assetTreemapTooltip, 'asset-treemap-tooltip-title', node.label);
-                        appendText(assetTreemapTooltip, 'asset-treemap-tooltip-value', (node.kind === 'leaf' ? '市值 ' : '分類市值 ') + formatMoney(node.value));
-                        appendText(assetTreemapTooltip, 'asset-treemap-tooltip-percent', '占總資產 ' + percentOfRoot(node) + '%');
-                        assetTreemapTooltip.hidden = false;
-                    }};
                     const renderTreemapNode = (item, parent) => {{
                         const node = item.node;
                         const children = visibleChildren(node);
                         const element = document.createElement('div');
                         element.className = 'asset-treemap-node ' + (children.length ? 'is-group' : 'is-leaf');
+                        if (item.width < 18 || item.height < 20) element.classList.add('is-compact');
                         element.style.left = item.x + '%';
                         element.style.top = item.y + '%';
                         element.style.width = item.width + '%';
@@ -1054,17 +1045,9 @@ def main():
                         appendText(element, 'asset-treemap-value', formatMoney(node.value));
                         appendText(element, 'asset-treemap-percent', percentOfRoot(node) + '%');
                         if (children.length) {{
-                            const childLayer = document.createElement('div');
-                            childLayer.className = 'asset-treemap-children';
-                            element.appendChild(childLayer);
-                            layoutNodes(children, 0, 0, 100, 100).forEach((childItem) => renderTreemapNode(childItem, childLayer));
                             const openNode = () => {{ assetTreePath.push(node); renderTreemap(); }};
                             element.addEventListener('click', openNode);
                             element.addEventListener('keydown', (event) => {{ if (event.key === 'Enter' || event.key === ' ') {{ event.preventDefault(); openNode(); }} }});
-                        }} else {{
-                            element.addEventListener('mouseenter', () => showTreemapTooltip(node));
-                            element.addEventListener('click', () => showTreemapTooltip(node));
-                            element.addEventListener('keydown', (event) => {{ if (event.key === 'Enter' || event.key === ' ') {{ event.preventDefault(); showTreemapTooltip(node); }} }});
                         }}
                         parent.appendChild(element);
                     }};
