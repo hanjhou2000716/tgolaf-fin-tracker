@@ -581,17 +581,20 @@ def main():
             .asset-treemap-back {{ appearance:none; border:1px solid var(--line); border-radius:999px; background:var(--surface); color:var(--navy); cursor:pointer; font:inherit; font-size:11px; padding:6px 10px; }}
             .asset-treemap-back:disabled {{ cursor:default; opacity:.42; }}
             .asset-treemap {{ position:relative; width:100%; min-height:390px; overflow:hidden; border:1px solid #e0ddd5; border-radius:14px; background:#ece9e1; }}
-            .asset-treemap-node {{ position:absolute; overflow:hidden; box-sizing:border-box; transition:left .22s ease, top .22s ease, width .22s ease, height .22s ease, filter .18s ease; }}
-            .asset-treemap-node.is-group {{ padding:8px; border:3px solid #f4f2ed; border-radius:12px; color:#fffdf7; cursor:pointer; box-shadow:inset 0 0 0 1px rgba(255,255,255,.12); }}
-            .asset-treemap-node.is-group:hover,.asset-treemap-node.is-leaf:hover {{ filter:brightness(1.06); }}
-            .asset-treemap-node.is-leaf {{ display:flex; flex-direction:column; justify-content:flex-end; padding:8px; border:2px solid rgba(244,242,237,.72); border-radius:8px; background:rgba(251,250,247,.18); color:#fffdf7; cursor:pointer; }}
-            .asset-treemap-node.is-compact {{ padding:5px; }}
-            .asset-treemap-node.is-compact .asset-treemap-value,.asset-treemap-node.is-compact .asset-treemap-percent {{ display:none; }}
-            .asset-treemap-node.is-group > .asset-treemap-title {{ font-weight:700; font-size:13px; line-height:1.2; }}
-            .asset-treemap-node.is-leaf > .asset-treemap-title {{ font-weight:700; font-size:12px; line-height:1.2; }}
-            .asset-treemap-title {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; text-shadow:0 1px 2px rgba(36,66,94,.45); }}
-            .asset-treemap-value {{ margin-top:4px; font-family:'Noto Sans TC', sans-serif; font-size:11px; font-weight:700; white-space:nowrap; }}
-            .asset-treemap-percent {{ margin-top:2px; font-size:10px; opacity:.84; white-space:nowrap; }}
+            .asset-treemap-node {{ position:absolute; display:flex; flex-direction:column; align-items:flex-start; justify-content:flex-start; overflow:hidden; box-sizing:border-box; transition:left .22s ease, top .22s ease, width .22s ease, height .22s ease, filter .18s ease; }}
+            .asset-treemap-node.is-group {{ padding:10px; border:3px solid #f4f2ed; border-radius:12px; color:#fffdf7; cursor:pointer; box-shadow:inset 0 0 0 1px rgba(255,255,255,.12); }}
+            .asset-treemap-node.is-group:hover,.asset-treemap-node.is-leaf:hover {{ filter:brightness(1.08); }}
+            .asset-treemap-node.is-leaf {{ padding:10px; border:2px solid rgba(244,242,237,.8); border-radius:8px; background:rgba(251,250,247,.1); color:#fffdf7; cursor:pointer; }}
+            .asset-treemap-node.is-compact {{ padding:7px; }}
+            .asset-treemap-node.is-tiny {{ padding:5px; }}
+            .asset-treemap-node.is-micro {{ padding:4px; }}
+            .asset-treemap-node.is-micro .asset-treemap-value {{ display:none; }}
+            .asset-treemap-node.is-micro .asset-treemap-percent {{ font-size:10px; }}
+            .asset-treemap-node.is-group > .asset-treemap-title {{ font-weight:700; font-size:14px; line-height:1.25; }}
+            .asset-treemap-node.is-leaf > .asset-treemap-title {{ font-weight:700; font-size:13px; line-height:1.25; }}
+            .asset-treemap-title {{ display:-webkit-box; width:100%; overflow:hidden; text-overflow:ellipsis; white-space:normal; word-break:break-word; -webkit-line-clamp:2; -webkit-box-orient:vertical; text-shadow:0 1px 2px rgba(36,66,94,.45); }}
+            .asset-treemap-value {{ display:block; width:100%; margin-top:7px; color:#f7d49e; font-family:'Noto Sans TC', sans-serif; font-size:13px; font-weight:700; line-height:1.25; white-space:normal; word-break:break-all; }}
+            .asset-treemap-percent {{ display:block; width:100%; margin-top:3px; color:#d8ebe2; font-size:12px; font-weight:700; line-height:1.2; white-space:nowrap; }}
             .asset-treemap-note {{ display:flex; flex-wrap:wrap; gap:8px 14px; margin-top:10px; color:var(--muted); font-size:11px; line-height:1.45; }}
             .asset-treemap-note strong {{ color:var(--ink); }}
             .asset-treemap-hint {{ margin-top:8px; color:var(--muted); font-size:11px; }}
@@ -633,7 +636,7 @@ def main():
             .risk-column,.exposure-row {{ background:#f8faf7; border:1px solid #d8dfd8; border-radius:12px; padding:15px 13px; min-width:0; }} .risk-column strong,.exposure-row strong {{ display:block; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; margin-top:7px; letter-spacing:-.02em; }} .risk-column small,.exposure-row small {{ display:block; margin-top:6px; color:var(--muted); font-size:12px; line-height:1.45; }}
             .risk-detail {{ border-top:1px solid #d5ddd5; margin-top:12px; padding-top:10px; }} .risk-detail-label {{ display:block; color:var(--muted); font-size:11px; }} .risk-detail-value {{ display:block; margin-top:4px; color:var(--ink); font-size:13px; font-weight:700; line-height:1.45; }} .risk-detail .status,.risk-detail .capacity {{ display:block; margin-top:4px; font-size:12px; font-weight:700; line-height:1.35; white-space:normal; }}
             .risk-section .sec-title {{ margin-bottom:11px !important; }}
-            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ gap:7px; }} .change,.sync {{ padding:9px 8px; font-size:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .risk-section {{ padding:13px; }} .risk-column,.exposure-row {{ padding:14px 12px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} .asset-treemap {{ min-height:340px; }} .asset-treemap-node.is-group {{ padding:6px; }} .asset-treemap-node.is-leaf {{ padding:6px; }} .asset-treemap-node.is-group > .asset-treemap-title,.asset-treemap-node.is-leaf > .asset-treemap-title {{ font-size:10px; }} .asset-treemap-value {{ font-size:9px; }} .asset-treemap-percent {{ font-size:9px; }} .market-chart-tooltip {{ min-width:150px; max-width:190px; padding:7px 8px; font-size:10px; }} .market-chart-tooltip b {{ font-size:11px; }} }}
+            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ gap:7px; }} .change,.sync {{ padding:9px 8px; font-size:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .risk-section {{ padding:13px; }} .risk-column,.exposure-row {{ padding:14px 12px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} .asset-treemap {{ min-height:360px; }} .asset-treemap-node.is-group,.asset-treemap-node.is-leaf {{ padding:7px; }} .asset-treemap-node.is-group > .asset-treemap-title,.asset-treemap-node.is-leaf > .asset-treemap-title {{ font-size:12px; }} .asset-treemap-value {{ font-size:11px; }} .asset-treemap-percent {{ font-size:11px; }} .market-chart-tooltip {{ min-width:150px; max-width:190px; padding:7px 8px; font-size:10px; }} .market-chart-tooltip b {{ font-size:11px; }} }}
         </style>
     </head>
     <body>
@@ -991,14 +994,31 @@ def main():
                     const assetTreeRoot = assetTree;
                     let assetTreePath = [assetTreeRoot];
                     const palette = {{
-                        '現貨台股': '#24425e', '現貨美股': '#3d6f9f', '現金與基金': '#687c70',
-                        '台股市值型': '#24425e', '台積電': '#ad6658', '台股槓桿型': '#c98a4b',
-                        '其它台股': '#6f8292', '美股市值型': '#3d6f9f', '台積電 ADR': '#ad6658',
-                        '其它美股': '#7891a8', '現金': '#687c70', '基金': '#b58a72'
+                        '\u73fe\u8ca8\u53f0\u80a1': ['#24425e', '#315b7b', '#477091', '#6286a0', '#7d99ad'],
+                        '\u73fe\u8ca8\u7f8e\u80a1': ['#356b9d', '#447eae', '#5b8fba', '#729fc3', '#89aecb'],
+                        '\u73fe\u91d1\u8207\u57fa\u91d1': ['#5f7569', '#708a7c', '#819d8d', '#94ad9c', '#a9bcaa'],
+                        '\u53f0\u80a1\u5e02\u503c\u578b': ['#315b7b', '#416d8b', '#527f9a', '#668fa7'],
+                        '\u53f0\u7a4d\u96fb': ['#9f5f54', '#b06b5d', '#bf7968', '#ce8874'],
+                        '\u53f0\u80a1\u69d3\u687f\u578b': ['#ad743d', '#bd8248', '#ca9155', '#d49f65'],
+                        '\u5176\u5b83\u53f0\u80a1': ['#627887', '#728898', '#8298a7', '#93a8b5'],
+                        '\u7f8e\u80a1\u5e02\u503c\u578b': ['#356b9d', '#477eab', '#598fb7', '#6ba0c2'],
+                        '\u53f0\u7a4d\u96fb ADR': ['#9f5f54', '#b06b5d', '#bf7968', '#ce8874'],
+                        '\u5176\u5b83\u7f8e\u80a1': ['#6f879d', '#7f97ac', '#8fa7b9', '#9fb6c5'],
+                        '\u73fe\u91d1': ['#5f7569', '#708a7c', '#819d8d'],
+                        '\u57fa\u91d1': ['#a77d4d', '#b58a5b', '#c19769']
                     }};
                     const formatMoney = (value) => 'NT$' + Math.round(Number(value || 0)).toLocaleString('zh-TW');
                     const percentOfRoot = (node) => assetTreeRoot.value > 0 ? (Number(node.value || 0) * 100 / assetTreeRoot.value).toFixed(1) : '0.0';
-                    const nodeColor = (node) => palette[node.category] || palette[node.label] || '#8a877f';
+                    const colorIndex = (label, length) => {{
+                        const text = String(label || '');
+                        let hash = 0;
+                        for (let index = 0; index < text.length; index += 1) hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+                        return Math.abs(hash) % length;
+                    }};
+                    const nodeColor = (node) => {{
+                        const shades = palette[node.label] || palette[node.category] || ['#7e8a86'];
+                        return shades[node.children && node.children.length ? 0 : colorIndex(node.label, shades.length)];
+                    }};
                     const visibleChildren = (node) => (node.children || []).filter((child) => Number(child.value || 0) > 0);
                     const layoutNodes = (nodes, x, y, width, height) => {{
                         const sorted = nodes.slice().sort((a, b) => Number(b.value || 0) - Number(a.value || 0));
@@ -1032,7 +1052,9 @@ def main():
                         const children = visibleChildren(node);
                         const element = document.createElement('div');
                         element.className = 'asset-treemap-node ' + (children.length ? 'is-group' : 'is-leaf');
-                        if (item.width < 18 || item.height < 20) element.classList.add('is-compact');
+                        if (item.width < 28 || item.height < 28) element.classList.add('is-compact');
+                        if (item.width < 17 || item.height < 18) element.classList.add('is-tiny');
+                        if (item.width < 11 || item.height < 13) element.classList.add('is-micro');
                         element.style.left = item.x + '%';
                         element.style.top = item.y + '%';
                         element.style.width = item.width + '%';
