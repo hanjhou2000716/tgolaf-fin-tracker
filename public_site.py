@@ -80,6 +80,16 @@ DEMO_HTML = """<!doctype html>
     </section>
     <footer>@2026 PRStK Lab &amp; SFC.e. | All right reserved.</footer>
   </main>
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <script>
+    (() => {
+      const telegram = window.Telegram && window.Telegram.WebApp;
+      if (telegram && telegram.initData) {
+        telegram.ready();
+        window.location.replace('./private/');
+      }
+    })();
+  </script>
   <script>
     fetch('./data.public.json', { credentials:'omit', cache:'no-store' })
       .then((response) => response.ok ? response.json() : Promise.reject(new Error('demo data unavailable')))

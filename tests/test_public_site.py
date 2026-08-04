@@ -39,6 +39,8 @@ class PublicSiteSecurityTests(unittest.TestCase):
                 self.assertNotIn("QQQM", content)
                 self.assertNotIn("assetTree", content)
                 self.assertIsNone(re.search(r"NT\$[0-9]", content))
+            self.assertIn("telegram.org/js/telegram-web-app.js", html)
+            self.assertIn("window.location.replace('./private/')", html)
             self.assertNotIn("SUPABASE_SERVICE_ROLE_KEY", private_html)
             self.assertNotIn("server-only-key", private_html)
             self.assertIn("telegram.org/js/telegram-web-app.js", private_html)
