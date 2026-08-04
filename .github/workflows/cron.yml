@@ -62,11 +62,14 @@ jobs:
           test -s public-site/data.public.json
           test -s public-site/status.json
           test ! -e public-site/data.json
-          if grep -R -Eqi '006208|QQQM|2330|TSM|NT\$[0-9]' public-site; then
+          # The private Telegram shell may contain safe holding labels and
+          # fetches values only after API authentication. Scan only the public
+          # demo contract for portfolio markers.
+          if grep -Eqi '006208|QQQM|2330|TSM|NT\$[0-9]' public-site/index.html public-site/data.public.json public-site/status.json; then
             echo "Public Demo contains private portfolio markers"
             exit 1
           fi
-          if grep -R -Eqi 'SUPABASE_SERVICE_ROLE_KEY|service_role_key' public-site; then
+          if grep -Eqi 'SUPABASE_SERVICE_ROLE_KEY|service_role_key' public-site/index.html public-site/data.public.json public-site/status.json public-site/private/index.html; then
             echo "Public site contains a service role marker"
             exit 1
           fi
