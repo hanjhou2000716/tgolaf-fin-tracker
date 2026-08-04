@@ -41,7 +41,7 @@ jobs:
       - name: Run formula and data validation tests
         run: python -m unittest discover -s tests -v
 
-      - name: Run Tracker Script (Generate index.html)
+      - name: Run Tracker Script (Generate private snapshot and public Demo)
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -49,18 +49,23 @@ jobs:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
           FORCE_TELEGRAM: ${{ inputs.force_telegram || false }}
         run: python main.py
-      - name: Verify generated dashboard data
+      - name: Verify generated public Demo is sanitized
         run: |
-          test -s index.html
-          test -s public/data.json
-          test -s data.json
-          test -s status.json
-          python -m json.tool public/data.json > /dev/null
-          python -m json.tool status.json > /dev/null
+          test -s public-site/index.html
+          test -s public-site/data.public.json
+          test -s public-site/status.json
+          test ! -e public-site/data.json
+          if grep -Eqi 'totalAsset|assetTree|netAsset|006208|QQQM|2330|TSM|NT\$[0-9]' public-site/index.html public-site/data.public.json; then
+            echo "Public Demo contains private portfolio markers"
+            exit 1
+          fi
+          python -m json.tool public-site/data.public.json > /dev/null
+          python -m json.tool public-site/status.json > /dev/null
         
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4.1.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./
+          publish_dir: ./public-site
           publish_branch: gh-pages
+          force_orphan: true

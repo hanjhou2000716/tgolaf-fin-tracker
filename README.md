@@ -17,7 +17,8 @@ Google Form / Google Sheets
           ▼
 Growth main.py ── 報價、匯率、風控公式、History 快照
           │
-          ├── index.html / data.json / status.json
+          ├── public-site/index.html / data.public.json / status.json（Demo）
+          ├── .private-build/data.private.json（不部署）
           ├── GitHub Pages（Growth Dashboard）
           └── Telegram 結算通知
 
@@ -46,9 +47,10 @@ Growth 負責「投資組合事實與風控」；Skynet 不再讀取 Google Shee
 
 輸出檔案：
 
-- `index.html`：Growth Dashboard 靜態頁面。
-- `data.json`、`public/data.json`：儀表板資料契約。
-- `status.json`、`public/status.json`：健康狀態與來源診斷。
+- `public-site/index.html`：公開 Demo 頁面；不含個人資產資料。
+- `public-site/data.public.json`：公開 Demo 資料契約，只含測試百分比。
+- `public-site/status.json`：公開健康狀態與部署新鮮度，不含投資組合數值。
+- `.private-build/data.private.json`：私有快照，僅供後續 Supabase API 階段使用，不部署至 Pages。
 
 ## 3. Google Sheets / Form 輸入規格
 
@@ -283,6 +285,24 @@ Authorization: Bearer <GitHub token>
 不要把 GitHub token、Telegram token 或 GCP JSON 寫入 repository；應放在 Cornjob 的安全變數或 GitHub Secrets。
 
 ## 9. GitHub Secrets / 執行環境
+
+## P0-SEC-01 公開資料安全邊界
+
+GitHub Pages now serves a fixed Demo site only. The deployment workflow
+publishes `public-site/` and never publishes the repository root, generated
+`data.json`, or the private build directory.
+
+- `public-site/index.html`: fixed Demo UI; no personal amounts or holdings.
+- `public-site/data.public.json`: demo percentages only (`mode: demo`).
+- `public-site/status.json`: public freshness contract without portfolio data.
+- `.private-build/data.private.json`: generated private snapshot for the next
+  Supabase Auth + RLS phase; this directory is ignored and is not deployed.
+- `force_orphan: true` replaces the `gh-pages` branch history on deployment so
+  previously published files are not retained in the Pages branch history.
+
+The private API and authenticated Growth UI are intentionally not enabled by
+this PR. P0-SEC-02 will add Supabase Auth, Row Level Security, JWT expiry
+handling, and an allowlisted CORS boundary before private data is served again.
 
 Growth Actions 使用：
 
