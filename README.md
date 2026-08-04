@@ -304,6 +304,27 @@ The private API and authenticated Growth UI are intentionally not enabled by
 this PR. P0-SEC-02 will add Supabase Auth, Row Level Security, JWT expiry
 handling, and an allowlisted CORS boundary before private data is served again.
 
+## P0-SEC-02 Supabase Auth + RLS
+
+The Supabase contract is included in this repository:
+
+- `supabase/migrations/20260804000000_portfolio_snapshots.sql`: one current
+  snapshot per `auth.users` user, with RLS and `auth.uid() = user_id`.
+- `supabase/functions/portfolio-data/index.ts`: accepts only a Bearer access
+  token, returns `401` without a valid session, and checks an explicit CORS
+  allowlist.
+- `supabase_sync.py`: CI-only upsert using `SUPABASE_SERVICE_ROLE_KEY`; this
+  key is never written into HTML or JavaScript.
+- `public-site/private/index.html`: password login with the Supabase anon key,
+  followed by an authenticated request to the Edge Function.
+
+Required GitHub Actions secrets before enabling private sync:
+
+`SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_FUNCTION_URL`,
+`SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_USER_ID`. Set
+`SUPABASE_PRIVATE_SYNC_REQUIRED=true` only after the migration, Edge Function,
+and target user have been provisioned in Supabase.
+
 Growth Actions 使用：
 
 | Secret | 用途 |

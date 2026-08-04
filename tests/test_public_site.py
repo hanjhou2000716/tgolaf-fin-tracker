@@ -30,14 +30,17 @@ class PublicSiteSecurityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             write_public_site(directory, "2026-08-04T12:00:00+08:00")
             files = {path.name for path in Path(directory).iterdir()}
-            self.assertEqual(files, {"index.html", "data.public.json", "status.json"})
+            self.assertEqual(files, {"index.html", "data.public.json", "status.json", "private"})
             html = (Path(directory) / "index.html").read_text(encoding="utf-8")
             data = (Path(directory) / "data.public.json").read_text(encoding="utf-8")
+            private_html = (Path(directory) / "private" / "index.html").read_text(encoding="utf-8")
             for content in (html, data):
                 self.assertNotIn("006208", content)
                 self.assertNotIn("QQQM", content)
                 self.assertNotIn("assetTree", content)
                 self.assertIsNone(re.search(r"NT\$[0-9]", content))
+            self.assertNotIn("SUPABASE_SERVICE_ROLE_KEY", private_html)
+            self.assertNotIn("server-only-key", private_html)
 
 
 if __name__ == "__main__":

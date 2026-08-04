@@ -19,6 +19,7 @@ from risk import (
 from validation import validate_history_sheet, validate_inventory, validate_quote
 from asset_tree import build_asset_tree
 from public_site import write_public_site
+from supabase_sync import upload_private_snapshot
 
 # ==========================================
 # 1. 環境變數與金鑰設定
@@ -1197,6 +1198,7 @@ def main():
     # payload. Supabase Auth + RLS will replace this local handoff in P0-SEC-02.
     write_json('.private-build/data.private.json', data_for_web)
     write_json('.private-build/status.private.json', status_payload)
+    upload_private_snapshot('.private-build/data.private.json')
     write_public_site('public-site', tw_now.isoformat())
     # =================================
 

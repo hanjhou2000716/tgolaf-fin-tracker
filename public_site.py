@@ -7,7 +7,6 @@ next security phase.
 """
 
 from copy import deepcopy
-from datetime import datetime
 import json
 import os
 
@@ -99,6 +98,93 @@ DEMO_HTML = """<!doctype html>
 """
 
 
+PRIVATE_HTML_TEMPLATE = """<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Growth Dashboard · Private</title>
+  <style>
+    :root { --paper:#f2f0ea; --card:#fbfaf7; --navy:#24425e; --sage:#708a7c; --orange:#c98a4b; --ink:#283d50; --muted:#6d756f; --line:#ddd9d0; }
+    * { box-sizing:border-box; } body { margin:0; padding:28px 16px 48px; background:var(--paper); color:var(--ink); font-family:ui-sans-serif,system-ui,-apple-system,"Noto Sans TC",sans-serif; }
+    main { width:min(760px,100%); margin:0 auto; } .brand { color:var(--navy); font-family:Georgia,"Noto Serif TC",serif; font-size:20px; letter-spacing:.12em; }
+    .card { margin-top:16px; padding:20px; background:var(--card); border:1px solid var(--line); border-top:3px solid var(--orange); border-radius:14px; box-shadow:0 8px 24px rgba(36,66,94,.05); }
+    h1,h2 { margin:0 0 12px; font-family:Georgia,"Noto Serif TC",serif; } h1 { font-size:22px; } h2 { font-size:18px; }
+    p { color:var(--muted); line-height:1.6; font-size:13px; } label { display:block; margin-top:12px; color:var(--muted); font-size:12px; }
+    input { width:100%; margin-top:5px; padding:10px 11px; border:1px solid var(--line); border-radius:8px; background:#fff; color:var(--ink); font:inherit; }
+    button { margin-top:14px; padding:10px 14px; border:0; border-radius:8px; background:var(--navy); color:#fff; cursor:pointer; font:inherit; } button.secondary { margin-left:8px; background:var(--sage); }
+    .error { min-height:20px; color:#a24f45; font-size:12px; } .hidden { display:none !important; }
+    .metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; } .metric { padding:13px; border-radius:10px; background:#eef2ef; }
+    .metric span { display:block; color:var(--muted); font-size:11px; } .metric strong { display:block; margin-top:6px; color:var(--navy); font-size:18px; }
+    .private-note { padding:12px 14px; border-radius:9px; background:#fff4df; color:#8b632d; font-size:12px; line-height:1.6; }
+    @media(max-width:540px) { body { padding:20px 12px 36px; } .card { padding:16px; } .metrics { grid-template-columns:1fr; } }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="brand">PRStK · SFC.e · Growth · Private</div>
+    <section class="card" id="loginCard">
+      <h1>登入 Growth Dashboard</h1>
+      <p>私有資產資料只會透過 Supabase Auth + RLS 驗證後 API 取得。此頁面不包含任何資產數字或持倉。</p>
+      <form id="loginForm">
+        <label>Email<input id="email" type="email" autocomplete="username" required></label>
+        <label>Password<input id="password" type="password" autocomplete="current-password" required></label>
+        <button type="submit">登入</button>
+      </form>
+      <div class="error" id="loginError" role="alert"></div>
+    </section>
+    <section class="card hidden" id="privateCard">
+      <h1>Private portfolio</h1>
+      <div class="private-note">資料來自驗證後 API；頁面不會把 service role key 放到瀏覽器。</div>
+      <div class="metrics" id="metrics"></div>
+      <p id="privateUpdated"></p>
+      <button class="secondary" id="logoutButton" type="button">登出</button>
+      <div class="error" id="privateError" role="alert"></div>
+    </section>
+  </main>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script>
+    const config = __SUPABASE_CONFIG__;
+    const loginCard = document.getElementById('loginCard');
+    const privateCard = document.getElementById('privateCard');
+    const loginError = document.getElementById('loginError');
+    const privateError = document.getElementById('privateError');
+    const formatMoney = (value) => Number(value || 0).toLocaleString('zh-TW', { style:'currency', currency:'TWD', maximumFractionDigits:0 });
+    const showLogin = () => { loginCard.classList.remove('hidden'); privateCard.classList.add('hidden'); };
+    const showPrivate = () => { loginCard.classList.add('hidden'); privateCard.classList.remove('hidden'); };
+    const apiUrl = config.functionUrl || (config.url ? `${config.url}/functions/v1/portfolio-data` : '');
+    let client = null;
+    if (window.supabase && config.url && config.anonKey) client = window.supabase.createClient(config.url, config.anonKey);
+    const loadPrivateData = async (session) => {
+      if (!apiUrl || !session) throw new Error('Private API 尚未設定或登入已過期');
+      const response = await fetch(apiUrl, { headers: { Authorization:`Bearer ${session.access_token}` }, cache:'no-store' });
+      if (response.status === 401) throw new Error('登入已過期，請重新登入');
+      if (!response.ok) throw new Error(`Private API error (${response.status})`);
+      const body = await response.json(); const portfolio = (body.data || {}).portfolio || {};
+      const rows = [['淨資產', portfolio.netAsset], ['總資產', portfolio.totalAsset], ['質押借款', portfolio.totalDebt]];
+      document.getElementById('metrics').innerHTML = rows.map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${formatMoney(value)}</strong></div>`).join('');
+      document.getElementById('privateUpdated').textContent = body.generatedAt ? `資料更新：${body.generatedAt}` : '';
+    };
+    document.getElementById('loginForm').addEventListener('submit', async (event) => {
+      event.preventDefault(); loginError.textContent = '';
+      if (!client) { loginError.textContent = 'Supabase 公開設定尚未完成'; return; }
+      const { error } = await client.auth.signInWithPassword({ email:document.getElementById('email').value, password:document.getElementById('password').value });
+      if (error) { loginError.textContent = '登入失敗，請確認帳號或密碼'; return; }
+    });
+    document.getElementById('logoutButton').addEventListener('click', () => client?.auth.signOut());
+    if (client) client.auth.onAuthStateChange(async (_event, session) => {
+      if (!session) { showLogin(); return; }
+      showPrivate(); privateError.textContent = '';
+      try { await loadPrivateData(session); } catch (error) { privateError.textContent = error.message; }
+    });
+    else showLogin();
+  </script>
+</body>
+</html>
+"""
+
+
 def build_public_payload(generated_at: str) -> dict:
     """Return a fixed demo contract with no private portfolio fields."""
     payload = deepcopy(DEMO_DATA)
@@ -127,3 +213,11 @@ def write_public_site(directory: str, generated_at: str) -> None:
         json.dump(build_public_payload(generated_at), file, ensure_ascii=False, indent=2)
     with open(os.path.join(directory, "status.json"), "w", encoding="utf-8") as file:
         json.dump(build_public_status(generated_at), file, ensure_ascii=False, indent=2)
+    private_directory = os.path.join(directory, "private")
+    os.makedirs(private_directory, exist_ok=True)
+    supabase_url = os.getenv("SUPABASE_URL", "").strip()
+    anon_key = os.getenv("SUPABASE_ANON_KEY", "").strip()
+    function_url = os.getenv("SUPABASE_FUNCTION_URL", "").strip()
+    config = json.dumps({"url": supabase_url, "anonKey": anon_key, "functionUrl": function_url}, ensure_ascii=True)
+    with open(os.path.join(private_directory, "index.html"), "w", encoding="utf-8") as file:
+        file.write(PRIVATE_HTML_TEMPLATE.replace("__SUPABASE_CONFIG__", config))
