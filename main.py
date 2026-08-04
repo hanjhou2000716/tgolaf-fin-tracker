@@ -25,6 +25,7 @@ from performance import performance_breakdown
 from market_data import MarketDataService
 from metrics import summarize_performance
 from attribution import build_pnl_attribution
+from exposure import build_exposure_matrix
 from history_store import (
     build_header_map,
     column_to_a1,
@@ -328,6 +329,15 @@ def main():
 
     us_stock_value_twd = us_stock_value_usd * usd_rate
     total_cash_twd = cash_twd + (cash_usd * usd_rate)
+    exposure_matrix = build_exposure_matrix(
+        position_values_twd,
+        total_asset=tw_stock_value + us_stock_value_twd + total_cash_twd + fund_value,
+        etf_lookthrough={symbol: {"NVDA": weight} for symbol, (weight, _) in etf_nvda_weights.items()},
+        metadata={
+            **{symbol: {"market": "TW", "currency": "TWD", "issuer": symbol} for symbol in tw_position_values},
+            **{symbol: {"market": "US", "currency": "USD", "issuer": symbol} for symbol in us_position_values},
+        },
+    )
     
     debt = inventory["質押負債"].get("Current_Debt", 0)
     debt_history = inventory["質押負債"].get("History", [])
@@ -1205,6 +1215,7 @@ def main():
             "performance": performance,
             "performanceMetrics": performance_metrics,
             "pnlAttribution": attribution,
+            "exposureMatrix": exposure_matrix,
             "nvdaExposure": {"value": round(nvda_exposure_twd, 2), "percent": round(nvda_pct, 1), "etfWeights": {symbol: {"weight": round(weight * 100, 2), "source": source} for symbol, (weight, source) in etf_nvda_weights.items()}},
         },
     }
