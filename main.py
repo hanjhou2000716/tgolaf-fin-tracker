@@ -20,6 +20,7 @@ from validation import validate_history_sheet, validate_inventory, validate_quot
 from asset_tree import build_asset_tree
 from public_site import write_public_site
 from supabase_sync import upload_private_snapshot
+from transaction_schema import parse_transaction_rows
 
 # ==========================================
 # 1. 環境變數與金鑰設定
@@ -29,6 +30,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 FINMIND_TOKEN = os.getenv("FINMIND_TOKEN")
 GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
 FORCE_TELEGRAM = os.getenv("FORCE_TELEGRAM", "false").strip().lower() in {"1", "true", "yes", "on"}
+FORM_SCHEMA_STRICT = os.getenv("FORM_SCHEMA_STRICT", "true").strip().lower() in {"1", "true", "yes", "on"}
 WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/"
 
 
@@ -166,14 +168,30 @@ def calculate_current_assets():
     if not sheet: raise ValueError("找不到檔案")
         
     data_rows, history_sheet = [], None
+    transaction_audits, seen_transaction_ids = [], set()
     for ws in sheet.worksheets():
         title_clean = ws.title.strip().lower()
         if "history" in title_clean or "歷史" in title_clean or "紀錄" in title_clean:
             history_sheet = ws
         elif "表單" in title_clean or "form" in title_clean or "回覆" in title_clean or "異動" in title_clean:
             rows = ws.get_all_values()
-            if len(rows) > 1: data_rows.extend(rows[1:])
+            if len(rows) > 1:
+                if FORM_SCHEMA_STRICT:
+                    parsed = parse_transaction_rows(
+                        rows[0],
+                        rows[1:],
+                        source_sheet=ws.title,
+                        existing_ids=seen_transaction_ids,
+                    )
+                    seen_transaction_ids.update(item.transaction_id for item in parsed.accepted)
+                    seen_transaction_ids.update(item.transaction_id for item in parsed.pending)
+                    transaction_audits.append({"sheet": ws.title, **parsed.audit_payload()})
+                    data_rows.extend(parsed.accepted_rows)
+                else:
+                    data_rows.extend(rows[1:])
                 
+    if transaction_audits:
+        write_json(".private-build/transaction_audit.json", {"strict": FORM_SCHEMA_STRICT, "sheets": transaction_audits})
     if not data_rows: return {}, history_sheet
         
     def parse_date(row):

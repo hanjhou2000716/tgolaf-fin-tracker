@@ -54,6 +54,7 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_USER_ID: ${{ secrets.SUPABASE_USER_ID }}
           SUPABASE_PRIVATE_SYNC_REQUIRED: ${{ secrets.SUPABASE_PRIVATE_SYNC_REQUIRED || 'false' }}
+          FORM_SCHEMA_STRICT: ${{ secrets.FORM_SCHEMA_STRICT || 'true' }}
         run: python main.py
       - name: Verify generated public Demo is sanitized
         run: |
