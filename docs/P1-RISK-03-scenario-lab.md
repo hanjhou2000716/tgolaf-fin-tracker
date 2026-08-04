@@ -1,6 +1,3 @@
 # P1-RISK-03 情境實驗室
 
-私有 payload 新增 `scenarioLab`，目前預先提供 006208 下跌 10%／20% 情境；底層
-引擎可調整台股、美股、NVDA、TSMC、USD/TWD 與利率衝擊，輸出新資產、新淨資產、
-維持率、回撤與補繳需求。NVDA／TSMC 若已包含在市場總值中會先拆出再套用個別衝擊，
-避免重複扣減。
+`scenario_experiment.py` 讓 UI 以台股、美股、NVDA、TSMC、USD/TWD 與利率百分比調整情境，並回傳新資產、淨資產、維持率、回撤與補繳需求。每次結果都同時帶 baseline 與 Guardrail 狀態，資料不足或超出合理範圍會拒絕執行。
