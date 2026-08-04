@@ -18,6 +18,7 @@ from risk import (
 )
 from validation import validate_history_sheet, validate_inventory, validate_quote
 from asset_tree import build_asset_tree
+from public_site import write_public_site
 
 # ==========================================
 # 1. 環境變數與金鑰設定
@@ -401,7 +402,10 @@ def main():
         total_cash_twd,
         inventory["基金"],
     )
-    asset_tree_json = json.dumps(asset_tree, ensure_ascii=False)
+    # The legacy HTML renderer is retained as a private-build compatibility
+    # artifact only. It must never receive the real asset tree; authenticated
+    # clients will obtain private data through the Supabase API in P0-SEC-02.
+    asset_tree_json = json.dumps({"label": "總資產", "value": 0, "kind": "root", "children": []}, ensure_ascii=False)
     liabilities_payload = {
         "debt": round(total_debt, 2),
         "interest": round(accumulated_interest, 2),
@@ -1095,10 +1099,13 @@ def main():
     </html>
     """
 
-    with open('index.html', 'w', encoding='utf-8') as f: f.write(html_content)
+    # Keep the legacy real-value page outside the Pages publish directory. It
+    # is a local/private compatibility artifact and is not deployed.
+    os.makedirs('.private-build', exist_ok=True)
+    with open('.private-build/index.private.html', 'w', encoding='utf-8') as f:
+        f.write(html_content)
 
     # === [關鍵補丁]：產生網頁專用即時數據 ===
-    import os
     if not os.path.exists('public'):
         os.makedirs('public')
     
@@ -1185,12 +1192,12 @@ def main():
     data_for_web["generatedAt"] = tw_now.isoformat()
     data_for_web["snapshotResult"] = snapshot_result
     data_for_web["dataQuality"] = status_payload
-    # Keep the status endpoint public at the Pages root so external schedulers
-    # and health checks can verify freshness without parsing the HTML page.
-    for path in ("public/data.json", "data.json"):
-        write_json(path, data_for_web)
-    for path in ("public/status.json", "status.json"):
-        write_json(path, status_payload)
+    # Private data is retained only in the ignored build directory. GitHub
+    # Pages receives a separate fixed Demo contract and never sees this
+    # payload. Supabase Auth + RLS will replace this local handoff in P0-SEC-02.
+    write_json('.private-build/data.private.json', data_for_web)
+    write_json('.private-build/status.private.json', status_payload)
+    write_public_site('public-site', tw_now.isoformat())
     # =================================
 
     # --- 判斷每日損益，動態生成推播文字 ---
