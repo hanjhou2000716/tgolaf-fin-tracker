@@ -28,6 +28,7 @@ from attribution import build_pnl_attribution
 from exposure import build_exposure_matrix
 from pledge_safety import pledge_safety_center
 from alerts import AlertEngine
+from scenario_lab import run_scenario
 from history_store import (
     build_header_map,
     column_to_a1,
@@ -369,6 +370,20 @@ def main():
     maintenance_ratio = calculate_maintenance_ratio(pledged_value, total_debt)
     ratio_status, maintenance_status_class = maintenance_status(total_debt, maintenance_ratio)
     pledge_safety = pledge_safety_center(pledged_value, total_debt, stress_decline=0.10)
+    scenario_inputs = {
+        "total_asset": total_asset,
+        "net_asset": net_asset,
+        "total_debt": total_debt,
+        "pledged_value": pledged_value,
+        "tw_value": tw_stock_value,
+        "us_value": us_stock_value_twd,
+        "nvda_value": position_values_twd.get("NVDA", 0),
+        "tsmc_value": tsmc_exposure_twd,
+    }
+    scenario_lab = {
+        "006208Down10": run_scenario(**scenario_inputs, tw_shock=-0.10),
+        "006208Down20": run_scenario(**scenario_inputs, tw_shock=-0.20),
+    }
 
     tw_free_value = max(0, tw_stock_value - total_debt)
     tsmc_pct = (tsmc_exposure_twd / total_asset) * 100 if total_asset > 0 else 0
@@ -1230,6 +1245,7 @@ def main():
             "exposureMatrix": exposure_matrix,
             "pledgeSafety": pledge_safety,
             "alerts": alerts,
+            "scenarioLab": scenario_lab,
             "nvdaExposure": {"value": round(nvda_exposure_twd, 2), "percent": round(nvda_pct, 1), "etfWeights": {symbol: {"weight": round(weight * 100, 2), "source": source} for symbol, (weight, source) in etf_nvda_weights.items()}},
         },
     }
