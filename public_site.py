@@ -127,4 +127,3 @@ def write_public_site(directory: str, generated_at: str) -> None:
         json.dump(build_public_payload(generated_at), file, ensure_ascii=False, indent=2)
     with open(os.path.join(directory, "status.json"), "w", encoding="utf-8") as file:
         json.dump(build_public_status(generated_at), file, ensure_ascii=False, indent=2)
-
