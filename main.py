@@ -21,6 +21,7 @@ from asset_tree import build_asset_tree
 from public_site import write_public_site
 from supabase_sync import upload_private_snapshot, upload_private_transactions
 from transaction_schema import parse_transaction_rows
+from performance import performance_breakdown
 from history_store import (
     build_header_map,
     column_to_a1,
@@ -171,7 +172,7 @@ def calculate_current_assets():
     if transaction_audits:
         write_json(".private-build/transaction_audit.json", {"strict": FORM_SCHEMA_STRICT, "sheets": transaction_audits})
     ledger_sync_result = upload_private_transactions(accepted_transactions)
-    if not data_rows: return {}, history_sheet
+    if not data_rows: return {}, history_sheet, accepted_transactions
         
     def parse_date(row):
         if not row: return datetime.datetime.min
@@ -277,7 +278,7 @@ def main():
     today_str = tw_now.strftime("%m-%d")
     display_date = tw_now.strftime("%m/%d")
         
-    inventory, history_sheet = calculate_current_assets()
+    inventory, history_sheet, accepted_transactions = calculate_current_assets()
     validate_inventory(inventory)
     validate_history_sheet(history_sheet)
     history_records = history_sheet.get_all_records()
@@ -430,6 +431,8 @@ def main():
     yesterday_net = next((float(str(row.get('Net_Asset', 0)).replace(',', '')) for row in reversed(history_records) if float(str(row.get('Net_Asset', 0)).replace(',', '')) > 0 and str(row.get('Date', ''))[-5:] != today_str), 0)
     daily_diff = net_asset - yesterday_net if yesterday_net else 0
     daily_pct = (daily_diff / yesterday_net * 100) if yesterday_net else 0
+    today_transactions = [item for item in accepted_transactions if item.transaction_date == tw_now.date()]
+    performance = performance_breakdown(net_asset, yesterday_net if yesterday_net else net_asset, today_transactions)
     sign, emoji = ("+", "📈") if daily_diff >= 0 else ("", "📉")
 
     progress_pct = (net_asset / 10000000) * 100 if net_asset > 0 else 0
@@ -1176,6 +1179,7 @@ def main():
             "risk": risk_summary,
             "stressTests": stress_scenarios,
             "categoryDailyChanges": category_daily_changes,
+            "performance": performance,
             "nvdaExposure": {"value": round(nvda_exposure_twd, 2), "percent": round(nvda_pct, 1), "etfWeights": {symbol: {"weight": round(weight * 100, 2), "source": source} for symbol, (weight, source) in etf_nvda_weights.items()}},
         },
     }
@@ -1220,6 +1224,13 @@ def main():
     tg_text = f"✅ {display_date} 結算完畢！\n{msg_body}"
 
     # --- 傳送 Telegram 訊息 ---
+    performance_message = (
+        f"\n市場損益 {performance['marketPnl']:+,.0f} 元"
+        f"\n外部現金流 {performance['externalCashFlow']:+,.0f} 元"
+        f"\n融資現金流 {performance['financingCashFlow']:+,.0f} 元"
+    )
+    tg_text = f"{tg_text}{performance_message}"
+
     keyboard = {
         "inline_keyboard": [
             [{"text": "🌱 開啟Growth儀表板", "web_app": {"url": WEB_APP_URL}}],
