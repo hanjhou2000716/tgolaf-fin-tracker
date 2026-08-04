@@ -17,6 +17,10 @@ class SupabaseContractTests(unittest.TestCase):
         function = (ROOT / "supabase" / "functions" / "portfolio-data" / "index.ts").read_text(encoding="utf-8")
         self.assertIn('return response(request, { error: "unauthorized" }, 401)', function)
         self.assertIn('auth.getUser(token)', function)
+        self.assertIn('X-Telegram-Init-Data', function)
+        self.assertIn('TELEGRAM_BOT_TOKEN', function)
+        self.assertIn('verifyTelegramInitData', function)
+        self.assertIn('TELEGRAM_ALLOWED_USER_ID', function)
         self.assertIn('allowedOrigins.includes(origin)', function)
         self.assertNotIn('Access-Control-Allow-Origin": "*"', function)
 
