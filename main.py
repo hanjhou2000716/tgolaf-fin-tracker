@@ -1106,7 +1106,6 @@ def main():
         f.write(html_content)
 
     # === [關鍵補丁]：產生網頁專用即時數據 ===
-    import os
     if not os.path.exists('public'):
         os.makedirs('public')
     
