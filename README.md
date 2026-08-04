@@ -325,6 +325,27 @@ Required GitHub Actions secrets before enabling private sync:
 `SUPABASE_PRIVATE_SYNC_REQUIRED=true` only after the migration, Edge Function,
 and target user have been provisioned in Supabase.
 
+## P0-SEC-03 Google Form 交易入口鎖定
+
+When `FORM_SCHEMA_STRICT=true` (the GitHub Actions default), Form response
+headers must include `transaction_id`, `Timestamp`, `Email Address`,
+`approved`, `transaction_date`, `asset_type`, `symbol`, `action`, `quantity`,
+`unit`, and `currency`. The parser does not scan arbitrary cells to infer a
+transaction.
+
+- `transaction_id` must be a UUID and is deduplicated across the current run.
+- `approved=false` rows go to the private transaction audit queue and do not
+  affect the portfolio.
+- Invalid action, unit, date, email, quantity, or duplicate ID is rejected and
+  recorded in `.private-build/transaction_audit.json`.
+- Taiwan lots are normalized explicitly as `1 張 = 1000 股`; unknown units are
+  rejected instead of guessed.
+
+Before enabling the strict workflow, update the Google Form to collect these
+fields and restrict responses to the approved account. Keep
+`FORM_SCHEMA_STRICT=false` only as a temporary migration switch; it retains
+the legacy parser and is not the secure production mode.
+
 Growth Actions 使用：
 
 | Secret | 用途 |
