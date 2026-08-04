@@ -23,6 +23,7 @@ from supabase_sync import upload_private_snapshot, upload_private_transactions
 from transaction_schema import parse_transaction_rows
 from performance import performance_breakdown
 from market_data import MarketDataService
+from metrics import summarize_performance
 from history_store import (
     build_header_map,
     column_to_a1,
@@ -517,6 +518,7 @@ def main():
     # Keep every daily snapshot for interactive time ranges on the web dashboard.
     chart_dates = [date[5:] for date in sorted_dates]
     chart_totals, chart_nets = all_totals, all_nets
+    performance_metrics = summarize_performance(all_nets)
     total_20ma, total_60ma = moving_average(all_totals, 20), moving_average(all_totals, 60)
     total_240ma = moving_average(all_totals, 240)
     net_20ma, net_60ma = moving_average(all_nets, 20), moving_average(all_nets, 60)
@@ -1190,6 +1192,7 @@ def main():
             "stressTests": stress_scenarios,
             "categoryDailyChanges": category_daily_changes,
             "performance": performance,
+            "performanceMetrics": performance_metrics,
             "nvdaExposure": {"value": round(nvda_exposure_twd, 2), "percent": round(nvda_pct, 1), "etfWeights": {symbol: {"weight": round(weight * 100, 2), "source": source} for symbol, (weight, source) in etf_nvda_weights.items()}},
         },
     }
