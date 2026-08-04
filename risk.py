@@ -14,7 +14,7 @@ def beta_status(capacity):
         return "🔴 加原型補現金", "risk-alert"
     if capacity >= 95:
         return "🟡 Beta維持", "risk-watch"
-    return "🟢 可加槓桿", "risk-good"
+    return "🟢 Beta容量良好", "risk-good"
 
 
 def maintenance_ratio(pledged_value, total_debt):
@@ -27,7 +27,7 @@ def maintenance_status(total_debt, ratio):
     if total_debt <= 0:
         return "✅ 無借款", "risk-good"
     if ratio >= 190:
-        return "🟢 可加槓桿", "risk-good"
+        return "🟢 維持率充足", "risk-good"
     if ratio >= 150:
         return "🟡 注意槓桿", "risk-watch"
     return "🔴 補擔保品", "risk-alert"
@@ -54,3 +54,33 @@ def stress_scenarios(asset_value, net_asset, pledged_value, pledged_006208_value
         }
         for decline in (0.10, 0.20)
     ]
+
+
+def composite_guardrails(
+    beta_capacity_value,
+    maintenance_ratio_value,
+    concentration_percent,
+    cash_percent,
+    *,
+    data_fresh=True,
+    min_cash_percent=10,
+    max_concentration_percent=35,
+):
+    """Evaluate every safety gate before any risk-increasing suggestion.
+
+    A good Beta capacity is never sufficient by itself. Stale data, weak
+    collateral, concentration, or a thin cash buffer make the guardrail fail.
+    """
+    rules = [
+        {"name": "data_fresh", "passed": bool(data_fresh), "detail": "行情與帳本資料未過期"},
+        {"name": "beta_capacity", "passed": beta_capacity_value < 115, "detail": "Beta 容量低於紅燈線"},
+        {"name": "maintenance_ratio", "passed": maintenance_ratio_value >= 150 or maintenance_ratio_value == 0, "detail": "維持率高於警戒線"},
+        {"name": "concentration", "passed": concentration_percent < max_concentration_percent, "detail": "單一標的曝險低於警示線"},
+        {"name": "cash_safety_buffer", "passed": cash_percent >= min_cash_percent, "detail": "現金安全墊達最低比例"},
+    ]
+    eligible = all(rule["passed"] for rule in rules)
+    return {
+        "eligible": eligible,
+        "recommendation": "僅可在政策允許下評估" if eligible else "禁止增加風險，先處理未通過規則",
+        "rules": rules,
+    }
