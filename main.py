@@ -27,6 +27,7 @@ from metrics import summarize_performance
 from attribution import build_pnl_attribution
 from exposure import build_exposure_matrix
 from pledge_safety import pledge_safety_center
+from alerts import AlertEngine
 from history_store import (
     build_header_map,
     column_to_a1,
@@ -490,6 +491,15 @@ def main():
         financing_cash_flow=performance["financingCashFlow"],
         external_cash_flow=performance["externalCashFlow"],
     )
+    alert_engine = AlertEngine()
+    alerts = alert_engine.evaluate({
+        "maintenanceRatio": maintenance_ratio,
+        "stressMaintenanceRatio": min((item["maintenance"] for item in stress_scenarios if item["maintenance"] is not None), default=999),
+        "maxCompanyExposure": largest_position_pct,
+        "cashMonths": 999,
+        "isStale": False,
+        "reconciled": attribution["reconciled"],
+    })
 
     def inline_daily_change(key):
         change = category_daily_changes[key]
@@ -1219,6 +1229,7 @@ def main():
             "pnlAttribution": attribution,
             "exposureMatrix": exposure_matrix,
             "pledgeSafety": pledge_safety,
+            "alerts": alerts,
             "nvdaExposure": {"value": round(nvda_exposure_twd, 2), "percent": round(nvda_pct, 1), "etfWeights": {symbol: {"weight": round(weight * 100, 2), "source": source} for symbol, (weight, source) in etf_nvda_weights.items()}},
         },
     }
