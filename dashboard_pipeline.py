@@ -36,6 +36,7 @@ from history_store import (
     find_row_by_key,
     upsert_history_snapshot,
 )
+from runtime_extensions import build_runtime_extensions
 
 # ==========================================
 # 1. 環境變數與金鑰設定
@@ -581,6 +582,20 @@ def main():
     chart_dates = [date[5:] for date in sorted_dates]
     chart_totals, chart_nets = all_totals, all_nets
     performance_metrics = summarize_performance(all_nets)
+    runtime_extensions = build_runtime_extensions(
+        net_values=all_nets,
+        net_asset=net_asset,
+        total_asset=total_asset,
+        total_debt=total_debt,
+        pledged_value=pledged_value,
+        data_as_of=tw_now.isoformat(),
+        sources={
+            "googleSheet": {"quality": "fresh" if inventory else "unavailable", "source": "Google Sheets"},
+            "marketQuotes": {"quality": "fresh" if total_asset > 0 else "unavailable", "source": "market providers"},
+        },
+        reconciled=bool(performance.get("reconciled", True)),
+        now=tw_now,
+    )
     total_20ma, total_60ma = moving_average(all_totals, 20), moving_average(all_totals, 60)
     total_240ma = moving_average(all_totals, 240)
     net_20ma, net_60ma = moving_average(all_nets, 20), moving_average(all_nets, 60)
@@ -1260,6 +1275,7 @@ def main():
             "pledgeSafety": pledge_safety,
             "alerts": alerts,
             "scenarioLab": scenario_lab,
+            "runtimeExtensions": runtime_extensions,
             "nvdaExposure": {"value": round(nvda_exposure_twd, 2), "percent": round(nvda_pct, 1), "etfWeights": {symbol: {"weight": round(weight * 100, 2), "source": source} for symbol, (weight, source) in etf_nvda_weights.items()}},
         },
     }
