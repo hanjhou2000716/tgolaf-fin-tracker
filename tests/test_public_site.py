@@ -41,6 +41,10 @@ class PublicSiteSecurityTests(unittest.TestCase):
                 self.assertIsNone(re.search(r"NT\$[0-9]", content))
             self.assertNotIn("SUPABASE_SERVICE_ROLE_KEY", private_html)
             self.assertNotIn("server-only-key", private_html)
+            self.assertIn("telegram.org/js/telegram-web-app.js", private_html)
+            self.assertIn("X-Telegram-Init-Data", private_html)
+            self.assertNotIn("signInWithPassword", private_html)
+            self.assertNotIn("SUPABASE_ANON_KEY", private_html)
 
 
 if __name__ == "__main__":

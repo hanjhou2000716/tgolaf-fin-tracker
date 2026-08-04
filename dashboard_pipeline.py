@@ -48,7 +48,7 @@ GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
 FORCE_TELEGRAM = os.getenv("FORCE_TELEGRAM", "false").strip().lower() in {"1", "true", "yes", "on"}
 FORM_SCHEMA_STRICT = os.getenv("FORM_SCHEMA_STRICT", "true").strip().lower() in {"1", "true", "yes", "on"}
 FORM_SCHEMA_LEGACY_COMPAT = os.getenv("FORM_SCHEMA_LEGACY_COMPAT", "false").strip().lower() in {"1", "true", "yes", "on"}
-WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/"
+WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/private/"
 
 
 HISTORY_EXTRA_COLUMNS = ["TW_Stock_Value", "US_Stock_Value", "Cash_Value", "Fund_Value", "NVDA_QQQM_Weight", "NVDA_SPYG_Weight", "NVDA_VOO_Weight", "Settlement_Notification_Sent_At"]

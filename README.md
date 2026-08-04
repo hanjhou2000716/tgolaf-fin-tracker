@@ -315,15 +315,23 @@ The Supabase contract is included in this repository:
   allowlist.
 - `supabase_sync.py`: CI-only upsert using `SUPABASE_SERVICE_ROLE_KEY`; this
   key is never written into HTML or JavaScript.
-- `public-site/private/index.html`: password login with the Supabase anon key,
-  followed by an authenticated request to the Edge Function.
+- `public-site/private/index.html`: Telegram WebApp entry point; it sends the
+  signed Telegram `initData` to the Edge Function, so the owner does not need
+  to enter an email or password.
 
-Required GitHub Actions secrets before enabling private sync:
+Required server-side secrets before enabling private sync:
 
-`SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_FUNCTION_URL`,
-`SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_USER_ID`. Set
+`SUPABASE_URL`, `SUPABASE_FUNCTION_URL`, `SUPABASE_SERVICE_ROLE_KEY`,
+and `SUPABASE_USER_ID` belong to GitHub Actions. `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_ALLOWED_USER_ID` belong to the Supabase Edge Function. Set
 `SUPABASE_PRIVATE_SYNC_REQUIRED=true` only after the migration, Edge Function,
 and target user have been provisioned in Supabase.
+
+The Telegram WebApp uses the existing bot token only inside the Supabase Edge
+Function. The browser receives a short-lived signed `initData` from Telegram;
+it never receives the bot token or Supabase service role key. Direct visits to
+`/private/` without Telegram remain denied, while the public root continues to
+show the Demo dataset.
 
 ## P0-SEC-03 Google Form 交易入口鎖定
 
