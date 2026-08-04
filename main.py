@@ -24,6 +24,7 @@ from transaction_schema import parse_transaction_rows
 from performance import performance_breakdown
 from market_data import MarketDataService
 from metrics import summarize_performance
+from attribution import build_pnl_attribution
 from history_store import (
     build_header_map,
     column_to_a1,
@@ -467,6 +468,16 @@ def main():
         except (TypeError, ValueError):
             previous = None
         category_daily_changes[key] = None if previous is None else {"amount": round(value - previous, 2), "percent": round((value - previous) / previous * 100, 2) if previous else 0}
+    attribution = build_pnl_attribution(
+        yesterday_net,
+        net_asset,
+        previous_categories or {},
+        category_values,
+        income=performance["income"],
+        expenses=performance["expenses"],
+        financing_cash_flow=performance["financingCashFlow"],
+        external_cash_flow=performance["externalCashFlow"],
+    )
 
     def inline_daily_change(key):
         change = category_daily_changes[key]
@@ -1193,6 +1204,7 @@ def main():
             "categoryDailyChanges": category_daily_changes,
             "performance": performance,
             "performanceMetrics": performance_metrics,
+            "pnlAttribution": attribution,
             "nvdaExposure": {"value": round(nvda_exposure_twd, 2), "percent": round(nvda_pct, 1), "etfWeights": {symbol: {"weight": round(weight * 100, 2), "source": source} for symbol, (weight, source) in etf_nvda_weights.items()}},
         },
     }
