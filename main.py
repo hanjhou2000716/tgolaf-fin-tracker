@@ -20,7 +20,7 @@ from validation import validate_history_sheet, validate_inventory, validate_quot
 from asset_tree import build_asset_tree
 from public_site import write_public_site
 from supabase_sync import upload_private_snapshot, upload_private_transactions
-from transaction_schema import parse_transaction_rows
+from transaction_schema import TransactionSchemaError, parse_transaction_rows
 from performance import performance_breakdown
 from market_data import MarketDataService
 from metrics import summarize_performance
@@ -46,6 +46,7 @@ FINMIND_TOKEN = os.getenv("FINMIND_TOKEN")
 GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
 FORCE_TELEGRAM = os.getenv("FORCE_TELEGRAM", "false").strip().lower() in {"1", "true", "yes", "on"}
 FORM_SCHEMA_STRICT = os.getenv("FORM_SCHEMA_STRICT", "true").strip().lower() in {"1", "true", "yes", "on"}
+FORM_SCHEMA_LEGACY_COMPAT = os.getenv("FORM_SCHEMA_LEGACY_COMPAT", "false").strip().lower() in {"1", "true", "yes", "on"}
 WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/"
 
 
@@ -163,17 +164,30 @@ def calculate_current_assets():
             rows = ws.get_all_values()
             if len(rows) > 1:
                 if FORM_SCHEMA_STRICT:
-                    parsed = parse_transaction_rows(
-                        rows[0],
-                        rows[1:],
-                        source_sheet=ws.title,
-                        existing_ids=seen_transaction_ids,
-                    )
-                    seen_transaction_ids.update(item.transaction_id for item in parsed.accepted)
-                    seen_transaction_ids.update(item.transaction_id for item in parsed.pending)
-                    accepted_transactions.extend(parsed.accepted)
-                    transaction_audits.append({"sheet": ws.title, **parsed.audit_payload()})
-                    data_rows.extend(parsed.accepted_rows)
+                    try:
+                        parsed = parse_transaction_rows(
+                            rows[0],
+                            rows[1:],
+                            source_sheet=ws.title,
+                            existing_ids=seen_transaction_ids,
+                        )
+                        seen_transaction_ids.update(item.transaction_id for item in parsed.accepted)
+                        seen_transaction_ids.update(item.transaction_id for item in parsed.pending)
+                        accepted_transactions.extend(parsed.accepted)
+                        transaction_audits.append({"sheet": ws.title, **parsed.audit_payload()})
+                        data_rows.extend(parsed.accepted_rows)
+                    except TransactionSchemaError as error:
+                        if not FORM_SCHEMA_LEGACY_COMPAT:
+                            raise
+                        transaction_audits.append({
+                            "sheet": ws.title,
+                            "accepted": 0,
+                            "pending": [],
+                            "rejected": [{"source_row_id": f"{ws.title}:header", "reason": "legacy_schema_compat", "detail": str(error)}],
+                        })
+                        # Existing legacy rows are retained only as a temporary
+                        # asset snapshot source while the Form is migrated.
+                        data_rows.extend(rows[1:])
                 else:
                     data_rows.extend(rows[1:])
                 
