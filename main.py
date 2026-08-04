@@ -7,7 +7,6 @@ import re
 import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
-from quotes import get_tw_stock_price
 from risk import (
     HALF_KELLY_LIMIT,
     beta_capacity as calculate_beta_capacity,
@@ -23,6 +22,7 @@ from public_site import write_public_site
 from supabase_sync import upload_private_snapshot, upload_private_transactions
 from transaction_schema import parse_transaction_rows
 from performance import performance_breakdown
+from market_data import MarketDataService
 from history_store import (
     build_header_map,
     column_to_a1,
@@ -45,6 +45,7 @@ WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/"
 
 HISTORY_EXTRA_COLUMNS = ["TW_Stock_Value", "US_Stock_Value", "Cash_Value", "Fund_Value", "NVDA_QQQM_Weight", "NVDA_SPYG_Weight", "NVDA_VOO_Weight", "Settlement_Notification_Sent_At"]
 ETF_NVDA_WEIGHT_FALLBACKS = {"QQQM": 0.095, "SPYG": 0.075, "VOO": 0.070}
+MARKET_DATA = MarketDataService()
 
 
 def settlement_notification_sent(history_sheet, snapshot_date, window_key):
@@ -293,7 +294,7 @@ def main():
 
     for symbol, shares in inventory["台股"].items():
         if symbol == "History" or shares <= 0: continue
-        price = validate_quote(symbol, get_tw_stock_price(symbol, FINMIND_TOKEN))
+        price = validate_quote(symbol, MARKET_DATA.get_taiwan(symbol, FINMIND_TOKEN).price)
         value = price * shares
         tw_stock_value += value 
         position_values_twd[symbol] = value
@@ -303,13 +304,13 @@ def main():
         elif symbol == '00685L': tsmc_exposure_twd += (value * 0.728); leveraged_etf_value = value
 
     if price_006208 <= 0 and inventory["擔保品"].get("006208", 0) > 0:
-        price_006208 = get_tw_stock_price("006208", FINMIND_TOKEN)
+        price_006208 = MARKET_DATA.get_taiwan("006208", FINMIND_TOKEN).price
 
     pledged_value, pledged_006208_value = 0, 0
     for symbol, shares in inventory["擔保品"].items():
         if symbol == "History" or shares <= 0:
             continue
-        price = price_006208 if symbol == "006208" and price_006208 > 0 else validate_quote(symbol, get_tw_stock_price(symbol, FINMIND_TOKEN))
+        price = price_006208 if symbol == "006208" and price_006208 > 0 else validate_quote(symbol, MARKET_DATA.get_taiwan(symbol, FINMIND_TOKEN).price)
         value = price * shares
         pledged_value += value
         if symbol == "006208":
