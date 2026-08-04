@@ -19,7 +19,7 @@ from risk import (
 from validation import validate_history_sheet, validate_inventory, validate_quote
 from asset_tree import build_asset_tree
 from public_site import write_public_site
-from supabase_sync import upload_private_snapshot
+from supabase_sync import upload_private_snapshot, upload_private_transactions
 from transaction_schema import parse_transaction_rows
 from history_store import (
     build_header_map,
@@ -145,7 +145,7 @@ def calculate_current_assets():
     if not sheet: raise ValueError("找不到檔案")
         
     data_rows, history_sheet = [], None
-    transaction_audits, seen_transaction_ids = [], set()
+    transaction_audits, accepted_transactions, seen_transaction_ids = [], [], set()
     for ws in sheet.worksheets():
         title_clean = ws.title.strip().lower()
         if "history" in title_clean or "歷史" in title_clean or "紀錄" in title_clean:
@@ -162,6 +162,7 @@ def calculate_current_assets():
                     )
                     seen_transaction_ids.update(item.transaction_id for item in parsed.accepted)
                     seen_transaction_ids.update(item.transaction_id for item in parsed.pending)
+                    accepted_transactions.extend(parsed.accepted)
                     transaction_audits.append({"sheet": ws.title, **parsed.audit_payload()})
                     data_rows.extend(parsed.accepted_rows)
                 else:
@@ -169,6 +170,7 @@ def calculate_current_assets():
                 
     if transaction_audits:
         write_json(".private-build/transaction_audit.json", {"strict": FORM_SCHEMA_STRICT, "sheets": transaction_audits})
+    ledger_sync_result = upload_private_transactions(accepted_transactions)
     if not data_rows: return {}, history_sheet
         
     def parse_date(row):
@@ -1197,6 +1199,7 @@ def main():
     data_for_web["status"] = data_status
     data_for_web["generatedAt"] = tw_now.isoformat()
     data_for_web["snapshotResult"] = snapshot_result
+    data_for_web["ledgerSyncResult"] = ledger_sync_result
     data_for_web["dataQuality"] = status_payload
     # Private data is retained only in the ignored build directory. GitHub
     # Pages receives a separate fixed Demo contract and never sees this
