@@ -1,0 +1,37 @@
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class OpsContractTests(unittest.TestCase):
+    def test_build_and_deploy_are_split_by_permissions(self):
+        workflow = (ROOT / ".github" / "workflows" / "cron.yml").read_text(encoding="utf-8")
+        self.assertIn("jobs:", workflow)
+        self.assertIn("build:", workflow)
+        self.assertIn("deploy:", workflow)
+        self.assertIn("contents: read", workflow)
+        self.assertIn("contents: write", workflow)
+        build_section = workflow.split("  deploy:", 1)[0]
+        self.assertNotIn("contents: write", build_section)
+        self.assertIn("upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", workflow)
+
+    def test_actions_are_pinned_to_commit_shas(self):
+        for path in (ROOT / ".github" / "workflows").glob("*.yml"):
+            content = path.read_text(encoding="utf-8")
+            for line in content.splitlines():
+                if "uses:" in line:
+                    reference = line.split("uses:", 1)[1].split("#", 1)[0].strip()
+                    self.assertRegex(reference, r"@[0-9a-f]{40}$", f"Unpinned action in {path}: {line}")
+
+    def test_dependency_lock_is_used(self):
+        lock = (ROOT / "requirements.lock").read_text(encoding="utf-8")
+        requirements = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+        for line in requirements.splitlines():
+            if line and not line.startswith("#"):
+                self.assertIn(line, lock)
+
+
+if __name__ == "__main__":
+    unittest.main()
