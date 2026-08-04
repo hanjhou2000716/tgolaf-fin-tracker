@@ -15,6 +15,7 @@ from risk import (
     maintenance_ratio as calculate_maintenance_ratio,
     maintenance_status,
     stress_scenarios as build_stress_scenarios,
+    composite_guardrails,
 )
 from validation import validate_history_sheet, validate_inventory, validate_quote
 from asset_tree import build_asset_tree
@@ -366,6 +367,13 @@ def main():
     us_largest_symbol, us_largest_value = max(us_position_values.items(), key=lambda item: item[1], default=("—", 0))
     tw_largest_pct = (tw_largest_value / total_asset * 100) if total_asset else 0
     us_largest_pct = (us_largest_value / total_asset * 100) if total_asset else 0
+    guardrails = composite_guardrails(
+        beta_capacity,
+        maintenance_ratio,
+        largest_position_pct,
+        (total_cash_twd / total_asset * 100) if total_asset else 0,
+        data_fresh=True,
+    )
     # 資產板塊採用可動用台股／質押借款／現貨美股的風險視角。
     # 質押台股此處代表借款金額，而非擔保品的市值。
     spot_tw_value = max(0, tw_stock_value - total_debt)
@@ -726,7 +734,7 @@ def main():
             <div class="risk-section">
                 <div class="sec-title" style="margin-bottom:10px;">槓桿 <span class="sec-note">Leverage &amp; collateral</span></div>
                 <div class="risk-pair">
-                    <div class="risk-column"><span class="metric-label">有效Beta</span><strong>{effective_leverage:.2f} ×</strong><div class="risk-detail"><span class="risk-detail-label">凱利安全邊界</span><span class="risk-detail-value">{half_kelly_limit:.2f} 倍</span><span class="status {beta_status_class}">{beta_status}</span><span class="capacity {beta_status_class}">容量: {beta_capacity:.1f}%</span></div></div>
+                    <div class="risk-column"><span class="metric-label">有效Beta</span><strong>{effective_leverage:.2f} ×</strong><div class="risk-detail"><span class="risk-detail-label">凱利安全邊界</span><span class="risk-detail-value">{half_kelly_limit:.2f} 倍</span><span class="status {beta_status_class}">{beta_status}</span><span class="capacity {beta_status_class}">容量: {beta_capacity:.1f}%</span><span class="capacity {'risk-good' if guardrails['eligible'] else 'risk-alert'}">Guardrail：{guardrails['recommendation']}</span></div></div>
                     <div class="risk-column"><span class="metric-label">質押借款</span><strong class="risk-alert">${total_debt:,.0f}</strong><small>含利息 ${accumulated_interest:,.0f}</small><div class="risk-detail"><span class="risk-detail-label">質押維持率</span><span class="risk-detail-value {maintenance_status_class}">{maintenance_ratio:.1f}%</span><span class="status {maintenance_status_class}">{ratio_status}</span></div></div>
                 </div>
             </div>
@@ -1147,7 +1155,7 @@ def main():
     for item in allocation_items:
         item["percent"] = round((item["value"] / total_asset * 100), 1) if total_asset > 0 else 0
 
-    risk_level = "attention" if ((maintenance_ratio and maintenance_ratio < 150) or largest_position_pct >= 35) else "watch" if (debt_ratio >= 25 or tsmc_pct >= 35 or largest_position_pct >= 20) else "stable"
+    risk_level = "attention" if (not guardrails["eligible"] or (maintenance_ratio and maintenance_ratio < 150) or largest_position_pct >= 35) else "watch" if (debt_ratio >= 25 or tsmc_pct >= 35 or largest_position_pct >= 20) else "stable"
     risk_summary = {
         "level": risk_level,
         "debtRatio": round(debt_ratio, 1),
@@ -1156,6 +1164,7 @@ def main():
         "effectiveLeverage": round(effective_leverage, 2),
         "largestPosition": {"symbol": largest_symbol, "value": round(largest_position_value, 2), "percent": round(largest_position_pct, 1), "status": largest_position_status},
         "nvdaExposureRatio": round(nvda_pct, 1),
+        "guardrails": guardrails,
     }
 
     data_for_web = {
