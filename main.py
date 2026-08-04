@@ -275,7 +275,7 @@ def calculate_current_assets():
         if asset_type == "質押負債": inventory["質押負債"]["History"].append((row_date, inventory["質押負債"]["Current_Debt"]))
         elif asset_type == "質押利率": inventory["質押利率"]["History"].append((row_date, inventory["質押利率"]["Rate"]))
 
-    return inventory, history_sheet
+    return inventory, history_sheet, accepted_transactions
 
 # ==========================================
 # 3. 金融市場報價模組
