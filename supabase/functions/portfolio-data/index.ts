@@ -1,10 +1,20 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
-const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
+const secretKeys = (() => {
+  try {
+    return JSON.parse(Deno.env.get("SUPABASE_SECRET_KEYS") ?? "{}");
+  } catch {
+    return {};
+  }
+})();
+const serviceRoleKey = Deno.env.get("PORTFOLIO_SERVICE_ROLE_KEY")
+  ?? Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")
+  ?? secretKeys.default
+  ?? "";
 const telegramBotToken = Deno.env.get("TELEGRAM_BOT_TOKEN") ?? Deno.env.get("TELEGRAM_TOKEN") ?? "";
 const telegramAllowedUserId = Deno.env.get("TELEGRAM_ALLOWED_USER_ID") ?? Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
-const supabaseUserId = Deno.env.get("SUPABASE_USER_ID") ?? "";
+const portfolioUserId = Deno.env.get("PORTFOLIO_USER_ID") ?? "";
 const telegramInitDataMaxAgeSeconds = 300;
 const allowedOrigins = (Deno.env.get("CORS_ALLOWLIST") ?? "")
   .split(",")
@@ -53,7 +63,7 @@ const safeEqual = (left: string, right: string) => {
 };
 
 const verifyTelegramInitData = async (initData: string) => {
-  if (!telegramBotToken || !telegramAllowedUserId || !supabaseUserId) {
+  if (!telegramBotToken || !telegramAllowedUserId || !portfolioUserId) {
     throw new Error("telegram_auth_not_configured");
   }
   const params = new URLSearchParams(initData);
@@ -80,7 +90,7 @@ const verifyTelegramInitData = async (initData: string) => {
     throw new Error("telegram_user_invalid");
   }
   if (String(user.id ?? "") !== String(telegramAllowedUserId)) throw new Error("telegram_user_not_allowed");
-  return supabaseUserId;
+  return portfolioUserId;
 };
 
 Deno.serve(async (request) => {

@@ -4,16 +4,18 @@ Deploy after applying the migration:
 
 ```bash
 supabase functions deploy portfolio-data --no-verify-jwt
-supabase secrets set SUPABASE_SERVICE_ROLE_KEY=... SUPABASE_USER_ID=... TELEGRAM_BOT_TOKEN=... TELEGRAM_ALLOWED_USER_ID=... CORS_ALLOWLIST=https://hanjhou2000716.github.io
+supabase secrets set PORTFOLIO_USER_ID=... TELEGRAM_BOT_TOKEN=... TELEGRAM_ALLOWED_USER_ID=... CORS_ALLOWLIST=https://hanjhou2000716.github.io
 ```
 
 The function accepts either a Supabase access token or Telegram WebApp
 `initData`. Telegram data is verified with the bot token, checked for a fresh
 `auth_date`, and restricted to `TELEGRAM_ALLOWED_USER_ID`; it is then mapped to
-the configured `SUPABASE_USER_ID`. Missing, expired, or tampered credentials
+the configured `PORTFOLIO_USER_ID`. Missing, expired, or tampered credentials
 return `401`.
-The service role key is only a server-side Supabase secret. It must never be
-placed in `public-site/private/index.html` or any other browser asset.
+The function reads the server-side key from Supabase's reserved
+`SUPABASE_SECRET_KEYS` default (or an optional `PORTFOLIO_SERVICE_ROLE_KEY`
+custom secret). It must never be placed in `public-site/private/index.html`
+or any other browser asset.
 
 Acceptance checks:
 
