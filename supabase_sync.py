@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 
 import requests
+from ledger import transaction_payload
 
 
 def _required_config():
@@ -52,3 +53,73 @@ def upload_private_snapshot(path: str, *, session=None) -> str:
     response.raise_for_status()
     print("Supabase private snapshot uploaded")
     return "uploaded"
+
+
+def upload_private_transactions(transactions, *, session=None) -> str:
+    """Append transactions without overwriting existing ledger entries.
+
+    Existing UUIDs are compared before inserts. A matching replay is ignored;
+    reusing an UUID with different content fails closed as an immutable-ledger
+    conflict. The service-role key is only read inside this server-side job.
+    """
+    config = _required_config()
+    required = os.getenv("SUPABASE_PRIVATE_SYNC_REQUIRED", "false").lower() in {"1", "true", "yes", "on"}
+    if not transactions:
+        return "skipped"
+    if not all(config.values()):
+        if required:
+            raise RuntimeError("Supabase transaction sync is required but credentials are missing")
+        print("Supabase transaction sync skipped; credentials are not configured")
+        return "skipped"
+
+    payloads = [transaction_payload(transaction) for transaction in transactions]
+    ids = [payload["transaction_id"] for payload in payloads]
+    headers = {
+        "apikey": config["service_role_key"],
+        "Authorization": f"Bearer {config['service_role_key']}",
+        "Content-Type": "application/json",
+    }
+    http = session or requests
+    response = http.get(
+        f"{config['url']}/rest/v1/portfolio_transactions",
+        headers=headers,
+        params={
+            "user_id": f"eq.{config['user_id']}",
+            "transaction_id": f"in.({','.join(ids)})",
+            "select": "transaction_id,payload",
+        },
+        timeout=20,
+    )
+    response.raise_for_status()
+    existing = {str(row["transaction_id"]): row.get("payload", {}) for row in response.json()}
+    for payload in payloads:
+        previous = existing.get(payload["transaction_id"])
+        if previous is not None and previous != payload:
+            raise RuntimeError(
+                f"immutable ledger conflict for transaction_id {payload['transaction_id']}"
+            )
+
+    missing = [payload for payload in payloads if payload["transaction_id"] not in existing]
+    if missing:
+        rows = [
+            {
+                "user_id": config["user_id"],
+                "transaction_id": payload["transaction_id"],
+                "source_row_id": payload["source_row_id"],
+                "reversal_of": payload.get("reversal_of"),
+                "payload": payload,
+            }
+            for payload in missing
+        ]
+        insert_headers = {**headers, "Prefer": "resolution=ignore-duplicates,return=minimal"}
+        insert_response = http.post(
+            f"{config['url']}/rest/v1/portfolio_transactions",
+            headers=insert_headers,
+            json=rows,
+            timeout=20,
+        )
+        insert_response.raise_for_status()
+        print(f"Supabase transactions appended: {len(missing)}")
+        return "uploaded"
+    print("Supabase transactions already synchronized")
+    return "unchanged"

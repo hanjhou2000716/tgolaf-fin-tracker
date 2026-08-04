@@ -20,6 +20,15 @@ class SupabaseContractTests(unittest.TestCase):
         self.assertIn('allowedOrigins.includes(origin)', function)
         self.assertNotIn('Access-Control-Allow-Origin": "*"', function)
 
+    def test_transaction_ledger_is_append_only_and_user_scoped(self):
+        migration = (ROOT / "supabase" / "migrations" / "20260804010000_portfolio_transactions.sql").read_text(encoding="utf-8")
+        self.assertIn("portfolio_transactions_user_transaction_key", migration)
+        self.assertIn("enable row level security", migration.lower())
+        self.assertIn("auth.uid() = user_id", migration)
+        self.assertIn("revoke all on table public.portfolio_transactions from anon", migration.lower())
+        self.assertNotIn("for insert", migration.lower())
+        self.assertNotIn("for update", migration.lower())
+
 
 if __name__ == "__main__":
     unittest.main()

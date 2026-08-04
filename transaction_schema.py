@@ -24,6 +24,7 @@ class Action(str, Enum):
     SPIN_OFF = "SPIN_OFF"
     TRANSFER = "TRANSFER"
     FX_CONVERSION = "FX_CONVERSION"
+    REVERSAL = "REVERSAL"
 
 
 class TransactionSchemaError(ValueError):
@@ -45,6 +46,7 @@ class Transaction:
     unit: str
     currency: str
     price: Decimal | None = None
+    reversal_of: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +113,7 @@ HEADER_ALIASES = {
     "unit": ("unit", "單位"),
     "currency": ("currency", "幣別"),
     "price": ("price", "價格", "成交價"),
+    "reversal_of": ("reversal_of", "reversal of", "reversal_transaction_id"),
 }
 
 
@@ -168,7 +171,9 @@ def parse_quantity(value, unit) -> tuple[Decimal, str]:
 
 
 def _value(row: Sequence[str], mapping: dict[str, int], field: str) -> str:
-    index = mapping[field]
+    index = mapping.get(field)
+    if index is None:
+        return ""
     return str(row[index]).strip() if index < len(row) else ""
 
 
@@ -208,6 +213,7 @@ def _parse_action(value: str) -> Action:
         "分拆": Action.SPIN_OFF,
         "轉移": Action.TRANSFER,
         "換匯": Action.FX_CONVERSION,
+        "REVERSAL": Action.REVERSAL,
     }
     if normalized in aliases:
         return aliases[normalized]
@@ -257,9 +263,12 @@ def parse_transaction_rows(
                 unit=canonical_unit,
                 currency=_value(row, mapping, "currency").upper(),
                 price=price,
+                reversal_of=_value(row, mapping, "reversal_of") or None,
             )
             if not transaction.currency:
                 raise ValueError("currency is required")
+            if transaction.action == Action.REVERSAL and not transaction.reversal_of:
+                raise ValueError("REVERSAL requires reversal_of")
             if not approved:
                 pending.append(transaction)
             else:
