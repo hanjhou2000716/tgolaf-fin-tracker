@@ -3,3 +3,6 @@ __pycache__/
 public/
 .private-build/
 public-site/
+.env
+.env.*
+!.env.example

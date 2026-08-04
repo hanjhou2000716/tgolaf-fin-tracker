@@ -48,6 +48,12 @@ jobs:
           GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
           FORCE_TELEGRAM: ${{ inputs.force_telegram || false }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+          SUPABASE_FUNCTION_URL: ${{ secrets.SUPABASE_FUNCTION_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_USER_ID: ${{ secrets.SUPABASE_USER_ID }}
+          SUPABASE_PRIVATE_SYNC_REQUIRED: ${{ secrets.SUPABASE_PRIVATE_SYNC_REQUIRED || 'false' }}
         run: python main.py
       - name: Verify generated public Demo is sanitized
         run: |
@@ -55,8 +61,12 @@ jobs:
           test -s public-site/data.public.json
           test -s public-site/status.json
           test ! -e public-site/data.json
-          if grep -Eqi 'totalAsset|assetTree|netAsset|006208|QQQM|2330|TSM|NT\$[0-9]' public-site/index.html public-site/data.public.json; then
+          if grep -R -Eqi '006208|QQQM|2330|TSM|NT\$[0-9]' public-site; then
             echo "Public Demo contains private portfolio markers"
+            exit 1
+          fi
+          if grep -R -Eqi 'SUPABASE_SERVICE_ROLE_KEY|service_role_key' public-site; then
+            echo "Public site contains a service role marker"
             exit 1
           fi
           python -m json.tool public-site/data.public.json > /dev/null
