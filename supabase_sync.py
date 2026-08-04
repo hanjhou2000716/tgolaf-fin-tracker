@@ -1,11 +1,23 @@
 """Upload the private snapshot to Supabase without exposing service credentials."""
 
 import json
+import math
 import os
 from pathlib import Path
 
 import requests
 from ledger import transaction_payload
+
+
+def _finite_json(value):
+    """Convert non-finite floats to JSON null before external writes."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: _finite_json(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_finite_json(item) for item in value]
+    return value
 
 
 def _required_config():
@@ -32,7 +44,7 @@ def upload_private_snapshot(path: str, *, session=None) -> str:
         print("Supabase private sync skipped; credentials are not configured")
         return "skipped"
 
-    snapshot = json.loads(Path(path).read_text(encoding="utf-8"))
+    snapshot = _finite_json(json.loads(Path(path).read_text(encoding="utf-8")))
     generated_at = snapshot.get("generatedAt")
     if not generated_at:
         raise ValueError("Private snapshot is missing generatedAt")
