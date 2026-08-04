@@ -195,7 +195,7 @@ def calculate_current_assets():
     if transaction_audits:
         write_json(".private-build/transaction_audit.json", {"strict": FORM_SCHEMA_STRICT, "sheets": transaction_audits})
     ledger_sync_result = upload_private_transactions(accepted_transactions)
-    if not data_rows: return {}, history_sheet, accepted_transactions
+    if not data_rows: return {}, history_sheet, accepted_transactions, ledger_sync_result
         
     def parse_date(row):
         if not row: return datetime.datetime.min
@@ -276,7 +276,7 @@ def calculate_current_assets():
         if asset_type == "質押負債": inventory["質押負債"]["History"].append((row_date, inventory["質押負債"]["Current_Debt"]))
         elif asset_type == "質押利率": inventory["質押利率"]["History"].append((row_date, inventory["質押利率"]["Rate"]))
 
-    return inventory, history_sheet, accepted_transactions
+    return inventory, history_sheet, accepted_transactions, ledger_sync_result
 
 # ==========================================
 # 3. 金融市場報價模組
@@ -301,7 +301,7 @@ def main():
     today_str = tw_now.strftime("%m-%d")
     display_date = tw_now.strftime("%m/%d")
         
-    inventory, history_sheet, accepted_transactions = calculate_current_assets()
+    inventory, history_sheet, accepted_transactions, ledger_sync_result = calculate_current_assets()
     validate_inventory(inventory)
     validate_history_sheet(history_sheet)
     history_records = history_sheet.get_all_records()
