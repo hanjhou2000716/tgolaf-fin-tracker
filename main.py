@@ -21,6 +21,13 @@ from asset_tree import build_asset_tree
 from public_site import write_public_site
 from supabase_sync import upload_private_snapshot
 from transaction_schema import parse_transaction_rows
+from history_store import (
+    build_header_map,
+    column_to_a1,
+    ensure_history_columns,
+    find_row_by_key,
+    upsert_history_snapshot,
+)
 
 # ==========================================
 # 1. 環境變數與金鑰設定
@@ -38,84 +45,54 @@ HISTORY_EXTRA_COLUMNS = ["TW_Stock_Value", "US_Stock_Value", "Cash_Value", "Fund
 ETF_NVDA_WEIGHT_FALLBACKS = {"QQQM": 0.095, "SPYG": 0.075, "VOO": 0.070}
 
 
-def ensure_history_columns(history_sheet):
-    """Append fields used by portfolio analytics without changing existing history."""
-    if history_sheet is None:
-        return
-    header = history_sheet.row_values(1)
-    for column in HISTORY_EXTRA_COLUMNS:
-        if column not in header:
-            history_sheet.update_cell(1, len(header) + 1, column)
-            header.append(column)
-
-
-def upsert_history_snapshot(history_sheet, snapshot_date, values):
-    """Keep one end-of-day snapshot per Taiwan calendar date."""
-    if history_sheet is None:
-        return "skipped"
-
-    snapshot = [snapshot_date, *values]
-    rows = history_sheet.get_all_values()
-    for row_number in range(len(rows), 1, -1):
-        row = rows[row_number - 1]
-        if row and str(row[0]).strip()[:10] == snapshot_date:
-            history_sheet.update(f"A{row_number}:{chr(64 + len(snapshot))}{row_number}", [snapshot])
-            return "updated"
-
-    history_sheet.append_row(snapshot)
-    return "created"
-
-
 def settlement_notification_sent(history_sheet, snapshot_date, window_key):
     """Read the durable per-day/per-window notification marker from History."""
     if history_sheet is None:
         return False
-    header = history_sheet.row_values(1)
-    try:
-        marker_index = header.index("Settlement_Notification_Sent_At")
-    except ValueError:
+    header_map = build_header_map(history_sheet.row_values(1))
+    marker_column = header_map.get("Settlement_Notification_Sent_At")
+    if not marker_column:
         return False
-    for row in reversed(history_sheet.get_all_values()[1:]):
-        if row and str(row[0]).strip()[:10] == snapshot_date:
-            raw_marker = str(row[marker_index]).strip() if len(row) > marker_index else ""
-            if not raw_marker:
-                return False
-            try:
-                markers = json.loads(raw_marker)
-            except json.JSONDecodeError:
-                # Legacy single-timestamp markers do not identify a window;
-                # allow both new settlement windows to send once after rollout.
-                return False
-            return isinstance(markers, dict) and bool(markers.get(window_key))
-    return False
+    row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
+    if row_number is None:
+        return False
+    row = history_sheet.row_values(row_number)
+    raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
+    if not raw_marker:
+        return False
+    try:
+        markers = json.loads(raw_marker)
+    except json.JSONDecodeError:
+        # Legacy single-timestamp markers do not identify a window; allow both
+        # new settlement windows to send once after rollout.
+        return False
+    return isinstance(markers, dict) and bool(markers.get(window_key))
 
 
 def mark_settlement_notification_sent(history_sheet, snapshot_date, window_key, sent_at):
     if history_sheet is None:
         return
-    header = history_sheet.row_values(1)
-    try:
-        marker_column = header.index("Settlement_Notification_Sent_At") + 1
-    except ValueError:
+    header_map = build_header_map(history_sheet.row_values(1))
+    marker_column = header_map.get("Settlement_Notification_Sent_At")
+    if not marker_column:
         return
-    all_rows = history_sheet.get_all_values()
-    for row_number in range(len(all_rows), 1, -1):
-        row = history_sheet.row_values(row_number)
-        if row and str(row[0]).strip()[:10] == snapshot_date:
-            raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
-            try:
-                markers = json.loads(raw_marker) if raw_marker else {}
-            except json.JSONDecodeError:
-                markers = {}
-            if not isinstance(markers, dict):
-                markers = {}
-            markers[window_key] = sent_at
-            history_sheet.update_cell(
-                row_number,
-                marker_column,
-                json.dumps(markers, ensure_ascii=False, separators=(",", ":")),
-            )
-            return
+    row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
+    if row_number is None:
+        return
+    row = history_sheet.row_values(row_number)
+    raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
+    try:
+        markers = json.loads(raw_marker) if raw_marker else {}
+    except json.JSONDecodeError:
+        markers = {}
+    if not isinstance(markers, dict):
+        markers = {}
+    markers[window_key] = sent_at
+    marker_a1 = column_to_a1(marker_column)
+    history_sheet.update(
+        f"{marker_a1}{row_number}",
+        [[json.dumps(markers, ensure_ascii=False, separators=(",", ":"))]],
+    )
 
 
 def get_etf_nvda_weight(symbol, history_records):
@@ -490,12 +467,22 @@ def main():
 
     snapshot_result = "skipped"
     if total_asset > 0:
-        ensure_history_columns(history_sheet)
-        snapshot_result = upsert_history_snapshot(
-            history_sheet,
-            tw_now.strftime("%Y-%m-%d"),
-            [round(total_asset, 2), round(net_asset, 2), round(total_debt, 2), round(tsmc_exposure_twd, 2), round(tw_stock_value, 2), round(us_stock_value_twd, 2), round(total_cash_twd, 2), round(fund_value, 2), *[round(etf_nvda_weights[symbol][0], 6) for symbol in ETF_NVDA_WEIGHT_FALLBACKS]],
-        )
+        ensure_history_columns(history_sheet, HISTORY_EXTRA_COLUMNS)
+        snapshot_values = {
+            "Date": tw_now.strftime("%Y-%m-%d"),
+            "Total_Asset": round(total_asset, 2),
+            "Net_Asset": round(net_asset, 2),
+            "Total_Debt": round(total_debt, 2),
+            "TSMC_Exposure": round(tsmc_exposure_twd, 2),
+            "TW_Stock_Value": round(tw_stock_value, 2),
+            "US_Stock_Value": round(us_stock_value_twd, 2),
+            "Cash_Value": round(total_cash_twd, 2),
+            "Fund_Value": round(fund_value, 2),
+            "NVDA_QQQM_Weight": round(etf_nvda_weights["QQQM"][0], 6),
+            "NVDA_SPYG_Weight": round(etf_nvda_weights["SPYG"][0], 6),
+            "NVDA_VOO_Weight": round(etf_nvda_weights["VOO"][0], 6),
+        }
+        snapshot_result = upsert_history_snapshot(history_sheet, snapshot_values)
 
     daily_net_history, daily_total_history = {}, {}
     for row in history_records:
