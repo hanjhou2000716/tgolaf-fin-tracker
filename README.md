@@ -322,7 +322,8 @@ The Supabase contract is included in this repository:
 Required server-side secrets before enabling private sync:
 
 `SUPABASE_URL`, `SUPABASE_FUNCTION_URL`, `SUPABASE_SERVICE_ROLE_KEY`,
-and `SUPABASE_USER_ID` belong to GitHub Actions. `TELEGRAM_BOT_TOKEN` and
+and `SUPABASE_USER_ID` belong to GitHub Actions. `PORTFOLIO_USER_ID`,
+`TELEGRAM_BOT_TOKEN` and
 `TELEGRAM_ALLOWED_USER_ID` belong to the Supabase Edge Function. Set
 `SUPABASE_PRIVATE_SYNC_REQUIRED=true` only after the migration, Edge Function,
 and target user have been provisioned in Supabase.

@@ -21,6 +21,8 @@ class SupabaseContractTests(unittest.TestCase):
         self.assertIn('TELEGRAM_BOT_TOKEN', function)
         self.assertIn('verifyTelegramInitData', function)
         self.assertIn('TELEGRAM_ALLOWED_USER_ID', function)
+        self.assertIn('PORTFOLIO_USER_ID', function)
+        self.assertIn('SUPABASE_SECRET_KEYS', function)
         self.assertIn('allowedOrigins.includes(origin)', function)
         self.assertNotIn('Access-Control-Allow-Origin": "*"', function)
 
