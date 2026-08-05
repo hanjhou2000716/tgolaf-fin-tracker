@@ -57,9 +57,13 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertIn("X-Telegram-Init-Data", private_html)
             self.assertIn("../PRStK-Remove.png", private_html)
             self.assertIn("../SFC.e-removebg-preview.png", private_html)
+            self.assertIn('<span class="growth">Growth</span>', private_html)
+            self.assertNotIn("Growth · Private", private_html)
             self.assertIn("總資產月線", private_html)
             self.assertIn("總資產季線", private_html)
             self.assertIn("總資產年線", private_html)
+            self.assertIn("開啟 Skynet Monitoring", private_html)
+            self.assertIn("新增資產資料", private_html)
             self.assertNotIn("signInWithPassword", private_html)
             self.assertNotIn("SUPABASE_ANON_KEY", private_html)
 

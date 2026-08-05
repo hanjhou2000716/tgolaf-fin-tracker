@@ -134,7 +134,7 @@ PRIVATE_HTML_TEMPLATE = """<!doctype html>
 </head>
 <body>
   <main>
-    <div class="brand">PRStK · SFC.e · Growth · Private</div>
+    <div class="brand">PRStK · SFC.e · Growth</div>
     <section class="card" id="loginCard">
       <h1>登入 Growth Dashboard</h1>
       <p>私有資產資料只會透過 Supabase Auth + RLS 驗證後 API 取得。此頁面不包含任何資產數字或持倉。</p>
@@ -216,7 +216,7 @@ TELEGRAM_PRIVATE_HTML_TEMPLATE = """<!doctype html>
 </head>
 <body>
 <main>
-  <div class="brand"><img class="prstk" src="../PRStK-Remove.png" alt="PRStK"><span class="divider">|</span><img class="sfce" src="../SFC.e-removebg-preview.png" alt="SFC.e"><span class="divider">|</span><span class="growth">Growth · Private</span></div>
+  <div class="brand"><img class="prstk" src="../PRStK-Remove.png" alt="PRStK"><span class="divider">|</span><img class="sfce" src="../SFC.e-removebg-preview.png" alt="SFC.e"><span class="divider">|</span><span class="growth">Growth</span></div>
   <div id="loading" class="card"><strong>Growth Dashboard</strong><p>正在從 Telegram 驗證並載入完整私有資料…</p></div>
   <div id="dashboard" hidden>
     <section class="hero"><p class="eyebrow">Portfolio overview</p><div class="hero-line"><div><div class="hero-label">淨資產 Net</div><div id="netAsset" class="hero-value">—</div></div></div><div class="status-row"><span id="dailyChange" class="pill">今日 —</span><span id="sync" class="pill sync">資料同步 · —</span></div><div class="metrics"><div class="metric"><span>總資產</span><strong id="totalAsset">—</strong></div><div class="metric"><span>總負債</span><strong id="totalDebt">—</strong></div><div class="metric"><span>負債比</span><strong id="debtRatio">—</strong></div></div></section>
