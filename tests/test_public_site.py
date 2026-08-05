@@ -30,7 +30,17 @@ class PublicSiteSecurityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             write_public_site(directory, "2026-08-04T12:00:00+08:00")
             files = {path.name for path in Path(directory).iterdir()}
-            self.assertEqual(files, {"index.html", "data.public.json", "status.json", "private"})
+            self.assertEqual(
+                files,
+                {
+                    "index.html",
+                    "data.public.json",
+                    "status.json",
+                    "private",
+                    "PRStK-Remove.png",
+                    "SFC.e-removebg-preview.png",
+                },
+            )
             html = (Path(directory) / "index.html").read_text(encoding="utf-8")
             data = (Path(directory) / "data.public.json").read_text(encoding="utf-8")
             private_html = (Path(directory) / "private" / "index.html").read_text(encoding="utf-8")
@@ -45,6 +55,15 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertNotIn("server-only-key", private_html)
             self.assertIn("telegram.org/js/telegram-web-app.js", private_html)
             self.assertIn("X-Telegram-Init-Data", private_html)
+            self.assertIn("../PRStK-Remove.png", private_html)
+            self.assertIn("../SFC.e-removebg-preview.png", private_html)
+            self.assertIn('<span class="growth">Growth</span>', private_html)
+            self.assertNotIn("Growth · Private", private_html)
+            self.assertIn("總資產月線", private_html)
+            self.assertIn("總資產季線", private_html)
+            self.assertIn("總資產年線", private_html)
+            self.assertIn("開啟 Skynet Monitoring", private_html)
+            self.assertIn("新增資產資料", private_html)
             self.assertNotIn("signInWithPassword", private_html)
             self.assertNotIn("SUPABASE_ANON_KEY", private_html)
 
