@@ -6,7 +6,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 import re
 from typing import Sequence
-from uuid import UUID
+from uuid import UUID, NAMESPACE_URL, uuid5
 
 
 class Action(str, Enum):
@@ -116,6 +116,14 @@ HEADER_ALIASES = {
     "reversal_of": ("reversal_of", "reversal of", "reversal_transaction_id"),
 }
 
+COMPACT_DESCRIPTION_ALIASES = (
+    "交易內容",
+    "交易内容",
+    "交易描述",
+    "description",
+    "transaction_text",
+)
+
 
 def _normalize_header(value) -> str:
     return re.sub(r"[\s:_\-（）()]+", "", str(value or "").strip().lower())
@@ -193,11 +201,27 @@ def _parse_date(value: str) -> date:
         try:
             return date.fromisoformat(value[:10].replace("/", "-"))
         except ValueError as error:
+            for fmt in ("%m/%d/%Y %H:%M:%S", "%Y/%m/%d %H:%M:%S", "%Y-%m-%d %H:%M:%S"):
+                try:
+                    return datetime.strptime(value.strip(), fmt).date()
+                except ValueError:
+                    continue
             raise ValueError("transaction_date must be ISO date") from error
 
 
 def _parse_action(value: str) -> Action:
     normalized = _normalize_header(value).upper()
+    # Google Forms choice labels may include both the user-facing synonym and
+    # the sign, e.g. "買入 / 存入 (+)".  Resolve the explicit leading action
+    # before applying the exact alias table.
+    if "買入" in normalized or "買進" in normalized:
+        return Action.BUY
+    if "賣出" in normalized:
+        return Action.SELL
+    if "存入" in normalized:
+        return Action.DEPOSIT
+    if "提領" in normalized:
+        return Action.WITHDRAWAL
     aliases = {
         "買入": Action.BUY,
         "賣出": Action.SELL,
@@ -228,6 +252,22 @@ def parse_transaction_rows(
     source_sheet: str,
     existing_ids: set[str] | None = None,
 ) -> TransactionParseResult:
+    normalized_headers = {_normalize_header(value): index for index, value in enumerate(headers)}
+    compact_index = next(
+        (normalized_headers.get(_normalize_header(alias)) for alias in COMPACT_DESCRIPTION_ALIASES
+         if normalized_headers.get(_normalize_header(alias)) is not None),
+        None,
+    )
+    if compact_index is not None:
+        return _parse_compact_transaction_rows(
+            headers,
+            rows,
+            source_sheet=source_sheet,
+            existing_ids=existing_ids,
+            compact_index=compact_index,
+            normalized_headers=normalized_headers,
+        )
+
     mapping = resolve_headers(headers)
     seen = set(existing_ids or set())
     accepted, pending, rejected, accepted_rows = [], [], [], []
@@ -275,6 +315,168 @@ def parse_transaction_rows(
                 accepted.append(transaction)
                 accepted_rows.append(row)
             seen.add(transaction_id)
+        except (ValueError, InvalidOperation) as error:
+            rejected.append(RejectedTransaction(source_row_id, "invalid_transaction", str(error)))
+    return TransactionParseResult(tuple(accepted), tuple(pending), tuple(rejected), tuple(accepted_rows))
+
+
+def _parse_compact_transaction_rows(
+    headers: Sequence[str],
+    rows: Sequence[Sequence[str]],
+    *,
+    source_sheet: str,
+    existing_ids: set[str] | None,
+    compact_index: int,
+    normalized_headers: dict[str, int],
+) -> TransactionParseResult:
+    """Parse the four-field form while producing the canonical ledger object."""
+    from compact_transaction import parse_compact_transaction
+
+    def index_for(*aliases: str) -> int | None:
+        for alias in aliases:
+            index = normalized_headers.get(_normalize_header(alias))
+            if index is not None:
+                return index
+            alias_key = _normalize_header(alias)
+            if alias_key:
+                for header_key, header_index in normalized_headers.items():
+                    if alias_key in header_key:
+                        return header_index
+        return None
+
+    timestamp_index = index_for("Timestamp", "submitted_at", "提交時間")
+    email_index = index_for("Email Address", "email", "submitter_email", "提交者 Email")
+    if timestamp_index is None or email_index is None:
+        raise TransactionSchemaError("Compact form requires Timestamp and Email Address")
+
+    date_index = index_for("transaction_date", "交易日期", "日期")
+    approved_index = index_for("approved", "核准", "審核狀態")
+    price_index = index_for("price", "價格", "價格／匯率", "價格/匯率")
+    id_index = index_for("transaction_id", "transaction id", "交易編號", "uuid")
+    legacy_indices = {
+        "asset_type": index_for("asset_type", "asset type", "資產類別"),
+        "symbol": index_for("symbol", "資產代號", "標的"),
+        "action": index_for("action", "交易類型"),
+        "quantity": index_for("quantity", "數量", "數量/股數/金額"),
+        "unit": index_for("unit", "單位"),
+        "currency": index_for("currency", "幣別"),
+    }
+    has_legacy_columns = all(index is not None for index in legacy_indices.values())
+    seen = set(existing_ids or set())
+    accepted, pending, rejected, accepted_rows = [], [], [], []
+    mode_by_action = {
+        Action.BUY: "買入",
+        Action.SELL: "賣出",
+        Action.DEPOSIT: "存入",
+        Action.WITHDRAWAL: "提領",
+        Action.DIVIDEND: "存入",
+        Action.INTEREST: "存入",
+        Action.FEE: "提領",
+        Action.TAX: "提領",
+        Action.BORROW: "存入",
+        Action.REPAY: "提領",
+    }
+
+    for row_number, raw_row in enumerate(rows, start=2):
+        row = tuple(str(value) for value in raw_row)
+        source_row_id = f"{source_sheet}:{row_number}"
+        transaction_id = str(uuid5(NAMESPACE_URL, source_row_id))
+        try:
+            submitted_at = _value(row, {"submitted_at": timestamp_index}, "submitted_at")
+            email = _value(row, {"submitter_email": email_index}, "submitter_email")
+            if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+                raise ValueError("submitter_email is invalid")
+            if transaction_id in seen:
+                raise ValueError("duplicate_transaction_id")
+            raw_date = row[date_index].strip() if date_index is not None and date_index < len(row) else ""
+            transaction_date = _parse_date(raw_date or submitted_at)
+            description = row[compact_index].strip() if compact_index < len(row) else ""
+
+            # Rows created before the compact form was enabled remain in the
+            # same response sheet.  Read their old columns through the same
+            # generated metadata path so historical holdings are preserved.
+            if not description and has_legacy_columns:
+                raw_approved = row[approved_index].strip() if approved_index is not None and approved_index < len(row) else ""
+                approved = _parse_bool(raw_approved) if raw_approved else True
+                legacy_quantity, legacy_unit = parse_quantity(
+                    row[legacy_indices["quantity"]], row[legacy_indices["unit"]]
+                )
+                legacy_currency = row[legacy_indices["currency"]].strip().upper()
+                if not legacy_currency:
+                    raise ValueError("currency is required")
+                legacy_action = _parse_action(row[legacy_indices["action"]])
+                legacy_symbol = row[legacy_indices["symbol"]].strip()
+                legacy_asset_type = row[legacy_indices["asset_type"]].strip()
+                if not legacy_symbol or not legacy_asset_type:
+                    raise ValueError("asset_type and symbol are required")
+                transaction = Transaction(
+                    transaction_id=(row[id_index].strip() if id_index is not None and id_index < len(row) and row[id_index].strip() else transaction_id),
+                    source_row_id=source_row_id,
+                    submitted_at=submitted_at,
+                    submitter_email=email,
+                    approved=approved,
+                    transaction_date=transaction_date,
+                    asset_type=legacy_asset_type,
+                    symbol=legacy_symbol,
+                    action=legacy_action,
+                    quantity=legacy_quantity,
+                    unit=legacy_unit,
+                    currency=legacy_currency,
+                )
+                seen.add(transaction.transaction_id)
+                if not approved:
+                    pending.append(transaction)
+                    continue
+                accepted.append(transaction)
+                accepted_rows.append((
+                    transaction_date.isoformat(), legacy_asset_type, legacy_symbol,
+                    mode_by_action[legacy_action], str(legacy_quantity),
+                ))
+                continue
+
+            approved = True
+            if approved_index is not None:
+                raw_approved = row[approved_index].strip() if approved_index < len(row) else ""
+                if raw_approved:
+                    approved = _parse_bool(raw_approved)
+            compact = parse_compact_transaction(description)
+            price_text = row[price_index].strip() if price_index is not None and price_index < len(row) else ""
+            price = Decimal(price_text.replace(",", "").replace("$", "")) if price_text else compact.price
+            if price is not None and (not price.is_finite() or price < 0):
+                raise ValueError("price must be finite and non-negative")
+            transaction = Transaction(
+                transaction_id=transaction_id,
+                source_row_id=source_row_id,
+                submitted_at=submitted_at,
+                submitter_email=email,
+                approved=approved,
+                transaction_date=transaction_date,
+                asset_type=compact.asset_type,
+                symbol=compact.symbol,
+                action=compact.action,
+                quantity=compact.quantity,
+                unit=compact.unit,
+                currency=compact.currency,
+                price=price,
+            )
+            seen.add(transaction_id)
+            if not approved:
+                pending.append(transaction)
+                continue
+            accepted.append(transaction)
+            # The legacy inventory adapter consumes a compact canonical row.
+            legacy_asset_type = compact.asset_type
+            legacy_symbol = compact.symbol
+            if compact.action in {Action.DIVIDEND, Action.INTEREST, Action.FEE, Action.TAX}:
+                legacy_asset_type = "現金_USD" if compact.currency == "USD" else "現金_TWD"
+                legacy_symbol = compact.currency
+            accepted_rows.append((
+                transaction_date.isoformat(),
+                legacy_asset_type,
+                legacy_symbol,
+                mode_by_action[compact.action],
+                str(compact.quantity),
+            ))
         except (ValueError, InvalidOperation) as error:
             rejected.append(RejectedTransaction(source_row_id, "invalid_transaction", str(error)))
     return TransactionParseResult(tuple(accepted), tuple(pending), tuple(rejected), tuple(accepted_rows))

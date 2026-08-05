@@ -355,6 +355,20 @@ fields and restrict responses to the approved account. Keep
 `FORM_SCHEMA_STRICT=false` only as a temporary migration switch; it retains
 the legacy parser and is not the secure production mode.
 
+### Compact four-field form
+
+The form may instead expose four user-facing fields: `交易內容` (required),
+`交易日期` (optional), `價格／匯率` (optional), and `備註` (optional). Google
+Forms still supplies `Timestamp` and `Email Address` automatically. The
+compact parser recognizes explicit descriptions such as `買入 006208 2 張，價格
+55.30`, `賣出 QQQM 3 股 USD`, and `存入 100000 TWD`, then derives the internal
+action, asset type, symbol, quantity, unit, currency, price, and transaction ID.
+The transaction ID is deterministic for the source row, so replaying a row is
+idempotent. Ambiguous or incomplete descriptions are rejected into the audit
+queue instead of being guessed. If an `approved` column is retained, `false`
+continues to route the row to the pending queue; otherwise a successfully
+parsed compact row is accepted after the form's account restriction.
+
 Growth Actions 使用：
 
 | Secret | 用途 |
