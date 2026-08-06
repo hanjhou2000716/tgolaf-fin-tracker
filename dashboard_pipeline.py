@@ -1338,14 +1338,6 @@ def main():
 
     tg_text = f"✅ {display_date} 結算完畢！\n{msg_body}"
 
-    # --- 傳送 Telegram 訊息 ---
-    performance_message = (
-        f"\n市場損益 {performance['marketPnl']:+,.0f} 元"
-        f"\n外部現金流 {performance['externalCashFlow']:+,.0f} 元"
-        f"\n融資現金流 {performance['financingCashFlow']:+,.0f} 元"
-    )
-    tg_text = f"{tg_text}{performance_message}"
-
     keyboard = {
         "inline_keyboard": [
             [{"text": "🌱 開啟Growth儀表板", "web_app": {"url": WEB_APP_URL}}],
