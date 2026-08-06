@@ -12,9 +12,11 @@ class OpsContractTests(unittest.TestCase):
         self.assertIn("build:", workflow)
         self.assertIn("deploy:", workflow)
         self.assertIn("contents: read", workflow)
-        self.assertIn("contents: write", workflow)
         build_section = workflow.split("  deploy:", 1)[0]
-        self.assertNotIn("contents: write", build_section)
+        deploy_section = workflow.split("  deploy:", 1)[1]
+        self.assertNotIn("contents: write", workflow)
+        self.assertIn("pages: write", deploy_section)
+        self.assertIn("id-token: write", deploy_section)
         self.assertIn("upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", workflow)
         self.assertIn("touch public-site/.nojekyll", workflow)
 
