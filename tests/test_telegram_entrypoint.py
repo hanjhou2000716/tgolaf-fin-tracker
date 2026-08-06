@@ -12,5 +12,12 @@ class TelegramEntrypointTests(unittest.TestCase):
         self.assertIn('"🌱 開啟Growth儀表板"', source)
 
 
+    def test_settlement_push_keeps_message_compact(self):
+        source = (ROOT / "dashboard_pipeline.py").read_text(encoding="utf-8")
+        self.assertNotIn("市場損益 {performance", source)
+        self.assertNotIn("外部現金流 {performance", source)
+        self.assertNotIn("融資現金流 {performance", source)
+
+
 if __name__ == "__main__":
     unittest.main()
