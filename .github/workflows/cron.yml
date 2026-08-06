@@ -10,6 +10,11 @@ on:
         required: false
         default: false
         type: boolean
+  # GitHub cron is UTC. These are Taiwan time 05:40 (Tue-Sat) and
+  # 14:45 (Mon-Fri), kept as a fallback when the external Cornjob misses.
+  schedule:
+    - cron: "40 21 * * 1-5"
+    - cron: "45 6 * * 1-5"
 
 concurrency:
   group: growth-dashboard

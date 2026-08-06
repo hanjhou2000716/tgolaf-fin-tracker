@@ -258,9 +258,9 @@ GitHub Actions 的 `workflow_dispatch` 提供 `force_telegram` 勾選項。勾�
 
 - `repository_dispatch`：`trigger_update`，由外部 Cornjob 觸發。
 - `workflow_dispatch`：GitHub 手動執行；可勾選 `force_telegram` 測試 Telegram。
-- 目前沒有啟用內建 schedule。
+- 另有 GitHub schedule 備援：`40 21 * * 1-5`（台灣週二至週六 05:40）與 `45 6 * * 1-5`（台灣週一至週五 14:45）；外部 Cornjob 正常時仍由 History marker 防止重複通知。
 - 流程：安裝 Python → 執行 14 項測試 → 執行 `main.py` → 驗證 JSON → 發佈 `gh-pages`。
-- `concurrency` 使用 `growth-dashboard` 且不取消前一個執行，避免兩次結算同時寫入 Google Sheets。
+- `concurrency` 使用 `growth-dashboard` 並取消較舊執行，避免備援排程與外部 Cornjob 同時部署同一版本。
 
 ### Skynet `deploy.yml`
 
