@@ -13,7 +13,10 @@ on:
 
 concurrency:
   group: growth-dashboard
-  cancel-in-progress: false
+  # Only one Pages deployment may be active at a time. GitHub Pages identifies
+  # deployments by the commit SHA, so a newer run must cancel an older run
+  # before it attempts to publish the same revision.
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -105,9 +108,6 @@ jobs:
       pages: write
       id-token: write
     steps:
-      - name: Checkout deployment script
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
       - name: Download public site artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -121,6 +121,4 @@ jobs:
 
       - name: Deploy to GitHub Pages
         id: deployment
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: python .github/scripts/deploy_pages.py
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v4.0.5

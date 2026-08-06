@@ -11,6 +11,7 @@ class OpsContractTests(unittest.TestCase):
         self.assertIn("jobs:", workflow)
         self.assertIn("build:", workflow)
         self.assertIn("deploy:", workflow)
+        self.assertIn("cancel-in-progress: true", workflow)
         self.assertIn("contents: read", workflow)
         build_section = workflow.split("  deploy:", 1)[0]
         deploy_section = workflow.split("  deploy:", 1)[1]
@@ -19,6 +20,8 @@ class OpsContractTests(unittest.TestCase):
         self.assertIn("contents: read", deploy_section)
         self.assertIn("pages: write", deploy_section)
         self.assertIn("id-token: write", deploy_section)
+        self.assertIn("actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128", deploy_section)
+        self.assertNotIn("deploy_pages.py", deploy_section)
         self.assertIn("upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", workflow)
         self.assertIn("touch public-site/.nojekyll", workflow)
 
