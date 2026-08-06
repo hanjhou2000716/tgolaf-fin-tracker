@@ -1,0 +1,30 @@
+{
+  "schemaVersion": "public-demo-v1",
+  "mode": "demo",
+  "dataPolicy": "No personal asset values or holdings are published.",
+  "portfolio": {
+    "allocation": [
+      {
+        "label": "台股資產",
+        "percent": 49.2
+      },
+      {
+        "label": "美股資產",
+        "percent": 27.8
+      },
+      {
+        "label": "現金與基金",
+        "percent": 15.0
+      },
+      {
+        "label": "其它",
+        "percent": 8.0
+      }
+    ],
+    "risk": {
+      "level": "demo",
+      "message": "登入後查看個人風控資料"
+    }
+  },
+  "generatedAt": "2026-08-06T20:36:11.009770"
+}

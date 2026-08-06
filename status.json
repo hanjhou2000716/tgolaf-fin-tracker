@@ -1,0 +1,14 @@
+{
+  "status": "ok",
+  "mode": "demo",
+  "generatedAt": "2026-08-06T20:36:11.009770",
+  "dataPolicy": "No personal asset values or holdings are published.",
+  "freshness": {
+    "expectedCadenceHours": 12,
+    "staleAfterHours": 18,
+    "timezone": "Asia/Taipei"
+  },
+  "sources": {
+    "publicDemo": "ok"
+  }
+}
