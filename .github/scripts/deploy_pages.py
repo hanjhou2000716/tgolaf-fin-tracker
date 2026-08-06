@@ -49,7 +49,9 @@ def unique_build_version(repository: str, run_id: str, artifact_id: int) -> str:
     """Return a stable, unique Pages version for one workflow artifact."""
 
     seed = f"{repository}:{run_id}:{artifact_id}".encode("utf-8")
-    return hashlib.sha256(seed).hexdigest()
+    # The Pages deployment endpoint accepts the same 40-character SHA format
+    # used by GITHUB_SHA, while still requiring a value unique per artifact.
+    return hashlib.sha1(seed).hexdigest()
 
 
 def _get_artifact(session: requests.Session, api_url: str, repository: str, run_id: str, token: str) -> dict[str, Any]:

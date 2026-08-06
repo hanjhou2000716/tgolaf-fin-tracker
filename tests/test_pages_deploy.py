@@ -16,7 +16,7 @@ class PagesDeploymentTests(unittest.TestCase):
         first = DEPLOY_PAGES.unique_build_version("owner/repo", "100", 123)
         second = DEPLOY_PAGES.unique_build_version("owner/repo", "101", 123)
         third = DEPLOY_PAGES.unique_build_version("owner/repo", "100", 124)
-        self.assertEqual(len(first), 64)
+        self.assertEqual(len(first), 40)
         self.assertNotEqual(first, second)
         self.assertNotEqual(first, third)
 
