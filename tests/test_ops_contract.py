@@ -12,6 +12,8 @@ class OpsContractTests(unittest.TestCase):
         self.assertIn("build:", workflow)
         self.assertIn("deploy:", workflow)
         self.assertIn("cancel-in-progress: true", workflow)
+        self.assertIn('cron: "40 21 * * 1-5"', workflow)
+        self.assertIn('cron: "45 6 * * 1-5"', workflow)
         self.assertIn("contents: read", workflow)
         build_section = workflow.split("  deploy:", 1)[0]
         deploy_section = workflow.split("  deploy:", 1)[1]
