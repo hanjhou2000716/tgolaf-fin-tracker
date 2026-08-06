@@ -94,7 +94,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      pages: write
+      id-token: write
     steps:
       - name: Download public site artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -102,10 +103,10 @@ jobs:
           name: public-site
           path: public-site
 
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@1ef5a1b1df4c63fe21a2242edbee6cac921ece01 # v4.1.0
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@98ef48e41587a300b82de4cf298aa98b57b2faae # v3.0.1
         with:
-          github_token: ${{ github.token }}
-          publish_dir: ./public-site
-          publish_branch: gh-pages
-          force_orphan: true
+          path: ./public-site
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v4.0.5
