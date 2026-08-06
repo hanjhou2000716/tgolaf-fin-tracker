@@ -16,6 +16,7 @@ class OpsContractTests(unittest.TestCase):
         build_section = workflow.split("  deploy:", 1)[0]
         self.assertNotIn("contents: write", build_section)
         self.assertIn("upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", workflow)
+        self.assertIn("touch public-site/.nojekyll", workflow)
 
     def test_actions_are_pinned_to_commit_shas(self):
         for path in (ROOT / ".github" / "workflows").glob("*.yml"):

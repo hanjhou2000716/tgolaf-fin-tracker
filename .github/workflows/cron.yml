@@ -76,6 +76,13 @@ jobs:
           python -m json.tool public-site/data.public.json > /dev/null
           python -m json.tool public-site/status.json > /dev/null
 
+      - name: Prepare static Pages artifact
+        # The site is a static artifact (including the authenticated Telegram
+        # shell). Disable legacy Jekyll processing so a valid HTML/CSS change
+        # cannot leave Pages serving the previous deployment after a build
+        # parser error.
+        run: touch public-site/.nojekyll
+
       - name: Upload public site artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
