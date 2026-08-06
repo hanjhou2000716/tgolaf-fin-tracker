@@ -16,6 +16,7 @@ class OpsContractTests(unittest.TestCase):
         deploy_section = workflow.split("  deploy:", 1)[1]
         self.assertNotIn("contents: write", workflow)
         self.assertIn("actions: read", deploy_section)
+        self.assertIn("contents: read", deploy_section)
         self.assertIn("pages: write", deploy_section)
         self.assertIn("id-token: write", deploy_section)
         self.assertIn("upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", workflow)
