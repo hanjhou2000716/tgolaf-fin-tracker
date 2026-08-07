@@ -67,10 +67,14 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertNotIn("signInWithPassword", private_html)
             self.assertNotIn("SUPABASE_ANON_KEY", private_html)
             self.assertIn('class="allocation-meta"', private_html)
-            self.assertIn("占總資產", private_html)
+            self.assertIn('class="balance-bar"', private_html)
+            self.assertIn("淨資產｜質押", private_html)
+            self.assertIn("一頁式市值熱力圖", private_html)
+            self.assertIn("tree-detail", private_html)
             self.assertIn("health-card", private_html)
             self.assertNotIn("006208 情境", private_html)
-            self.assertIn("overflow-x:auto", private_html)
+            self.assertNotIn("treeBack", private_html)
+            self.assertNotIn("點擊分類查看下一層", private_html)
             self.assertIn(".btn.secondary{background:var(--navy)", private_html)
 
 
