@@ -64,6 +64,7 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertIn("總資產年線", private_html)
             self.assertIn("開啟 Skynet Monitoring", private_html)
             self.assertIn("新增資產資料", private_html)
+            self.assertNotIn('target="_blank"', private_html)
             self.assertNotIn("signInWithPassword", private_html)
             self.assertNotIn("SUPABASE_ANON_KEY", private_html)
             self.assertIn('class="balance-bar"', private_html)
