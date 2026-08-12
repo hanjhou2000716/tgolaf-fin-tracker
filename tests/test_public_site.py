@@ -67,15 +67,11 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertNotIn('target="_blank"', private_html)
             self.assertNotIn("signInWithPassword", private_html)
             self.assertNotIn("SUPABASE_ANON_KEY", private_html)
-            self.assertIn('class="balance-bar"', private_html)
             self.assertIn("tree-tooltip", private_html)
-            self.assertIn("balanceTooltip", private_html)
             self.assertIn("點擊分類查看下一層", private_html)
             self.assertIn("treeBack", private_html)
-            self.assertNotIn("balanceLegend", private_html)
             self.assertNotIn("allocationMeta", private_html)
             self.assertNotIn("色塊大小依市值比例呈現；點擊分類逐層查看，滑鼠移入可看詳細資訊。", private_html)
-            self.assertIn('<div class="card-title">資產配置</div>', private_html)
             self.assertNotIn('<div class="balance-heading">', private_html)
             self.assertNotIn('class="card-note">淨資產與質押', private_html)
             self.assertNotIn('class="balance-heading"><span>淨資產｜質押</span><small>', private_html)
@@ -91,6 +87,12 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertNotIn('<details class="card health-card" open>', private_html)
             self.assertNotIn("min-height:126px", private_html)
             self.assertNotIn("selectedTreeNode", private_html)
+            for removed in ("balanceBar", "balanceTooltip", "balance-bar", "balance-segment", "balance-heading"):
+                self.assertNotIn(removed, private_html)
+            for hero_id in ("netAsset", "equityRatio", "dailyChange", "sync", "totalAsset", "totalDebt", "debtRatio"):
+                self.assertIn(f'id="{hero_id}"', private_html)
+            self.assertIn("hero-header", private_html)
+            self.assertIn("sync-meta", private_html)
 
 
 if __name__ == "__main__":
