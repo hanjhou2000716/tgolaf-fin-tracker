@@ -41,6 +41,12 @@ def load_goal_state(*, session=None) -> dict | None:
         params={"user_id": f"eq.{config['user_id']}", "select": "state", "limit": "1"},
         timeout=20,
     )
+    if getattr(response, "status_code", 200) == 404:
+        required = os.getenv("SUPABASE_PRIVATE_SYNC_REQUIRED", "false").lower() in {"1", "true", "yes", "on"}
+        if required:
+            response.raise_for_status()
+        print("Supabase goal state table is not migrated; using initial Goal Ladder state")
+        return None
     response.raise_for_status()
     rows = response.json()
     return rows[0].get("state") if rows else None
@@ -67,6 +73,11 @@ def save_goal_state(state: dict, *, session=None) -> str:
         json={"user_id": config["user_id"], "state": _finite_json(state)},
         timeout=20,
     )
+    if getattr(response, "status_code", 200) == 404:
+        if required:
+            response.raise_for_status()
+        print("Supabase goal state table is not migrated; state persistence skipped")
+        return "skipped"
     response.raise_for_status()
     return "uploaded"
 
