@@ -68,7 +68,7 @@ def save_goal_state(state: dict, *, session=None) -> str:
     }
     http = session or requests
     response = http.post(
-        f"{config['url']}/rest/v1/goal_ladder_states",
+        f"{config['url']}/rest/v1/goal_ladder_states?on_conflict=user_id",
         headers=headers,
         json={"user_id": config["user_id"], "state": _finite_json(state)},
         timeout=20,

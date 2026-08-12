@@ -135,6 +135,7 @@ class SupabaseSyncTests(unittest.TestCase):
         post_url, post_kwargs = fake_session.calls[1]
         self.assertIn("goal_ladder_states", get_url[0])
         self.assertIn("goal_ladder_states", post_url[0])
+        self.assertIn("on_conflict=user_id", post_url[0])
         self.assertEqual(get_kwargs["headers"]["Authorization"], "Bearer server-only-key")
         self.assertEqual(post_kwargs["json"]["state"], state)
 
