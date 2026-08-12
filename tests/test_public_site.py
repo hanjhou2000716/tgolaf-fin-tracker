@@ -83,6 +83,14 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertIn("health-card", private_html)
             self.assertNotIn("006208 情境", private_html)
             self.assertIn(".btn.secondary{background:var(--navy)", private_html)
+            self.assertIn("equityRatio", private_html)
+            self.assertIn("Number.isFinite", private_html)
+            self.assertIn("health.sources", private_html)
+            self.assertIn("marketQuotes", private_html)
+            self.assertIn("unknown", private_html)
+            self.assertNotIn('<details class="card health-card" open>', private_html)
+            self.assertNotIn("min-height:126px", private_html)
+            self.assertNotIn("selectedTreeNode", private_html)
 
 
 if __name__ == "__main__":
