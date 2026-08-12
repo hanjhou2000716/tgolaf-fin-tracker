@@ -76,3 +76,7 @@ class MarketDataService:
             source="FinMind/Yahoo/yfinance",
             fetcher=lambda item: get_tw_stock_price(item, finmind_token),
         )
+
+    def get_fx(self, pair, fetcher, source="provider"):
+        """Return the same quality-aware contract used for equity quotes."""
+        return self.get(pair, currency="TWD", fetcher=fetcher, source=source)

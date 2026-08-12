@@ -28,6 +28,60 @@ def _required_config():
     }
 
 
+def load_goal_state(*, session=None) -> dict | None:
+    """Load the private monotonic Goal Ladder state through the service boundary."""
+    config = _required_config()
+    if not all(config.values()):
+        return None
+    headers = {"apikey": config["service_role_key"], "Authorization": f"Bearer {config['service_role_key']}"}
+    http = session or requests
+    response = http.get(
+        f"{config['url']}/rest/v1/goal_ladder_states",
+        headers=headers,
+        params={"user_id": f"eq.{config['user_id']}", "select": "state", "limit": "1"},
+        timeout=20,
+    )
+    if getattr(response, "status_code", 200) == 404:
+        required = os.getenv("SUPABASE_PRIVATE_SYNC_REQUIRED", "false").lower() in {"1", "true", "yes", "on"}
+        if required:
+            response.raise_for_status()
+        print("Supabase goal state table is not migrated; using initial Goal Ladder state")
+        return None
+    response.raise_for_status()
+    rows = response.json()
+    return rows[0].get("state") if rows else None
+
+
+def save_goal_state(state: dict, *, session=None) -> str:
+    """Upsert private Goal state; service role never reaches browser code."""
+    config = _required_config()
+    required = os.getenv("SUPABASE_PRIVATE_SYNC_REQUIRED", "false").lower() in {"1", "true", "yes", "on"}
+    if not all(config.values()):
+        if required:
+            raise RuntimeError("Supabase goal state sync is required but credentials are missing")
+        return "skipped"
+    headers = {
+        "apikey": config["service_role_key"],
+        "Authorization": f"Bearer {config['service_role_key']}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+    http = session or requests
+    response = http.post(
+        f"{config['url']}/rest/v1/goal_ladder_states",
+        headers=headers,
+        json={"user_id": config["user_id"], "state": _finite_json(state)},
+        timeout=20,
+    )
+    if getattr(response, "status_code", 200) == 404:
+        if required:
+            response.raise_for_status()
+        print("Supabase goal state table is not migrated; state persistence skipped")
+        return "skipped"
+    response.raise_for_status()
+    return "uploaded"
+
+
 def upload_private_snapshot(path: str, *, session=None) -> str:
     """Upsert one private snapshot; return ``uploaded`` or ``skipped``.
 

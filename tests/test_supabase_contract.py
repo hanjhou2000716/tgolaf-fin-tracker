@@ -35,6 +35,15 @@ class SupabaseContractTests(unittest.TestCase):
         self.assertNotIn("for insert", migration.lower())
         self.assertNotIn("for update", migration.lower())
 
+    def test_goal_state_is_private_service_role_storage(self):
+        migration = (ROOT / "supabase" / "migrations" / "20260812000000_goal_ladder_states.sql").read_text(encoding="utf-8")
+        self.assertIn("goal_ladder_states", migration)
+        self.assertIn("user_id uuid not null", migration.lower())
+        self.assertIn("state jsonb not null", migration.lower())
+        self.assertIn("enable row level security", migration.lower())
+        self.assertIn("revoke all on table public.goal_ladder_states from anon", migration.lower())
+        self.assertIn("revoke all on table public.goal_ladder_states from authenticated", migration.lower())
+
 
 if __name__ == "__main__":
     unittest.main()
