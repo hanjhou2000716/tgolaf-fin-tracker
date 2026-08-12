@@ -94,6 +94,31 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertIn("hero-header", private_html)
             self.assertIn("sync-meta", private_html)
 
+    def test_private_hero_uses_inline_ratio_and_single_kpi_divider(self):
+        with tempfile.TemporaryDirectory() as directory:
+            write_public_site(directory, "2026-08-12T10:37:00+08:00")
+            private_html = (Path(directory) / "private" / "index.html").read_text(encoding="utf-8")
+            self.assertIn('class="hero-kpi-row"', private_html)
+            self.assertIn('class="net-value-group"', private_html)
+            self.assertIn('class="hero-divider"', private_html)
+            self.assertIn('id="dailyChange" class="pill"', private_html)
+            self.assertIn('id="equityRatio" class="equity-ratio"', private_html)
+            self.assertNotIn("hero-line", private_html)
+            self.assertNotIn("status-row", private_html)
+            self.assertNotIn("股權比", private_html)
+            self.assertNotIn("淨值率", private_html)
+
+    def test_private_hero_has_invalid_ratio_and_sync_guards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            write_public_site(directory, "2026-08-12T10:37:00+08:00")
+            private_html = (Path(directory) / "private" / "index.html").read_text(encoding="utf-8")
+            self.assertIn("Number.isFinite(n)&&Number.isFinite(t)&&t>0", private_html)
+            self.assertIn(": '(—)'", private_html)
+            self.assertIn("syncText", private_html)
+            self.assertIn("資料同步 · —", private_html)
+            self.assertIn("Asia/Taipei", private_html)
+            self.assertIn("daily.textContent='今日 —'", private_html)
+
 
 if __name__ == "__main__":
     unittest.main()

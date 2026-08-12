@@ -9,6 +9,7 @@ next security phase.
 from copy import deepcopy
 import json
 import os
+import re
 import shutil
 
 
@@ -274,6 +275,57 @@ TELEGRAM_PRIVATE_HTML_TEMPLATE = """<!doctype html>
 """
 
 
+PRIVATE_HERO_MARKUP = """    <section class="hero">
+      <div class="hero-header"><p class="eyebrow">Portfolio overview</p><span id="sync" class="sync-meta">資料同步 · —</span></div>
+      <div class="hero-kpi-row">
+        <div class="net-value-group">
+          <div class="hero-label">淨資產 Net</div>
+          <div class="hero-value"><span id="netAsset">—</span> <span id="equityRatio" class="equity-ratio" aria-label="淨資產占總資產 —">(—)</span></div>
+        </div>
+        <span id="dailyChange" class="pill">今日 —</span>
+      </div>
+      <div class="hero-divider" aria-hidden="true"></div>
+      <div class="metrics"><div class="metric"><span>總資產</span><strong id="totalAsset">—</strong></div><div class="metric"><span>總負債</span><strong id="totalDebt">—</strong></div><div class="metric"><span>負債比</span><strong id="debtRatio">—</strong></div></div>
+    </section>"""
+
+
+PRIVATE_HERO_STYLE = """
+    .hero-kpi-row{position:relative;z-index:1;display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:end;gap:14px}.net-value-group{min-width:0}.hero-value{display:flex;align-items:baseline;gap:7px;min-width:0;font:700 clamp(34px,9vw,54px)/1.05 Georgia,"Noto Serif TC",serif;letter-spacing:-.04em;white-space:nowrap}.equity-ratio{color:#f7d6ab;font-size:clamp(15px,3vw,22px);font-weight:700;letter-spacing:-.01em;white-space:nowrap}.hero-divider{position:relative;z-index:1;margin:17px 0 15px;border-top:1px solid #ffffff38}.hero-kpi-row>.pill{justify-self:end;white-space:nowrap}.hero-header + .hero-kpi-row{margin-top:1px}
+    @media(max-width:560px){.hero-kpi-row{gap:8px}.hero-value{font-size:clamp(34px,9vw,42px);gap:5px}.equity-ratio{font-size:clamp(15px,4vw,18px)}.hero-divider{margin:15px 0 13px}.hero-kpi-row>.pill{font-size:10px;padding:8px 9px}.hero-header{align-items:flex-start}.sync-meta{font-size:10px}}
+    .chart-wrap canvas{max-width:100%;}
+    @media(max-width:389px){.brand{gap:6px;font-size:17px;letter-spacing:.06em}.brand .prstk{height:23px;max-width:86px}.brand .sfce{height:23px;max-width:78px}.brand .growth{font-size:17px}.hero-kpi-row{grid-template-columns:1fr;gap:10px}.hero-kpi-row>.pill{justify-self:end}.hero-value{font-size:34px}}
+"""
+
+
+def _prepare_private_dashboard_html(config: str) -> str:
+    """Compile the Telegram shell with the current semantic Hero contract."""
+    html = TELEGRAM_PRIVATE_HTML_TEMPLATE.replace("__SUPABASE_CONFIG__", config)
+    html = re.sub(r'<section class="hero">.*?</section>', PRIVATE_HERO_MARKUP, html, count=1, flags=re.S)
+    # Remove legacy Hero selectors from the generated shell rather than leaving
+    # dead CSS beside the new grid. The template remains readable for history.
+    for selector in (r"\.hero-line\{[^{}]*\}", r"\.equity-ratio\{[^{}]*\}", r"\.equity-ratio strong\{[^{}]*\}", r"\.status-row\{[^{}]*\}"):
+        html = re.sub(selector, "", html)
+    html = html.replace("  </style>", f"{PRIVATE_HERO_STYLE}  </style>", 1)
+    formatters = r'''  const ratioText = (net, total) => { const n=Number(net); const t=Number(total); return Number.isFinite(n)&&Number.isFinite(t)&&t>0 ? `(${(n*100/t).toFixed(1)}%)` : '(—)'; };
+  const syncText = (raw) => { if(!raw)return '資料同步 · —'; const date=new Date(raw); if(Number.isNaN(date.getTime()))return '資料同步 · —'; const parts=new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false}).formatToParts(date).reduce((out,item)=>(out[item.type]=item.value,out),{}); const today=new Intl.DateTimeFormat('zh-TW',{timeZone:'Asia/Taipei',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()); const stamp=`${parts.year}/${parts.month}/${parts.day}`; return stamp===today ? `資料同步 · ${parts.hour}:${parts.minute}` : `資料同步 · ${parts.month}/${parts.day} ${parts.hour}:${parts.minute}`; };
+'''
+    html = html.replace("  const render = (body) =>", formatters + "  const render = (body) =>", 1)
+    html = re.sub(
+        r"const finite=\(value\)=>\{const number=Number\(value\);return Number\.isFinite\(number\)\?number:0;\}; const netValue=finite\(p\.netAsset\); const totalValue=finite\(p\.totalAsset\); const equityRatio=.*?; \$\('netAsset'\)\.textContent=money\(netValue\); \$\('equityRatio'\)\.textContent=pct\(equityRatio\);",
+        "const netValue=Number(p.netAsset); const totalValue=Number(p.totalAsset); $('netAsset').textContent=Number.isFinite(netValue)?money(netValue):'—'; $('equityRatio').textContent=ratioText(netValue,totalValue); $('equityRatio').setAttribute('aria-label',`淨資產占總資產 ${ratioText(netValue,totalValue)}`);",
+        html,
+        count=1,
+    )
+    html = re.sub(r"\$\('sync'\)\.textContent=.*?; const perf=", "$('sync').textContent=syncText(body.generatedAt||data.lastUpdated); const perf=", html, count=1)
+    html = re.sub(
+        r"const diff=Number\(perf\.netChange\|\|0\); \$\('dailyChange'\)\.textContent=.*?; \$\('dailyChange'\)\.style\.color=.*?;",
+        "const diff=Number(perf.netChange); const diffPct=Number(perf.netChangePercent); const daily=$('dailyChange'); if(Number.isFinite(diff)&&Number.isFinite(diffPct)){daily.textContent=`今日 ${diff>=0?'+':''}${pct(diffPct)} · ${diff>=0?'+':''}${money(diff)}`; daily.style.color=diff>=0?'#f1a08b':'#9bc1a8';}else{daily.textContent='今日 —'; daily.style.color='#dbe5e5';}",
+        html,
+        count=1,
+    )
+    return html
+
+
 def build_public_payload(generated_at: str) -> dict:
     """Return a fixed demo contract with no private portfolio fields."""
     payload = deepcopy(DEMO_DATA)
@@ -314,4 +366,4 @@ def write_public_site(directory: str, generated_at: str) -> None:
     function_url = os.getenv("SUPABASE_FUNCTION_URL", "").strip()
     config = json.dumps({"url": supabase_url, "functionUrl": function_url}, ensure_ascii=True)
     with open(os.path.join(private_directory, "index.html"), "w", encoding="utf-8") as file:
-        file.write(TELEGRAM_PRIVATE_HTML_TEMPLATE.replace("__SUPABASE_CONFIG__", config))
+        file.write(_prepare_private_dashboard_html(config))
