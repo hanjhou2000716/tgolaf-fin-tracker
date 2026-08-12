@@ -502,9 +502,6 @@ def main():
     performance = performance_breakdown(net_asset, yesterday_net if yesterday_net else net_asset, today_transactions)
     sign, emoji = ("+", "📈") if daily_diff >= 0 else ("", "📉")
 
-    progress_pct = (net_asset / 10000000) * 100 if net_asset > 0 else 0
-    bar_blocks = max(0, min(10, int(progress_pct / 10)))
-    bar_str = "[" + "█" * bar_blocks + "░" * (10 - bar_blocks) + f"] {progress_pct:.1f}%"
     stress_cards_html = "".join(
         f'''<div class="stress-card">
                 <div class="stress-label">{scenario["label"]}</div>
@@ -612,6 +609,11 @@ def main():
         fx_quote=fx_quote.as_dict(),
     )
     save_goal_state(runtime_extensions["goalState"])
+    active_goal_meta = (runtime_extensions.get("goalForecast") or {}).get("activeGoal") or {}
+    active_target_twd = float(active_goal_meta.get("targetTwdEquivalent") or 0)
+    progress_pct = (net_asset / active_target_twd) * 100 if net_asset > 0 and active_target_twd > 0 else 0
+    bar_blocks = max(0, min(10, int(progress_pct / 10)))
+    bar_str = "[" + "█" * bar_blocks + "░" * (10 - bar_blocks) + f"] {progress_pct:.1f}%"
     total_20ma, total_60ma = moving_average(all_totals, 20), moving_average(all_totals, 60)
     total_240ma = moving_average(all_totals, 240)
     net_20ma, net_60ma = moving_average(all_nets, 20), moving_average(all_nets, 60)

@@ -47,7 +47,7 @@ def goal_probability(*, initial, target, annual_return, annual_volatility, month
     if as_of is not None and target_date is not None:
         horizon_days = (date.fromisoformat(str(target_date)[:10]) - date.fromisoformat(str(as_of)[:10])).days
         if horizon_days <= 0:
-            return {"horizonDays": max(0, horizon_days), "paths": paths, "seed": seed, "simulationGranularity": "daily", "quantiles": {}, "target": float(target), "probability": 0.0}
+            return {"horizonDays": max(0, horizon_days), "paths": paths, "seed": seed, "simulationGranularity": "daily", "quantiles": {}, "target": float(target), "probability": 0.0, "probabilityDefinition": "hit_by_deadline"}
     simulation = simulate_wealth(initial=initial, annual_return=annual_return, annual_volatility=annual_volatility, months=months, horizon_days=horizon_days, monthly_contribution=monthly_contribution, paths=paths, seed=seed, target=target)
     successes = sum(simulation["hitTarget"])
     simulation["target"] = float(target)

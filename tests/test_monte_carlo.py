@@ -26,6 +26,11 @@ class MonteCarloTests(unittest.TestCase):
         self.assertEqual(result["paths"], 2000)
         self.assertEqual(result["probabilityDefinition"], "hit_by_deadline")
 
+    def test_expired_probability_keeps_definition_metadata(self):
+        result = goal_probability(initial=100, target=110, annual_return=.08, annual_volatility=.1, as_of="2028-07-17", target_date="2028-07-16", paths=2000)
+        self.assertEqual(result["probability"], 0.0)
+        self.assertEqual(result["probabilityDefinition"], "hit_by_deadline")
+
 
 if __name__ == "__main__":
     unittest.main()
