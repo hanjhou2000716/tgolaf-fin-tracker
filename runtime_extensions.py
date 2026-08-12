@@ -5,12 +5,13 @@ import math
 from advisor import build_advice
 from data_health import build_data_health
 from forecast_quality import margin_call_probability
-from monte_carlo import goal_probability
+from goal_contract import evaluate_goal_ladder
+from goal_state import build_goal_forecast
 from performance_report import build_performance_report
 from regime import classify_regime
 
 
-def build_runtime_extensions(*, net_values, net_asset, total_asset, total_debt, pledged_value, data_as_of, sources, reconciled=True, now=None) -> dict:
+def build_runtime_extensions(*, net_values, net_asset, total_asset, total_debt, pledged_value, data_as_of, sources, reconciled=True, now=None, goal_state=None, fx_quote=None) -> dict:
     """Build private-only extensions from the same snapshot used by the UI.
 
     Each section is deliberately decision-support data. A missing/short price
@@ -21,17 +22,22 @@ def build_runtime_extensions(*, net_values, net_asset, total_asset, total_debt, 
     regime = classify_regime(values) if len(values) >= 3 else None
     annual_return = float(performance["annualizedReturn"]) if performance else 0.0
     volatility = float(performance["annualizedVolatility"]) if performance else 0.0
-    forecast = None
-    if net_asset > 0:
-        forecast = goal_probability(
-            initial=float(net_asset),
-            target=max(float(net_asset), 10_000_000),
-            annual_return=max(-0.95, min(1.5, annual_return)),
-            annual_volatility=max(0.0, min(2.0, volatility)),
-            months=60,
-            paths=250,
-            seed=7,
-        )
+    evaluated_state = evaluate_goal_ladder(
+        state=goal_state,
+        net_asset_twd=float(net_asset),
+        as_of=data_as_of,
+        fx_quote=fx_quote,
+    )
+    forecast = build_goal_forecast(
+        state=evaluated_state,
+        net_asset_twd=float(net_asset),
+        annual_return=max(-0.95, min(1.5, annual_return)),
+        annual_volatility=max(0.0, min(2.0, volatility)),
+        as_of=data_as_of,
+        fx_quote=fx_quote,
+        paths=5_000,
+        seed=7,
+    ) if net_asset > 0 else None
     daily_volatility = volatility / math.sqrt(252) if volatility else 0.0
     margin = {
         str(horizon): margin_call_probability(
@@ -64,6 +70,7 @@ def build_runtime_extensions(*, net_values, net_asset, total_asset, total_debt, 
         "performanceReport": performance,
         "regime": regime,
         "goalForecast": forecast,
+        "goalState": evaluated_state,
         "marginCallProbability": margin,
         "dataHealth": health,
         "advisor": advisor,

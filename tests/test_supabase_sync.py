@@ -7,7 +7,7 @@ from unittest.mock import patch
 from datetime import date
 from decimal import Decimal
 
-from supabase_sync import upload_private_snapshot, upload_private_transactions
+from supabase_sync import load_goal_state, save_goal_state, upload_private_snapshot, upload_private_transactions
 from transaction_schema import Action, Transaction
 
 
@@ -116,6 +116,25 @@ class SupabaseSyncTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             with self.assertRaises(RuntimeError):
                 upload_private_transactions([sample_transaction("1")], session=FakeSession(existing))
+
+    def test_goal_state_uses_private_service_boundary(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        state = {"activeGoalId": "G1_TWD_10M", "status": "active", "achievements": []}
+        fake_session = FakeSession(existing=[{"state": state}])
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(load_goal_state(session=fake_session), state)
+            self.assertEqual(save_goal_state(state, session=fake_session), "uploaded")
+        get_url, get_kwargs = fake_session.calls[0]
+        post_url, post_kwargs = fake_session.calls[1]
+        self.assertIn("goal_ladder_states", get_url[0])
+        self.assertIn("goal_ladder_states", post_url[0])
+        self.assertEqual(get_kwargs["headers"]["Authorization"], "Bearer server-only-key")
+        self.assertEqual(post_kwargs["json"]["state"], state)
 
 
 if __name__ == "__main__":

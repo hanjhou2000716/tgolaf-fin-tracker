@@ -19,10 +19,10 @@ from risk import (
 from validation import validate_history_sheet, validate_inventory, validate_quote
 from asset_tree import build_asset_tree
 from public_site import write_public_site
-from supabase_sync import upload_private_snapshot, upload_private_transactions
+from supabase_sync import load_goal_state, save_goal_state, upload_private_snapshot, upload_private_transactions
 from transaction_schema import TransactionSchemaError, parse_transaction_rows
 from performance import performance_breakdown
-from market_data import MarketDataService
+from market_data import MarketDataService, Quote
 from metrics import summarize_performance
 from attribution import build_pnl_attribution
 from exposure import build_exposure_matrix
@@ -281,11 +281,22 @@ def calculate_current_assets():
 # ==========================================
 # 3. 金融市場報價模組
 # ==========================================
+def get_usd_twd_quote():
+    fetched_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    try:
+        value = float(requests.get("https://query1.finance.yahoo.com/v8/finance/chart/TWD=X?interval=1d&range=1d", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5).json()['chart']['result'][0]['meta']['regularMarketPrice'])
+        return Quote("USD/TWD", value, "TWD", "Yahoo Finance", fetched_at, fetched_at, False, False, "fresh")
+    except Exception:
+        try:
+            value = float(yf.Ticker("TWD=X").history(period="1d")['Close'].iloc[-1])
+            return Quote("USD/TWD", value, "TWD", "Yahoo Finance/yfinance", fetched_at, fetched_at, False, False, "fresh")
+        except Exception:
+            return Quote("USD/TWD", 32.5, "TWD", "fallback", fetched_at, fetched_at, True, True, "fallback")
+
+
 def get_usd_twd_rate():
-    try: return float(requests.get("https://query1.finance.yahoo.com/v8/finance/chart/TWD=X?interval=1d&range=1d", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5).json()['chart']['result'][0]['meta']['regularMarketPrice'])
-    except:
-        try: return yf.Ticker("TWD=X").history(period="1d")['Close'].iloc[-1]
-        except: return 32.5
+    """Compatibility numeric getter; new Goal code uses get_usd_twd_quote."""
+    return get_usd_twd_quote().price
 
 def get_us_stock_price(symbol):
     try: return float(requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5).json()['chart']['result'][0]['meta']['regularMarketPrice'])
@@ -307,7 +318,9 @@ def main():
     history_records = history_sheet.get_all_records()
     etf_nvda_weights = {symbol: get_etf_nvda_weight(symbol, history_records) for symbol in ETF_NVDA_WEIGHT_FALLBACKS}
         
-    usd_rate = validate_quote("USD/TWD", get_usd_twd_rate())
+    fx_quote = get_usd_twd_quote()
+    usd_rate = validate_quote("USD/TWD", fx_quote.price)
+    persisted_goal_state = load_goal_state()
     tw_stock_value, us_stock_value_usd, tsmc_exposure_twd, price_006208, leveraged_etf_value = 0, 0, 0, 0, 0
     position_values_twd, tw_position_values, us_position_values = {}, {}, {}
     cash_twd, cash_usd = inventory["現金_TWD"].get("TWD", 0), inventory["現金_USD"].get("USD", 0)
@@ -595,7 +608,10 @@ def main():
         },
         reconciled=bool(performance.get("reconciled", True)),
         now=tw_now,
+        goal_state=persisted_goal_state,
+        fx_quote=fx_quote.as_dict(),
     )
+    save_goal_state(runtime_extensions["goalState"])
     total_20ma, total_60ma = moving_average(all_totals, 20), moving_average(all_totals, 60)
     total_240ma = moving_average(all_totals, 240)
     net_20ma, net_60ma = moving_average(all_nets, 20), moving_average(all_nets, 60)
