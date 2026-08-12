@@ -1388,6 +1388,7 @@ def main():
             }, timeout=10)
             response.raise_for_status()
             mark_settlement_notification_sent(history_sheet, snapshot_date, settlement_window, tw_now.isoformat())
+            print(f"Telegram notification sent; window={settlement_window}, forced={FORCE_TELEGRAM}")
         except requests.RequestException as error:
             print(f"Telegram notification failed: {error}")
     else:
