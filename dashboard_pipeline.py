@@ -612,6 +612,9 @@ def main():
     active_goal_meta = (runtime_extensions.get("goalForecast") or {}).get("activeGoal") or {}
     active_target_twd = float(active_goal_meta.get("targetTwdEquivalent") or 0)
     progress_pct = (net_asset / active_target_twd) * 100 if net_asset > 0 and active_target_twd > 0 else 0
+    legacy_goal_label = "—"
+    if active_goal_meta:
+        legacy_goal_label = f"{float(active_goal_meta.get('targetAmount', 0)):,.0f} {active_goal_meta.get('targetCurrency', '')}".strip()
     bar_blocks = max(0, min(10, int(progress_pct / 10)))
     bar_str = "[" + "█" * bar_blocks + "░" * (10 - bar_blocks) + f"] {progress_pct:.1f}%"
     total_20ma, total_60ma = moving_average(all_totals, 20), moving_average(all_totals, 60)
@@ -869,8 +872,8 @@ def main():
         </div>
 
         <div class="card">
-            <div class="sec-title">目標進度 <span class="sec-note">10,000,000 TWD</span></div>
-            <div class="info-row">千萬目標達成率 {progress_pct:.1f}%</div>
+            <div class="sec-title">目標進度 <span class="sec-note">{legacy_goal_label}</span></div>
+            <div class="info-row">目標達成率 {progress_pct:.1f}%</div>
             <div class="goal-track"><div class="goal-fill"></div></div>
             <div class="timeline">
                 <ul>

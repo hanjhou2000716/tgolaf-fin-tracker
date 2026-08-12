@@ -14,6 +14,7 @@ class GoalContractStaticTests(unittest.TestCase):
         self.assertIn("active_goal_meta", source)
         self.assertIn("targetTwdEquivalent", source)
         self.assertNotIn("net_asset / 10000000", source)
+        self.assertNotIn("10,000,000 TWD", source)
 
 
 if __name__ == "__main__":
