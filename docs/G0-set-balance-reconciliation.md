@@ -13,8 +13,9 @@ ledger event 將餘額設為目標值。重播相同 UUID 不會重複套用；�
 - `APPLIED_WITH_COMPATIBILITY`：僅針對舊表單的「現金／餘額」列，把舊 `price`
   欄轉成目標值，並標記 `legacy_target_from_price_field`。
 
-最近三筆 ingestion 狀態寫入私有快照的 `transactionIngestion`，MiniApp 只顯示
-來源列、命令、幣別、目標值與原因，不輸出提交者 Email。
+私有快照的 `transactionIngestion` 以 `summary` 與 `recent` 契約保存狀態；
+`recent` 保留最近五筆，MiniApp 只顯示最近三筆來源列、命令、幣別、目標值與
+原因，不輸出提交者 Email。
 
 ## 損益邊界
 
@@ -26,7 +27,7 @@ financing cash flow 或 market P&L。所有事件仍透過 immutable UUID ledger
 
 ```text
 python -m unittest discover -s tests -q
-151 tests passed
+153 tests passed
 ```
 
 外部 Google Form 的實際題目／欄位仍需在 Form 端依四欄規格完成；程式已保留

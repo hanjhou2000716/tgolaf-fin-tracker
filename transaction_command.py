@@ -7,7 +7,7 @@ never classified as investment P&L or external cash flow.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Mapping
@@ -48,6 +48,7 @@ class TransactionCommand:
             "currency": tx.currency,
             "amount": str(tx.quantity),
             "targetBalance": str(self.target_balance) if self.target_balance is not None else None,
+            "adjustment": str(tx.reconciliation_delta) if tx.reconciliation_delta is not None else None,
             "status": self.status,
             "reason": self.reason,
             "compatibilityUsed": self.compatibility_used,
@@ -175,6 +176,54 @@ def build_ingestion_status(*, accepted=(), pending=(), rejected=(), compatibilit
     rows.extend(command_from_transaction(item).ingestion_payload() for item in accepted)
     rows.extend(command_from_transaction(item).ingestion_payload() for item in pending)
     for item in rejected:
-        rows.append({"sourceRowId": item.source_row_id, "status": CommandStatus.REJECTED, "reason": item.reason, "detail": item.detail})
+        detail = item.detail or item.reason
+        rows.append({"sourceRowId": item.source_row_id, "status": CommandStatus.REJECTED, "reason": detail, "reasonCode": item.reason, "detail": detail})
     rows.extend(item.ingestion_payload() if isinstance(item, TransactionCommand) else item for item in compatibility)
     return rows[-3:]
+
+
+def build_ingestion_contract(rows) -> dict[str, Any]:
+    """Serialize a status summary and a small, private recent-status feed."""
+    rows = list(rows or [])
+    summary = {
+        "applied": sum(1 for row in rows if row.get("status") in {CommandStatus.APPLIED, CommandStatus.APPLIED_WITH_COMPATIBILITY}),
+        "pending": sum(1 for row in rows if row.get("status") == CommandStatus.PENDING),
+        "rejected": sum(1 for row in rows if row.get("status") == CommandStatus.REJECTED),
+    }
+    return {"summary": summary, "recent": rows[-5:]}
+
+
+def apply_reconciliation_events(inventory: dict[str, dict[str, Any]], transactions):
+    """Apply SET_BALANCE through an explicit delta and return immutable events.
+
+    The legacy inventory adapter remains available for historical rows, but
+    cash corrections go through this single compatibility boundary so the
+    previous value, target and signed adjustment are all auditable.
+    """
+    updated = []
+    events: list[dict[str, Any]] = []
+    for transaction in sorted(transactions, key=lambda item: (item.transaction_date, item.source_row_id)):
+        if transaction.action != Action.SET_BALANCE:
+            updated.append(transaction)
+            continue
+        currency = transaction.currency.upper()
+        bucket_key = next((key for key in inventory if key.endswith(f"_{currency}")), None)
+        if bucket_key is None:
+            raise CommandValidationError(f"cash inventory bucket missing for {currency}")
+        bucket = inventory[bucket_key]
+        previous = Decimal(str(bucket.get(currency, 0)))
+        target = Decimal(transaction.quantity)
+        delta = target - previous
+        bucket[currency] = float(target)
+        adjusted = replace(transaction, reconciliation_delta=delta)
+        updated.append(adjusted)
+        events.append({
+            "transactionId": transaction.transaction_id,
+            "sourceRowId": transaction.source_row_id,
+            "currency": currency,
+            "previousBalance": str(previous),
+            "targetBalance": str(target),
+            "adjustment": str(delta),
+            "eventType": "RECONCILIATION_INCREASE" if delta >= 0 else "RECONCILIATION_DECREASE",
+        })
+    return tuple(updated), events

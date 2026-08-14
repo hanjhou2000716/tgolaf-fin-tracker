@@ -353,7 +353,10 @@ transaction.
 Before enabling the strict workflow, update the Google Form to collect these
 fields and restrict responses to the approved account. Keep
 `FORM_SCHEMA_STRICT=false` only as a temporary migration switch; it retains
-the legacy parser and is not the secure production mode.
+the legacy parser and is not the secure production mode. The legacy parser
+does not assign a default action: historical cash rows labelled `取代`/`覆蓋`
+(or the original `取代台幣現金金額` description with a numeric `price`) are
+the only rows adapted to `SET_BALANCE`; new rows must use an explicit command.
 
 ### Compact four-field form
 
@@ -379,7 +382,10 @@ SET_BALANCE 現金 TWD 150000
 
 命令會以 append-only ledger event 將現金設為目標值。重播同一 UUID 是 no-op；同一 UUID 搭配不同內容會拒絕。這筆調整不算外部現金流、融資現金流或市場損益，並保留 `reconciliationAdjustment` 供損益歸因核對。舊表單若在明確現金／餘額描述中把目標值放在舊 `price` 欄，系統只會以 `legacy_target_from_price_field` 相容層轉換，狀態標記為 `APPLIED_WITH_COMPATIBILITY`；其它模糊或負值資料一律 `REJECTED`。
 
-私有快照的 `transactionIngestion` 只保留最近三筆狀態（`APPLIED`、`PENDING`、`REJECTED` 或 `APPLIED_WITH_COMPATIBILITY`），MiniApp 可顯示來源列、命令、幣別、目標值與拒絕原因，不包含提交者 Email。
+私有快照的 `transactionIngestion` 會提供 `summary`（各狀態計數）及最近五筆
+`recent` 狀態（MiniApp 顯示最近三筆）。狀態包含 `APPLIED`、`PENDING`、
+`REJECTED` 或 `APPLIED_WITH_COMPATIBILITY`；畫面可顯示來源列、命令、幣別、
+目標值與拒絕原因，不包含提交者 Email。
 
 Growth Actions 使用：
 

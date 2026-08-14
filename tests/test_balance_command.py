@@ -5,7 +5,7 @@ from decimal import Decimal
 from attribution import build_pnl_attribution
 from performance import performance_breakdown
 from portfolio_ledger import PortfolioLedger, PortfolioLedgerConflict, PortfolioLedgerError
-from transaction_command import CommandStatus, CommandValidationError, command_from_transaction, parse_set_balance_command
+from transaction_command import CommandStatus, CommandValidationError, apply_reconciliation_events, build_ingestion_contract, build_ingestion_status, command_from_transaction, parse_set_balance_command
 from transaction_schema import Action, Transaction
 from transaction_schema import parse_transaction_rows
 
@@ -34,6 +34,25 @@ class BalanceCommandTests(unittest.TestCase):
         self.assertEqual(result.accepted[0].quantity, Decimal("150000"))
         self.assertEqual(command_from_transaction(result.accepted[0]).status, CommandStatus.APPLIED_WITH_COMPATIBILITY)
 
+    def test_original_cash_snapshot_description_uses_legacy_price_target(self):
+        headers = ["Timestamp", "Email Address", "approved", "currency", "unit", "asset_type", "symbol", "action", "quantity", "price", "交易內容"]
+        row = ["2026-08-14T14:45:00+08:00", "owner@example.com", "true", "TWD", "TWD", "現金_TWD", "TWD", "", "", "150000", "取代台幣現金金額"]
+        result = parse_transaction_rows(headers, [row], source_sheet="Form")
+        self.assertEqual(result.accepted[0].action, Action.SET_BALANCE)
+        self.assertEqual(result.accepted[0].quantity, Decimal("150000"))
+        self.assertEqual(result.accepted[0].compatibility_used, "legacy_target_from_price_field")
+
+    def test_ingestion_contract_has_summary_and_actionable_rejection(self):
+        rejected = parse_transaction_rows(
+            ["Timestamp", "Email Address", "交易內容"],
+            [["2026-08-14T14:45:00+08:00", "owner@example.com", "SET_BALANCE TWD"]],
+            source_sheet="Form",
+        ).rejected
+        rows = build_ingestion_status(rejected=rejected)
+        contract = build_ingestion_contract(rows)
+        self.assertEqual(contract["summary"]["rejected"], 1)
+        self.assertTrue(contract["recent"][0]["reason"])
+
     def test_ambiguous_and_unsafe_values_fail_closed(self):
         with self.assertRaises(CommandValidationError):
             parse_set_balance_command({"command": "SET_BALANCE", "source_row_id": "Form:2", "asset_type": "現金_TWD", "symbol": "TWD", "currency": "TWD"})
@@ -54,6 +73,14 @@ class BalanceCommandTests(unittest.TestCase):
         changed = Transaction(**{**event.__dict__, "quantity": Decimal("151000")})
         with self.assertRaises(PortfolioLedgerConflict):
             ledger.append(changed)
+
+    def test_legacy_inventory_and_canonical_event_share_final_cash(self):
+        inventory = {"現金_TWD": {"TWD": 187000.0}, "現金_USD": {"USD": 0.0}}
+        command = parse_set_balance_command({"command": "SET_BALANCE", "source_row_id": "Form:coherence", "asset_type": "現金_TWD", "symbol": "TWD", "currency": "TWD", "target_balance": "150000"})
+        updated, events = apply_reconciliation_events(inventory, [command.transaction])
+        self.assertEqual(inventory["現金_TWD"]["TWD"], 150000.0)
+        self.assertEqual(updated[0].reconciliation_delta, Decimal("150000") - Decimal("187000"))
+        self.assertEqual(events[0]["eventType"], "RECONCILIATION_DECREASE")
 
     def test_reconciliation_is_not_external_flow_or_market_pnl(self):
         ledger = PortfolioLedger([tx(Action.DEPOSIT, quantity="120000", transaction_id="00000000-0000-0000-0000-000000000031")])

@@ -406,12 +406,26 @@ def _parse_compact_transaction_rows(
             # Rows created before the compact form was enabled remain in the
             # same response sheet.  Read their old columns through the same
             # generated metadata path so historical holdings are preserved.
-            if not description and has_legacy_columns:
+            # The original cash snapshot used the description
+            # 「取代台幣現金金額」 and stored the target in the legacy price
+            # column; keep that exact row compatible without making replace a
+            # default for new submissions.
+            legacy_snapshot_description = (
+                "取代" in description and "現金" in description
+            ) or ("對帳" in description and "現金" in description)
+            if has_legacy_columns and (not description or legacy_snapshot_description):
                 raw_approved = row[approved_index].strip() if approved_index is not None and approved_index < len(row) else ""
                 approved = _parse_bool(raw_approved) if raw_approved else True
-                legacy_quantity, legacy_unit = parse_quantity(
-                    row[legacy_indices["quantity"]], row[legacy_indices["unit"]]
-                )
+                raw_legacy_quantity = row[legacy_indices["quantity"]].strip()
+                if legacy_snapshot_description and not raw_legacy_quantity:
+                    # The original cash snapshot left quantity blank because
+                    # its target lived in the legacy price column.
+                    legacy_quantity = Decimal("0")
+                    legacy_unit = row[legacy_indices["unit"]].strip() or "currency"
+                else:
+                    legacy_quantity, legacy_unit = parse_quantity(
+                        row[legacy_indices["quantity"]], row[legacy_indices["unit"]]
+                    )
                 legacy_currency = row[legacy_indices["currency"]].strip().upper()
                 if not legacy_currency:
                     raise ValueError("currency is required")
@@ -421,11 +435,12 @@ def _parse_compact_transaction_rows(
                     raise ValueError("asset_type and symbol are required")
                 raw_legacy_action = row[legacy_indices["action"]].strip()
                 normalized_action = _normalize_header(raw_legacy_action)
-                legacy_action = _parse_action(raw_legacy_action) if normalized_action not in {"取代", "覆蓋", "更新", "replace", "overwrite"} else Action.SET_BALANCE
+                legacy_replace_action = normalized_action in {"取代", "覆蓋", "更新", "replace", "overwrite"}
+                legacy_action = _parse_action(raw_legacy_action) if not (legacy_replace_action or legacy_snapshot_description) else Action.SET_BALANCE
                 # The pre-V2 form used 取代/覆蓋 plus the old price field for
                 # a cash-balance snapshot.  Adapt only an explicit cash row;
                 # all other unknown actions remain rejected.
-                if normalized_action in {"取代", "覆蓋", "更新", "replace", "overwrite"} and (
+                if (legacy_replace_action or legacy_snapshot_description) and (
                     legacy_asset_type.lower().startswith(("現金", "cash")) or legacy_symbol.upper() in {"TWD", "USD"}
                 ):
                     legacy_action = Action.SET_BALANCE
