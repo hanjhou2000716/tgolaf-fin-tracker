@@ -293,8 +293,16 @@ def calculate_current_assets():
         except: continue
             
         symbol = symbol_overrides.get(symbol, symbol)
-        if asset_type in ["現金_TWD", "現金_USD", "質押負債", "質押利率"] and not symbol:
-            symbol = {"現金_TWD": "TWD", "現金_USD": "USD", "質押負債": "Current_Debt", "質押利率": "Rate"}[asset_type]
+        # Legacy Form rows sometimes put the currency (for example ``TWD``)
+        # in the symbol column of a pledge row.  Debt has one canonical
+        # inventory key; otherwise an old 690,000 Current_Debt row can mask a
+        # later 1,870,000 pledge snapshot stored under ``TWD``.
+        if asset_type == "質押負債":
+            symbol = "Current_Debt"
+        elif asset_type == "質押利率":
+            symbol = "Rate"
+        elif asset_type in ["現金_TWD", "現金_USD"] and not symbol:
+            symbol = {"現金_TWD": "TWD", "現金_USD": "USD"}[asset_type]
             
         if not symbol: continue
         if symbol not in inventory[asset_type] and symbol != "History": inventory[asset_type][symbol] = 0.0
