@@ -9,6 +9,33 @@ import requests
 from ledger import transaction_payload
 
 
+def _same_legacy_reconciliation(previous: dict, current: dict) -> bool:
+    """Allow a safe replay after the Form V2 compatibility migration.
+
+    The first production run may have persisted a legacy cash correction with
+    ``legacy_target_from_price_field``.  The V2 parser emits the same financial
+    event with the real submitter and without that compatibility marker.  The
+    ledger remains immutable: this helper only accepts the replay when every
+    financial/source field is identical and never mutates the stored row.
+    """
+    if previous.get("compatibility_used") != "legacy_target_from_price_field":
+        return False
+    stable_keys = (
+        "source_row_id", "action", "symbol", "currency", "asset_type", "unit",
+        "quantity", "price", "reversal_of", "transaction_date",
+    )
+    if any(previous.get(key) != current.get(key) for key in stable_keys):
+        return False
+    try:
+        from decimal import Decimal
+
+        return Decimal(str(previous.get("reconciliation_delta"))) == Decimal(
+            str(current.get("reconciliation_delta"))
+        )
+    except Exception:
+        return previous.get("reconciliation_delta") == current.get("reconciliation_delta")
+
+
 def _finite_json(value):
     """Convert non-finite floats to JSON null before external writes."""
     if isinstance(value, float):
@@ -161,6 +188,12 @@ def upload_private_transactions(transactions, *, session=None) -> str:
     for payload in payloads:
         previous = existing.get(payload["transaction_id"])
         if previous is not None and previous != payload:
+            if _same_legacy_reconciliation(previous, payload):
+                print(
+                    "Supabase legacy reconciliation replay accepted; "
+                    f"immutable row preserved: {payload['transaction_id']}"
+                )
+                continue
             raise RuntimeError(
                 f"immutable ledger conflict for transaction_id {payload['transaction_id']}"
             )

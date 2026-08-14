@@ -119,6 +119,40 @@ class SupabaseSyncTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 upload_private_transactions([sample_transaction("1")], session=FakeSession(existing))
 
+    def test_legacy_reconciliation_replay_preserves_immutable_row(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        old = Transaction(
+            transaction_id="55555555-5555-4555-8555-555555555555",
+            source_row_id="表單回覆 3:23",
+            submitted_at="2026/8/13 下午 3:08:19",
+            submitter_email="legacy@local.invalid",
+            approved=True,
+            transaction_date=date(2026, 8, 13),
+            asset_type="現金_TWD",
+            symbol="TWD",
+            action=Action.SET_BALANCE,
+            quantity=Decimal("150000"),
+            unit="TWD",
+            currency="TWD",
+            reconciliation_delta=Decimal("150000.0"),
+            compatibility_used="legacy_target_from_price_field",
+        )
+        current = Transaction(
+            **{**old.__dict__, "submitter_email": "owner@example.com", "compatibility_used": None}
+        )
+        existing = [{"transaction_id": old.transaction_id, "payload": transaction_payload(old)}]
+        session = FakeSession(existing)
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(upload_private_transactions([current], session=session), "unchanged")
+        self.assertEqual(len(session.calls), 1)
+
     def test_goal_state_uses_private_service_boundary(self):
         env = {
             "SUPABASE_URL": "https://example.supabase.co",
