@@ -6,7 +6,7 @@
 
 | ID | 任務 | 狀態 | 證據 |
 | --- | --- | --- | --- |
-| E-001 | 固定交易欄位與拒絕原因 | PASS | 154 項 Python unittest 全通過，包含 `test_header_order_is_explicit_and_quantity_lot_is_normalized` |
+| E-001 | 固定交易欄位與拒絕原因 | PASS | 159 項 Python unittest 全通過，包含 Form V2 與 `test_header_order_is_explicit_and_quantity_lot_is_normalized` |
 | E-002 | `SET_BALANCE` 明確命令 | PASS | `test_explicit_set_balance_is_applied`、`test_reconciliation_sets_exact_balance_and_is_idempotent` |
 | E-003 | 舊表單現金快照相容 | PASS | `test_legacy_form_replace_cash_row_becomes_set_balance`、`test_original_cash_snapshot_description_uses_legacy_price_target` |
 | E-004 | 對帳 delta 與損益邊界 | PASS | `test_reconciliation_is_not_external_flow_or_market_pnl`、`test_legacy_inventory_and_canonical_event_share_final_cash` |
@@ -19,12 +19,12 @@
 | E-011 | Supabase 私有同步 | PASS | 同一正式 run 日誌：`Supabase private snapshot uploaded`；控制台 RLS／snapshot 已讀回 |
 | E-012 | 備援排程 | PASS（workflow evidence） | Deployment workflow 定義 `40 21 * * 1-5`（台灣 05:40）與 `45 6 * * 1-5`（台灣 14:45）；近期 schedule runs `31749760663`、`31680517185` 成功 |
 | E-013 | Watchdog 排程 | PASS | Watchdog schedule runs `31750470338`、`31688525224` 成功 |
-| E-014 | Google Form 題目切換 | BLOCKED（外部介面） | 程式提供四欄規格與 legacy adapter；尚未取得 Form 編輯權限，不能宣稱題目已切換 |
+| E-014 | Google Form V2 題目與相容解析 | PASS | 已取得編輯權限並完成五段式表單結構；程式新增 V2 adapter、混合歷史列相容解析與原始現金校正列保留。 |
 
 ## Completion debt
 
 1. 正式來源列的 production cash=NT$150,000 仍需在實際表單資料完成後讀回快照驗證。
-2. Google Form 四欄題目與帳號限制需在表單端完成；無編輯權限時維持 E-014 BLOCKED。
+2. 表單 V2 已完成，仍需送出一筆非破壞性的測試回覆並確認回應列由 Actions 解析為正確狀態。
 3. GitHub schedule 觸發受平台排程延遲影響；workflow 定義與近期成功 run 已驗證，仍需持續觀測準點率。
 4. 任何資料過期、缺漏或對帳失敗時仍只能提示，不得產生交易建議；此規則由測試與 runtime guardrail 維持。
 
@@ -32,6 +32,5 @@
 
 ```text
 python -m unittest discover -s tests -q
-154 tests passed
+159 tests passed
 ```
-
