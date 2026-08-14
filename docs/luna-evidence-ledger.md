@@ -6,7 +6,7 @@
 
 | ID | 任務 | 狀態 | 證據 |
 | --- | --- | --- | --- |
-| E-001 | 固定交易欄位與拒絕原因 | PASS | 159 項 Python unittest 全通過，包含 Form V2 與 `test_header_order_is_explicit_and_quantity_lot_is_normalized` |
+| E-001 | 固定交易欄位與拒絕原因 | PASS | 161 項 Python unittest 全通過，包含 Form V2、legacy replay 與 `test_header_order_is_explicit_and_quantity_lot_is_normalized` |
 | E-002 | `SET_BALANCE` 明確命令 | PASS | `test_explicit_set_balance_is_applied`、`test_reconciliation_sets_exact_balance_and_is_idempotent` |
 | E-003 | 舊表單現金快照相容 | PASS | `test_legacy_form_replace_cash_row_becomes_set_balance`、`test_original_cash_snapshot_description_uses_legacy_price_target` |
 | E-004 | 對帳 delta 與損益邊界 | PASS | `test_reconciliation_is_not_external_flow_or_market_pnl`、`test_legacy_inventory_and_canonical_event_share_final_cash` |
@@ -27,12 +27,13 @@
 2. 表單 V2 已完成，仍需送出一筆非破壞性的測試回覆並確認回應列由 Actions 解析為正確狀態。
 3. GitHub schedule 觸發受平台排程延遲影響；workflow 定義與近期成功 run 已驗證，仍需持續觀測準點率。
 4. 任何資料過期、缺漏或對帳失敗時仍只能提示，不得產生交易建議；此規則由測試與 runtime guardrail 維持。
+5. PR #125 合併後，必須重跑正式 Actions，確認 immutable replay 修復不再阻斷私有同步。
 
 ## Reproduction gate
 
 ```text
 python -m unittest discover -s tests -q
-160 tests passed
+161 tests passed
 ```
 
 ## Latest verification note (2026-08-14)
@@ -40,6 +41,14 @@ python -m unittest discover -s tests -q
 - Form V2 duplicate branch headers are resolved by selecting the first non-empty
   value for repeated currency, date, note, and amount columns.
 - `tests.test_form_v2` covers a stock row with repeated Google Form headers;
-  the full suite is 160 tests passing.
-- PR #123 remains open for review; post-merge production acceptance is pending
-  until the PR is merged.
+  the full suite is 161 tests passing.
+- PR #124 is merged as `d6a2272`.
+- Formal run `31768248423` reached the private transaction sync and correctly
+  failed closed on an immutable conflict caused by the same legacy cash row
+  being replayed after the Form V2 canonical-label fix. The existing Supabase
+  row was inspected read-only and confirmed as the original
+  `legacy_target_from_price_field` `SET_BALANCE` event.
+- PR #125 adds a narrow, semantic-equivalence-only replay rule and regression
+  test. It never overwrites the stored row; any financial/source-field change
+  still fails closed. CI (Analyze Python and CodeQL) passed; production rerun
+  remains pending until PR #125 is merged.

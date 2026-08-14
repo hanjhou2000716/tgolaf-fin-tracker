@@ -7,3 +7,12 @@ Actions 的 server-side service role 執行；匿名與一般 authenticated clie
 同一 UUID 重跑時會被視為冪等 replay，不會重複計算。若同一 UUID 的內容不同，
 同步會 fail closed，避免覆蓋歷史。更正交易必須使用 `REVERSAL` 並指定
 `reversal_of`，不可直接修改原交易。
+
+## Legacy compatibility replay
+
+During the Form V2 migration, a failed production build may already have
+persisted a cash `SET_BALANCE` row using the legacy target-from-price-field
+adapter. A later canonical replay is accepted only when its source row,
+currency, target, date, action, and reconciliation delta are identical. The
+original immutable row is retained and no replacement write is issued. Any
+other payload difference still fails closed as an immutable-ledger conflict.
