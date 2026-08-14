@@ -14,7 +14,11 @@ const serviceRoleKey = Deno.env.get("PORTFOLIO_SERVICE_ROLE_KEY")
   ?? "";
 const telegramBotToken = Deno.env.get("TELEGRAM_BOT_TOKEN") ?? Deno.env.get("TELEGRAM_TOKEN") ?? "";
 const telegramAllowedUserId = Deno.env.get("TELEGRAM_ALLOWED_USER_ID") ?? Deno.env.get("TELEGRAM_CHAT_ID") ?? "";
-const portfolioUserId = Deno.env.get("PORTFOLIO_USER_ID") ?? "";
+// Keep the documented GitHub/Supabase secret name as the primary fallback;
+// PORTFOLIO_USER_ID remains supported for existing deployments.
+const portfolioUserId = Deno.env.get("PORTFOLIO_USER_ID")
+  ?? Deno.env.get("SUPABASE_USER_ID")
+  ?? "";
 const telegramInitDataMaxAgeSeconds = 300;
 const allowedOrigins = (Deno.env.get("CORS_ALLOWLIST") ?? "")
   .split(",")
