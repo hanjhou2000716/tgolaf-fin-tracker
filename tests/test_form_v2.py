@@ -26,6 +26,10 @@ class FormV2Tests(unittest.TestCase):
         status = command_from_transaction(result.accepted[0])
         self.assertEqual(status.status, CommandStatus.APPLIED_WITH_COMPATIBILITY)
         self.assertEqual(status.compatibility_used, "legacy_target_from_price_field")
+        self.assertEqual(
+            result.accepted_rows[0],
+            ("2026-08-13", "現金_TWD", "TWD", "取代", "150000"),
+        )
 
     def test_set_balance_uses_target_balance_and_is_idempotent_by_source_row(self):
         row = [
@@ -55,6 +59,7 @@ class FormV2Tests(unittest.TestCase):
         self.assertEqual(tx.quantity, Decimal("1000"))
         self.assertEqual(tx.unit, "SHARE")
         self.assertEqual(tx.price, Decimal("55.30"))
+        self.assertEqual(result.accepted_rows[0][1:4], ("台股", "006208", "買入"))
 
     def test_duplicate_branch_headers_choose_non_empty_column(self):
         headers = [

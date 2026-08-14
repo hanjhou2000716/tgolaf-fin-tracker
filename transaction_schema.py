@@ -391,22 +391,22 @@ def _parse_v2_transaction_rows(
     def legacy_output(asset_type: str, symbol: str, action: Action, quantity: Decimal, transaction_date: date):
         asset = asset_type
         if asset in {"台股", "現貨台股"}:
-            asset = "?啗"
+            asset = "台股"
         elif asset in {"美股", "現貨美股"}:
-            asset = "蝢"
+            asset = "美股"
         elif asset.startswith("現金") or asset == "現金_TWD":
-            asset = "?暸?_TWD"
+            asset = "現金_TWD"
         elif asset == "現金_USD":
-            asset = "?暸?_USD"
+            asset = "現金_USD"
         mode = {
-            Action.BUY: "鞎瑕",
-            Action.DEPOSIT: "摮",
-            Action.BORROW: "摮",
-            Action.SELL: "鞈?",
-            Action.WITHDRAWAL: "??",
-            Action.REPAY: "??",
-            Action.SET_BALANCE: "?誨",
-        }.get(action, "?誨")
+            Action.BUY: "買入",
+            Action.DEPOSIT: "存入",
+            Action.BORROW: "存入",
+            Action.SELL: "賣出",
+            Action.WITHDRAWAL: "提領",
+            Action.REPAY: "提領",
+            Action.SET_BALANCE: "取代",
+        }.get(action, "取代")
         return (transaction_date.isoformat(), asset, symbol, mode, str(quantity))
     seen = set(existing_ids or set())
     accepted, pending, rejected, accepted_rows = [], [], [], []
