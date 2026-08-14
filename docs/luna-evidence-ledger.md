@@ -16,7 +16,7 @@
 | E-007 | Supabase RLS | PASS（控制台讀取證據） | `goal_ladder_states`、`portfolio_snapshots`、`portfolio_transactions` 均已確認 RLS；私有列已有 owner user id |
 | E-008 | 公開站去除真實資料 | PASS（程式／靜態） | public payload security tests；公開頁只保留 Demo |
 | E-009 | Google Form 題目切換 | BLOCKED（外部介面） | 程式已提供四欄規格與 legacy adapter；尚未取得 Form 編輯權限，不能宣稱題目已切換 |
-| E-010 | GitHub Actions PR | IN PROGRESS | PR #121：`G0: add SET_BALANCE reconciliation and transaction status`；需使用者合併後再做正式部署驗收 |
+| E-010 | GitHub Actions PR | PASS | PR #121 已合併（merge commit `99f3d58`）；Analyze Python、CodeQL 均 SUCCESS |
 | E-011 | 正式 cash=150000 | PENDING | 已有 deterministic fixture；尚待合併後以正式來源列重跑並讀回快照 |
 | E-012 | 雙 Cron／Telegram／Supabase post-merge | PENDING | 需 PR 合併後執行正式 Actions、05:40／14:45 及 Telegram 強制發送驗證 |
 
@@ -42,4 +42,3 @@
 python -m unittest discover -s tests -q
 154 tests passed
 ```
-
