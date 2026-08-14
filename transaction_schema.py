@@ -414,7 +414,7 @@ def _parse_v2_transaction_rows(
             for index in mapping.get(field, ())
         )
 
-    def legacy_output(asset_type: str, symbol: str, action: Action, quantity: Decimal, transaction_date: date):
+    def legacy_output(asset_type: str, symbol: str, action: Action, quantity: Decimal, transaction_date: date, *, signed: bool = False):
         asset = asset_type
         if asset in {"台股", "現貨台股"}:
             asset = "台股"
@@ -433,6 +433,10 @@ def _parse_v2_transaction_rows(
             Action.REPAY: "提領",
             Action.SET_BALANCE: "取代",
         }.get(action, "取代")
+        if signed and action in {Action.BUY, Action.DEPOSIT, Action.BORROW}:
+            mode = f"{mode} (+)"
+        elif signed and action in {Action.SELL, Action.WITHDRAWAL, Action.REPAY}:
+            mode = f"{mode} (-)"
         return (transaction_date.isoformat(), asset, symbol, mode, str(quantity))
     seen = set(existing_ids or set())
     accepted, pending, rejected, accepted_rows = [], [], [], []
@@ -553,7 +557,7 @@ def _parse_v2_transaction_rows(
                         currency=old_currency,
                         compatibility_used="legacy_mixed_form_row",
                     ))
-                    accepted_rows.append(legacy_output(old_asset, old_symbol or old_currency, old_mode, old_qty, old_date))
+                    accepted_rows.append(legacy_output(old_asset, old_symbol or old_currency, old_mode, old_qty, old_date, signed=True))
                     seen.add(transaction_id)
                     continue
                 # Ignore blank migration rows rather than treating them as a
