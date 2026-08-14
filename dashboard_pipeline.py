@@ -21,6 +21,7 @@ from asset_tree import build_asset_tree
 from public_site import write_public_site
 from supabase_sync import load_goal_state, save_goal_state, upload_private_snapshot, upload_private_transactions
 from transaction_schema import TransactionSchemaError, parse_transaction_rows
+from transaction_command import apply_reconciliation_events, build_ingestion_contract, build_ingestion_status
 from performance import performance_breakdown
 from market_data import MarketDataService, Quote
 from metrics import summarize_performance
@@ -157,6 +158,7 @@ def calculate_current_assets():
         
     data_rows, history_sheet = [], None
     transaction_audits, accepted_transactions, seen_transaction_ids = [], [], set()
+    transaction_ingestion = []
     for ws in sheet.worksheets():
         title_clean = ws.title.strip().lower()
         if "history" in title_clean or "歷史" in title_clean or "紀錄" in title_clean:
@@ -175,6 +177,11 @@ def calculate_current_assets():
                         seen_transaction_ids.update(item.transaction_id for item in parsed.accepted)
                         seen_transaction_ids.update(item.transaction_id for item in parsed.pending)
                         accepted_transactions.extend(parsed.accepted)
+                        transaction_ingestion.extend(build_ingestion_status(
+                            accepted=parsed.accepted,
+                            pending=parsed.pending,
+                            rejected=parsed.rejected,
+                        ))
                         transaction_audits.append({"sheet": ws.title, **parsed.audit_payload()})
                         data_rows.extend(parsed.accepted_rows)
                     except TransactionSchemaError as error:
@@ -193,9 +200,14 @@ def calculate_current_assets():
                     data_rows.extend(rows[1:])
                 
     if transaction_audits:
-        write_json(".private-build/transaction_audit.json", {"strict": FORM_SCHEMA_STRICT, "sheets": transaction_audits})
-    ledger_sync_result = upload_private_transactions(accepted_transactions)
-    if not data_rows: return {}, history_sheet, accepted_transactions, ledger_sync_result
+        write_json(".private-build/transaction_audit.json", {
+            "strict": FORM_SCHEMA_STRICT,
+            "sheets": transaction_audits,
+            "transactionIngestion": build_ingestion_contract(transaction_ingestion),
+        })
+    if not data_rows:
+        ledger_sync_result = upload_private_transactions(accepted_transactions)
+        return {}, history_sheet, accepted_transactions, ledger_sync_result
         
     def parse_date(row):
         if not row: return datetime.datetime.min
@@ -276,6 +288,15 @@ def calculate_current_assets():
         if asset_type == "質押負債": inventory["質押負債"]["History"].append((row_date, inventory["質押負債"]["Current_Debt"]))
         elif asset_type == "質押利率": inventory["質押利率"]["History"].append((row_date, inventory["質押利率"]["Rate"]))
 
+    accepted_transactions, reconciliation_events = apply_reconciliation_events(inventory, accepted_transactions)
+    ledger_sync_result = upload_private_transactions(accepted_transactions)
+    if transaction_audits:
+        write_json(".private-build/transaction_audit.json", {
+            "strict": FORM_SCHEMA_STRICT,
+            "sheets": transaction_audits,
+            "transactionIngestion": build_ingestion_contract(transaction_ingestion),
+            "reconciliationEvents": reconciliation_events,
+        })
     return inventory, history_sheet, accepted_transactions, ledger_sync_result
 
 # ==========================================
@@ -313,6 +334,14 @@ def main():
     display_date = tw_now.strftime("%m/%d")
         
     inventory, history_sheet, accepted_transactions, ledger_sync_result = calculate_current_assets()
+    transaction_ingestion = build_ingestion_contract(build_ingestion_status(accepted=accepted_transactions))
+    audit_path = ".private-build/transaction_audit.json"
+    if os.path.isfile(audit_path):
+        try:
+            audit_payload = json.load(open(audit_path, encoding="utf-8"))
+            transaction_ingestion = audit_payload.get("transactionIngestion") or transaction_ingestion
+        except (OSError, ValueError, TypeError):
+            pass
     validate_inventory(inventory)
     validate_history_sheet(history_sheet)
     history_records = history_sheet.get_all_records()
@@ -530,6 +559,7 @@ def main():
         expenses=performance["expenses"],
         financing_cash_flow=performance["financingCashFlow"],
         external_cash_flow=performance["externalCashFlow"],
+        reconciliation_adjustment=performance.get("reconciliationAdjustment", 0),
     )
     alert_engine = AlertEngine()
     alerts = alert_engine.evaluate({
@@ -1316,6 +1346,7 @@ def main():
             "alerts": alerts,
             "scenarioLab": scenario_lab,
             "runtimeExtensions": runtime_extensions,
+            "transactionIngestion": transaction_ingestion,
             "nvdaExposure": {"value": round(nvda_exposure_twd, 2), "percent": round(nvda_pct, 1), "etfWeights": {symbol: {"weight": round(weight * 100, 2), "source": source} for symbol, (weight, source) in etf_nvda_weights.items()}},
         },
     }

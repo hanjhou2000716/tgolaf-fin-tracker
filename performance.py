@@ -7,6 +7,7 @@ from transaction_schema import Action, Transaction
 
 EXTERNAL_CASH_ACTIONS = {Action.DEPOSIT, Action.WITHDRAWAL}
 FINANCING_ACTIONS = {Action.BORROW, Action.REPAY}
+RECONCILIATION_ACTIONS = {Action.SET_BALANCE}
 INCOME_ACTIONS = {Action.DIVIDEND, Action.INTEREST}
 EXPENSE_ACTIONS = {Action.FEE, Action.TAX}
 
@@ -27,6 +28,8 @@ def classify_transaction(transaction: Transaction) -> tuple[str, Decimal]:
         return ("external_cash_flow", amount if transaction.action == Action.DEPOSIT else -amount)
     if transaction.action in FINANCING_ACTIONS:
         return ("financing_cash_flow", amount if transaction.action == Action.BORROW else -amount)
+    if transaction.action in RECONCILIATION_ACTIONS:
+        return ("reconciliation_adjustment", Decimal(transaction.reconciliation_delta or 0))
     if transaction.action in INCOME_ACTIONS:
         return ("income", amount)
     if transaction.action in EXPENSE_ACTIONS:
@@ -42,6 +45,7 @@ def performance_breakdown(current_net_asset, previous_net_asset, transactions=()
     financing_cash_flow = Decimal("0")
     income = Decimal("0")
     expense = Decimal("0")
+    reconciliation_adjustment = Decimal("0")
     for transaction in transactions:
         category, amount = classify_transaction(transaction)
         if category == "external_cash_flow":
@@ -52,8 +56,10 @@ def performance_breakdown(current_net_asset, previous_net_asset, transactions=()
             income += amount
         elif category == "expense":
             expense += amount
+        elif category == "reconciliation_adjustment":
+            reconciliation_adjustment += amount
     net_change = current - previous
-    transaction_effect = external_cash_flow + financing_cash_flow + income + expense
+    transaction_effect = external_cash_flow + financing_cash_flow + income + expense + reconciliation_adjustment
     market_pnl = net_change - transaction_effect
     return {
         "netChange": round(float(net_change), 2),
@@ -62,5 +68,6 @@ def performance_breakdown(current_net_asset, previous_net_asset, transactions=()
         "financingCashFlow": round(float(financing_cash_flow), 2),
         "income": round(float(income), 2),
         "expenses": round(float(expense), 2),
+        "reconciliationAdjustment": round(float(reconciliation_adjustment), 2),
         "reconciled": round(float(market_pnl + transaction_effect), 2) == round(float(net_change), 2),
     }

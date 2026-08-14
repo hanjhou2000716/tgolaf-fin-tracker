@@ -111,6 +111,17 @@ def _change_debt(state: PortfolioState, currency: str, delta: Decimal) -> None:
         state.debt.pop(currency, None)
 
 
+def _set_cash_balance(state: PortfolioState, currency: str, target: Decimal) -> None:
+    """Set a cash balance from an append-only reconciliation event."""
+    target = Decimal(target)
+    if not target.is_finite() or target < 0:
+        raise PortfolioLedgerError("SET_BALANCE target must be finite and non-negative")
+    if target:
+        state.cash[currency] = target
+    else:
+        state.cash.pop(currency, None)
+
+
 def _notional(tx: Transaction) -> Decimal:
     price = tx.price
     if price is None:
@@ -192,6 +203,13 @@ def _apply_one(state: PortfolioState, tx: Transaction, *, inverse: bool = False)
             _change_cash(state, currency, -amount)
         return
 
+    if action == Action.SET_BALANCE:
+        currency = _currency(tx)
+        if not (tx.asset_type.strip().lower().startswith(("現金", "cash")) or tx.symbol.upper() == currency):
+            raise PortfolioLedgerError("SET_BALANCE only supports an explicit cash asset")
+        _set_cash_balance(state, currency, tx.quantity)
+        return
+
     if action == Action.SPLIT:
         key = _position_key(tx)
         ratio = _positive(tx.quantity, "split ratio")
@@ -268,3 +286,40 @@ class PortfolioLedger:
 
     def snapshot(self) -> dict:
         return self.state.as_dict()
+
+    def reconcile_cash_balance(
+        self,
+        currency: str,
+        target_balance: Decimal,
+        *,
+        transaction_id: str,
+        source_row_id: str = "reconciliation",
+        submitted_at: str = "",
+        transaction_date=None,
+        submitter_email: str = "",
+    ) -> Transaction:
+        """Append a deterministic SET_BALANCE event and return it."""
+        from datetime import date
+
+        target = Decimal(str(target_balance))
+        if not target.is_finite() or target < 0:
+            raise PortfolioLedgerError("target balance must be finite and non-negative")
+        currency = currency.upper().strip()
+        current = self.state.cash_balance(currency)
+        event = Transaction(
+            transaction_id=transaction_id,
+            source_row_id=source_row_id,
+            submitted_at=submitted_at,
+            submitter_email=submitter_email,
+            approved=True,
+            transaction_date=transaction_date or date.today(),
+            asset_type="現金_TWD" if currency == "TWD" else "現金_USD",
+            symbol=currency,
+            action=Action.SET_BALANCE,
+            quantity=target,
+            unit=currency,
+            currency=currency,
+            reconciliation_delta=target - current,
+        )
+        self.append(event)
+        return event

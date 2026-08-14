@@ -11,6 +11,7 @@ def build_pnl_attribution(
     expenses=0,
     financing_cash_flow=0,
     external_cash_flow=0,
+    reconciliation_adjustment=0,
 ):
     previous_categories = previous_categories or {}
     current_categories = current_categories or {}
@@ -23,8 +24,9 @@ def build_pnl_attribution(
     fees = float(expenses)
     interest = float(financing_cash_flow)
     external = float(external_cash_flow)
+    reconciliation = float(reconciliation_adjustment)
     net_change = float(current_net_asset) - float(previous_net_asset)
-    known = tw + us + fx + dividends + fees + interest + external
+    known = tw + us + fx + dividends + fees + interest + external + reconciliation
     other = net_change - known
     items = {
         "twStockPrice": round(tw, 2),
@@ -34,6 +36,7 @@ def build_pnl_attribution(
         "fees": round(fees, 2),
         "pledgeInterest": round(interest, 2),
         "externalCashFlow": round(external, 2),
+        "reconciliationAdjustment": round(reconciliation, 2),
         "other": round(other, 2),
     }
     items["netChange"] = round(net_change, 2)
