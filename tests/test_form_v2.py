@@ -12,6 +12,27 @@ HEADERS = [
 
 
 class FormV2Tests(unittest.TestCase):
+    def test_mixed_legacy_columns_do_not_drop_historical_buy_rows(self):
+        """The production response sheet keeps old and V2 branches together."""
+        headers = [
+            "Timestamp", "asset_type", "symbol", "action",
+            "quantity", "market", "approved", "legacy_extra", "unit", "currency",
+            "target_balance", "transaction_date", "currency_v2", "鈭斗?憿?",
+            "note", "symbol_v2", "unit_v2", "currency_v2b", "note_v2", "quantity_v2",
+            "price", "amount", "currency_v2c", "transaction_date_v2", "note_v2b", "amount_v2",
+        ]
+        row = [
+            "2026-05-26T14:50:13+08:00", "?啗", "2330", "鞎瑕", "2",
+            "", "", "", "SHARE", "TWD", "", "", "", "", "", "", "", "", "", "",
+            "", "", "", "", "", "",
+        ]
+        result = parse_transaction_rows(headers, [row], source_sheet="表單回覆 3")
+        self.assertEqual(result.rejected, ())
+        self.assertEqual(len(result.accepted), 1)
+        self.assertEqual(result.accepted[0].action, Action.BUY)
+        self.assertEqual(result.accepted[0].symbol, "2330")
+        self.assertEqual(result.accepted[0].quantity, Decimal("2"))
+
     def test_mixed_response_sheet_keeps_exact_legacy_cash_snapshot(self):
         headers = [
             "時間戳記", "資產類別", "資產代號", "交易類型 ",

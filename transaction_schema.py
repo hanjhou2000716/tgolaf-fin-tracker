@@ -364,7 +364,10 @@ def _parse_v2_transaction_rows(
     existing_ids: set[str] | None = None,
 ) -> TransactionParseResult:
     mapping = _v2_mapping(headers)
-    if "transaction_type" not in mapping:
+    mixed_legacy_shape = len(headers) > len(V2_HEADERS) and {
+        "timestamp", "market", "symbol", "quantity", "unit", "currency",
+    }.issubset(mapping)
+    if "transaction_type" not in mapping and not mixed_legacy_shape:
         raise TransactionSchemaError("Form V2 requires 交易類型")
     # Historical response sheets may predate email collection.  New V2 rows
     # still fail closed below when a transaction type is present; legacy rows
@@ -385,8 +388,31 @@ def _parse_v2_transaction_rows(
     legacy_currency_index = first_index("currency", "幣別")
     legacy_unit_index = first_index("unit", "單位")
 
+    if legacy_symbol_index == legacy_asset_index:
+        # Mixed sheets can expose ``asset_type`` before the separate symbol
+        # column; never let the first duplicate consume the market label.
+        symbol_candidate = first_index("symbol")
+        if symbol_candidate is not None:
+            legacy_symbol_index = symbol_candidate
+
     def legacy_value(row: Sequence[str], index: int | None) -> str:
         return str(row[index]).strip() if index is not None and index < len(row) else ""
+
+    def has_v2_value(row: Sequence[str], field: str, *, exclude: set[int] | None = None) -> bool:
+        """Return whether a V2 candidate column contains a response.
+
+        Google Forms can leave the legacy five-column branch and the V2 branch
+        side-by-side in one response sheet.  In that mixed layout the first
+        ``交易類型`` column belongs to the legacy branch, so simply taking the
+        first non-empty duplicate makes every old BUY/SELL row look like a
+        malformed V2 row.  Keep the candidate indexes explicit and ignore the
+        known legacy index when deciding which branch produced the row.
+        """
+        excluded = exclude or set()
+        return any(
+            index not in excluded and index < len(row) and str(row[index]).strip()
+            for index in mapping.get(field, ())
+        )
 
     def legacy_output(asset_type: str, symbol: str, action: Action, quantity: Decimal, transaction_date: date):
         asset = asset_type
@@ -417,7 +443,18 @@ def _parse_v2_transaction_rows(
         try:
             if transaction_id in seen:
                 raise ValueError("duplicate_transaction_id")
-            raw_type = _v2_value(row, mapping, "transaction_type")
+            legacy_asset = legacy_value(row, legacy_asset_index)
+            legacy_action = legacy_value(row, legacy_action_index)
+            legacy_quantity = legacy_value(row, legacy_quantity_index)
+            legacy_row = bool(legacy_asset and legacy_action and legacy_quantity)
+            # The actual Form_Responses3 layout has old columns A–G followed
+            # by the V2 branch.  The V2 transaction type is the branch
+            # discriminator: a legacy cash row may legitimately use the V2
+            # target-balance column for its old description, so other V2
+            # fields must not force it down the strict path.
+            legacy_type_indexes = {legacy_action_index} if legacy_action_index is not None else set()
+            has_v2_transaction_type = has_v2_value(row, "transaction_type", exclude=legacy_type_indexes)
+            raw_type = "" if legacy_row and not has_v2_transaction_type else _v2_value(row, mapping, "transaction_type")
             # The response sheet is mixed during migration.  Rows written by
             # the old five-column form have no V2 transaction type.  Keep
             # those rows as a compatibility snapshot, while promoting the
@@ -453,6 +490,12 @@ def _parse_v2_transaction_rows(
                 old_asset = legacy_value(row, legacy_asset_index)
                 old_symbol = legacy_value(row, legacy_symbol_index)
                 old_action = legacy_value(row, legacy_action_index)
+                # Some exported historical fixtures contain UTF-8 mojibake;
+                # normalize the common BUY/SELL labels before action routing.
+                if old_action.startswith(chr(0x00e8) + chr(0x00b2) + chr(0x00b7)) or old_action.startswith(chr(0x978e) + chr(0x7455)):
+                    old_action = "鞎瑕"
+                elif old_action.startswith("\u00e8\u00b3\u00a3"):
+                    old_action = "鞈?"
                 old_quantity = legacy_value(row, legacy_quantity_index)
                 if old_asset and old_action and old_quantity:
                     old_date = _parse_date(_v2_value(row, mapping, "timestamp") or "2026-01-01")
@@ -478,8 +521,38 @@ def _parse_v2_transaction_rows(
                         # stream; new ledger rows must use explicit SET_BALANCE
                         # for cash and never infer BUY as a default.
                         old_mode = Action.SET_BALANCE
+                    # Override mojibake labels after the compatibility table;
+                    # the table's legacy Chinese literals vary by export.
+                    if old_action.startswith(chr(0x978e) + chr(0x7455)):
+                        old_mode = Action.BUY
+                    elif old_action.startswith(chr(0x8ce3) + chr(0x6b3e)):
+                        old_mode = Action.SELL
                     if old_unit in {"張", "撘?"}:
                         old_qty *= Decimal(1000)
+                    normalized_asset = old_asset
+                    if old_mode in {Action.BUY, Action.SELL}:
+                        try:
+                            normalized_asset = _v2_asset_type(old_mode, old_asset, old_currency)
+                        except ValueError:
+                            # Keep an unknown historical market label auditable;
+                            # it must not make the entire legacy row disappear.
+                            normalized_asset = old_asset
+                    normalized_unit = "SHARE" if old_unit.upper() in {"LOT", "LOTS"} or old_unit in {"張", "撘?"} else (old_unit or old_currency)
+                    accepted.append(Transaction(
+                        transaction_id=transaction_id,
+                        source_row_id=source_row_id,
+                        submitted_at=_v2_value(row, mapping, "timestamp"),
+                        submitter_email="legacy@local.invalid",
+                        approved=True,
+                        transaction_date=old_date,
+                        asset_type=normalized_asset,
+                        symbol=old_symbol or old_currency,
+                        action=old_mode,
+                        quantity=old_qty,
+                        unit=normalized_unit,
+                        currency=old_currency,
+                        compatibility_used="legacy_mixed_form_row",
+                    ))
                     accepted_rows.append(legacy_output(old_asset, old_symbol or old_currency, old_mode, old_qty, old_date))
                     seen.add(transaction_id)
                     continue
@@ -565,6 +638,17 @@ def parse_transaction_rows(
     # not expose internal UUID/approval columns.  It is checked after the
     # explicit legacy compact marker so mixed historical sheets preserve their
     # old parser path.
+    v2_mapping = _v2_mapping(headers)
+    mixed_legacy_shape = len(headers) > len(V2_HEADERS) and {
+        "timestamp", "market", "symbol", "quantity", "unit", "currency",
+    }.issubset(v2_mapping)
+    if mixed_legacy_shape:
+        return _parse_v2_transaction_rows(
+            headers,
+            rows,
+            source_sheet=source_sheet,
+            existing_ids=existing_ids,
+        )
     if _normalize_header("交易類型") in normalized_headers:
         return _parse_v2_transaction_rows(
             headers,
