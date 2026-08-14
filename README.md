@@ -369,6 +369,18 @@ queue instead of being guessed. If an `approved` column is retained, `false`
 continues to route the row to the pending queue; otherwise a successfully
 parsed compact row is accepted after the form's account restriction.
 
+### SET_BALANCE / 對帳命令
+
+現金餘額校正使用獨立的 `SET_BALANCE` 命令，不可用 `存入` 或 `提領` 代替。必要欄位是 `source_row_id`、`currency`（`TWD`／`USD`）與非負的 `target_balance`，資產必須是現金；例如：
+
+```text
+SET_BALANCE 現金 TWD 150000
+```
+
+命令會以 append-only ledger event 將現金設為目標值。重播同一 UUID 是 no-op；同一 UUID 搭配不同內容會拒絕。這筆調整不算外部現金流、融資現金流或市場損益，並保留 `reconciliationAdjustment` 供損益歸因核對。舊表單若在明確現金／餘額描述中把目標值放在舊 `price` 欄，系統只會以 `legacy_target_from_price_field` 相容層轉換，狀態標記為 `APPLIED_WITH_COMPATIBILITY`；其它模糊或負值資料一律 `REJECTED`。
+
+私有快照的 `transactionIngestion` 只保留最近三筆狀態（`APPLIED`、`PENDING`、`REJECTED` 或 `APPLIED_WITH_COMPATIBILITY`），MiniApp 可顯示來源列、命令、幣別、目標值與拒絕原因，不包含提交者 Email。
+
 Growth Actions 使用：
 
 | Secret | 用途 |

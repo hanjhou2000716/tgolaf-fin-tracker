@@ -23,6 +23,10 @@ def transaction_payload(transaction: Transaction) -> dict:
     payload["quantity"] = str(transaction.quantity)
     if transaction.price is not None:
         payload["price"] = str(transaction.price)
+    if transaction.reconciliation_delta is not None:
+        payload["reconciliation_delta"] = str(transaction.reconciliation_delta)
+    if transaction.compatibility_used:
+        payload["compatibility_used"] = transaction.compatibility_used
     payload["transaction_date"] = transaction.transaction_date.isoformat()
     return payload
 

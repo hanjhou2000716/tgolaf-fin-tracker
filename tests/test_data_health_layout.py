@@ -63,6 +63,11 @@ class DataHealthLayoutTests(unittest.TestCase):
         self.assertIn(".btn.secondary{background:var(--navy);color:#fff;border-color:var(--navy)}", self.html)
         self.assertNotIn('target="_blank"', self.html)
 
+    def test_private_miniapp_has_recent_transaction_status_contract(self):
+        self.assertIn('id="transactionIngestion"', self.html)
+        self.assertIn('renderIngestion', self.html)
+        self.assertIn('transactionIngestion', self.html)
+
 
 if __name__ == "__main__":
     unittest.main()

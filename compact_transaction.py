@@ -33,6 +33,7 @@ _KNOWN_SYMBOLS = {
 }
 
 _ACTION_PATTERNS: tuple[tuple[Action, str], ...] = (
+    (Action.SET_BALANCE, r"SET[_ ]?BALANCE|設定餘額|設定現金|對帳|餘額校正|現金校正"),
     (Action.WITHDRAWAL, r"提領|提款|取出|withdraw(?:al)?"),
     (Action.DEPOSIT, r"存入|入金|存款|deposit"),
     (Action.BORROW, r"借款|借入|borrow"),
@@ -76,6 +77,8 @@ def _symbol(text: str, action: Action, currency: str) -> str:
     matches = [m.group(0).upper() for m in _SYMBOL_RE.finditer(text)]
     matches = [m for m in matches if m not in {"TWD", "USD", "NT"}]
     known = [m for m in matches if m in _KNOWN_SYMBOLS]
+    if action == Action.SET_BALANCE and currency:
+        return currency
     if action in {Action.DEPOSIT, Action.WITHDRAWAL} and currency and not known:
         return currency
     if len(set(known)) > 1:
@@ -152,7 +155,7 @@ def parse_compact_transaction(description: str) -> CompactTransaction:
             unit = "USD"
         else:
             unit = "TWD"
-    elif action in {Action.DEPOSIT, Action.WITHDRAWAL, Action.DIVIDEND, Action.INTEREST, Action.FEE, Action.TAX, Action.BORROW, Action.REPAY}:
+    elif action in {Action.DEPOSIT, Action.WITHDRAWAL, Action.DIVIDEND, Action.INTEREST, Action.FEE, Action.TAX, Action.BORROW, Action.REPAY, Action.SET_BALANCE}:
         unit = currency
     else:
         raise ValueError("買賣交易請填寫單位，例如 2 張或 3 股")

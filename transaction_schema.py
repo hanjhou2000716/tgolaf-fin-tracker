@@ -25,6 +25,7 @@ class Action(str, Enum):
     TRANSFER = "TRANSFER"
     FX_CONVERSION = "FX_CONVERSION"
     REVERSAL = "REVERSAL"
+    SET_BALANCE = "SET_BALANCE"
 
 
 class TransactionSchemaError(ValueError):
@@ -47,6 +48,8 @@ class Transaction:
     currency: str
     price: Decimal | None = None
     reversal_of: str | None = None
+    reconciliation_delta: Decimal | None = None
+    compatibility_used: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +117,7 @@ HEADER_ALIASES = {
     "currency": ("currency", "幣別"),
     "price": ("price", "價格", "成交價"),
     "reversal_of": ("reversal_of", "reversal of", "reversal_transaction_id"),
+    "target_balance": ("target_balance", "target balance", "目標餘額", "目標現金", "target_amount"),
 }
 
 COMPACT_DESCRIPTION_ALIASES = (
@@ -238,6 +242,12 @@ def _parse_action(value: str) -> Action:
         "轉移": Action.TRANSFER,
         "換匯": Action.FX_CONVERSION,
         "REVERSAL": Action.REVERSAL,
+        "SET_BALANCE": Action.SET_BALANCE,
+        "SETBALANCE": Action.SET_BALANCE,
+        "設定餘額": Action.SET_BALANCE,
+        "設定現金": Action.SET_BALANCE,
+        "對帳": Action.SET_BALANCE,
+        "餘額校正": Action.SET_BALANCE,
     }
     if normalized in aliases:
         return aliases[normalized]
@@ -375,6 +385,7 @@ def _parse_compact_transaction_rows(
         Action.TAX: "提領",
         Action.BORROW: "存入",
         Action.REPAY: "提領",
+        Action.SET_BALANCE: "SET_BALANCE",
     }
 
     for row_number, raw_row in enumerate(rows, start=2):
@@ -404,11 +415,25 @@ def _parse_compact_transaction_rows(
                 legacy_currency = row[legacy_indices["currency"]].strip().upper()
                 if not legacy_currency:
                     raise ValueError("currency is required")
-                legacy_action = _parse_action(row[legacy_indices["action"]])
                 legacy_symbol = row[legacy_indices["symbol"]].strip()
                 legacy_asset_type = row[legacy_indices["asset_type"]].strip()
                 if not legacy_symbol or not legacy_asset_type:
                     raise ValueError("asset_type and symbol are required")
+                raw_legacy_action = row[legacy_indices["action"]].strip()
+                normalized_action = _normalize_header(raw_legacy_action)
+                legacy_action = _parse_action(raw_legacy_action) if normalized_action not in {"取代", "覆蓋", "更新", "replace", "overwrite"} else Action.SET_BALANCE
+                # The pre-V2 form used 取代/覆蓋 plus the old price field for
+                # a cash-balance snapshot.  Adapt only an explicit cash row;
+                # all other unknown actions remain rejected.
+                if normalized_action in {"取代", "覆蓋", "更新", "replace", "overwrite"} and (
+                    legacy_asset_type.lower().startswith(("現金", "cash")) or legacy_symbol.upper() in {"TWD", "USD"}
+                ):
+                    legacy_action = Action.SET_BALANCE
+                    legacy_unit = legacy_currency
+                    if price_index is not None and price_index < len(row) and row[price_index].strip():
+                        legacy_quantity = Decimal(row[price_index].replace(",", "").replace("$", "").strip())
+                        if not legacy_quantity.is_finite() or legacy_quantity < 0:
+                            raise ValueError("SET_BALANCE target must be finite and non-negative")
                 transaction = Transaction(
                     transaction_id=(row[id_index].strip() if id_index is not None and id_index < len(row) and row[id_index].strip() else transaction_id),
                     source_row_id=source_row_id,
@@ -422,6 +447,7 @@ def _parse_compact_transaction_rows(
                     quantity=legacy_quantity,
                     unit=legacy_unit,
                     currency=legacy_currency,
+                    compatibility_used=("legacy_target_from_price_field" if legacy_action == Action.SET_BALANCE and price_index is not None and price_index < len(row) and row[price_index].strip() else None),
                 )
                 seen.add(transaction.transaction_id)
                 if not approved:
