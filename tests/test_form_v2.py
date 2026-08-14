@@ -26,6 +26,10 @@ class FormV2Tests(unittest.TestCase):
         status = command_from_transaction(result.accepted[0])
         self.assertEqual(status.status, CommandStatus.APPLIED_WITH_COMPATIBILITY)
         self.assertEqual(status.compatibility_used, "legacy_target_from_price_field")
+        self.assertEqual(
+            result.accepted_rows[0],
+            ("2026-08-13", "現金_TWD", "TWD", "取代", "150000"),
+        )
 
     def test_set_balance_uses_target_balance_and_is_idempotent_by_source_row(self):
         row = [
@@ -55,6 +59,24 @@ class FormV2Tests(unittest.TestCase):
         self.assertEqual(tx.quantity, Decimal("1000"))
         self.assertEqual(tx.unit, "SHARE")
         self.assertEqual(tx.price, Decimal("55.30"))
+        self.assertEqual(result.accepted_rows[0][1:4], ("台股", "006208", "買入"))
+
+    def test_duplicate_branch_headers_choose_non_empty_column(self):
+        headers = [
+            "Timestamp", "Email Address", "交易類型", "市場", "資產代號",
+            "數量", "單位", "價格", "幣別", "交易日期", "備註",
+            "金額", "幣別", "交易日期", "備註", "目標餘額", "幣別",
+            "交易日期", "備註",
+        ]
+        row = [
+            "2026-08-14T14:45:00+08:00", "owner@example.com", "買入", "台股",
+            "006208", "1", "張", "55.30", "TWD", "2026-08-14", "月買入",
+            "", "", "", "", "", "", "", "",
+        ]
+        result = parse_transaction_rows(headers, [row], source_sheet="Form V2")
+        self.assertEqual(len(result.accepted), 1)
+        self.assertEqual(result.accepted[0].currency, "TWD")
+        self.assertEqual(result.accepted[0].transaction_date.isoformat(), "2026-08-14")
 
     def test_cash_flow_requires_amount_and_maps_to_cash(self):
         row = [
