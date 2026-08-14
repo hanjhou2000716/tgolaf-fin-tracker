@@ -47,6 +47,8 @@ class LedgerSyncContractTests(unittest.TestCase):
         self.assertIn("return inventory, history_sheet, accepted_transactions, ledger_sync_result", source)
         self.assertIn("accepted_transactions, reconciliation_events = apply_reconciliation_events(inventory, accepted_transactions)", source)
         self.assertNotIn("if not data_rows:\n        ledger_sync_result = upload_private_transactions", source)
+        self.assertIn("open_spreadsheets_with_retry(client)", source)
+        self.assertIn("TRANSIENT_SHEETS_STATUS", source)
 
 
 if __name__ == "__main__":

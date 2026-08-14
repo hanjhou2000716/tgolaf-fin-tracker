@@ -4,6 +4,7 @@ import requests
 import datetime
 import math
 import re
+import time
 import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
@@ -55,6 +56,26 @@ WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/private/"
 HISTORY_EXTRA_COLUMNS = ["TW_Stock_Value", "US_Stock_Value", "Cash_Value", "Fund_Value", "NVDA_QQQM_Weight", "NVDA_SPYG_Weight", "NVDA_VOO_Weight", "Settlement_Notification_Sent_At"]
 ETF_NVDA_WEIGHT_FALLBACKS = {"QQQM": 0.095, "SPYG": 0.075, "VOO": 0.070}
 MARKET_DATA = MarketDataService()
+TRANSIENT_SHEETS_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
+def open_spreadsheets_with_retry(client, *, attempts=4, sleep=time.sleep):
+    """Retry only transient Google Sheets discovery failures.
+
+    Authentication, permission, schema, and other non-transient failures are
+    raised immediately. The final transient error is also re-raised so a
+    missing data source cannot be hidden by a fallback snapshot.
+    """
+    for attempt in range(attempts):
+        try:
+            return client.openall()
+        except gspread.exceptions.APIError as error:
+            status = getattr(getattr(error, "response", None), "status_code", None)
+            if status not in TRANSIENT_SHEETS_STATUS or attempt == attempts - 1:
+                raise
+            delay = 2**attempt
+            print(f"Google Sheets discovery transient HTTP {status}; retrying in {delay}s")
+            sleep(delay)
 
 
 def settlement_notification_sent(history_sheet, snapshot_date, window_key):
@@ -148,7 +169,7 @@ def calculate_current_assets():
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
     client = gspread.authorize(creds)
     
-    available_sheets = client.openall()
+    available_sheets = open_spreadsheets_with_retry(client)
     sheet = None
     for s in available_sheets:
         if "PRStK" in s.title: sheet = s; break
