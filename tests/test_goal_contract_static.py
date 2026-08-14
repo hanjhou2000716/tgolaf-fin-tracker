@@ -24,6 +24,13 @@ class GoalContractStaticTests(unittest.TestCase):
         self.assertIn("pledged_loan_value = debt_principal", source)
         self.assertIn("total_debt = debt + accumulated_interest", source)
 
+    def test_pledge_rows_use_one_canonical_debt_key(self):
+        source = (Path(__file__).resolve().parents[1] / "dashboard_pipeline.py").read_text(encoding="utf-8")
+        self.assertIn('if asset_type == "質押負債":', source)
+        self.assertIn('symbol = "Current_Debt"', source)
+        self.assertIn('elif asset_type == "質押利率":', source)
+        self.assertIn('symbol = "Rate"', source)
+
 
 if __name__ == "__main__":
     unittest.main()
