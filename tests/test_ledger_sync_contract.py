@@ -41,6 +41,26 @@ class LedgerSyncContractTests(unittest.TestCase):
         )
         self.assertEqual(inventory_rows_from_transactions((reconciliation, buy), rows), (rows[1],))
 
+    def test_legacy_non_cash_snapshot_set_balance_is_preserved(self):
+        """Historical replace rows remain baselines for holdings and debt."""
+        base = dict(
+            transaction_id="00000000-0000-0000-0000-000000000201",
+            source_row_id="Form:201",
+            submitted_at="2026-08-14T14:45:00+08:00",
+            submitter_email="legacy@local.invalid",
+            approved=True,
+            transaction_date=date(2026, 8, 14),
+            symbol="TWD",
+            action=Action.SET_BALANCE,
+            quantity=Decimal("1870000"),
+            unit="TWD",
+            currency="TWD",
+        )
+        debt = Transaction(**{**base, "asset_type": "質押負債"})
+        cash = Transaction(**{**base, "transaction_id": "00000000-0000-0000-0000-000000000202", "source_row_id": "Form:202", "asset_type": "現金_TWD", "quantity": Decimal("150000")})
+        rows = (("2026-08-14", "質押負債", "TWD", "取代", "1870000"), ("2026-08-14", "現金_TWD", "TWD", "取代", "150000"))
+        self.assertEqual(inventory_rows_from_transactions((debt, cash), rows), (rows[0],))
+
     def test_loader_result_is_consumed_by_main(self):
         source = Path("dashboard_pipeline.py").read_text(encoding="utf-8")
         self.assertIn("accepted_transactions, ledger_sync_result = calculate_current_assets()", source)

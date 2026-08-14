@@ -82,6 +82,24 @@ class BalanceCommandTests(unittest.TestCase):
         self.assertEqual(updated[0].reconciliation_delta, Decimal("150000") - Decimal("187000"))
         self.assertEqual(events[0]["eventType"], "RECONCILIATION_DECREASE")
 
+    def test_non_cash_legacy_snapshot_does_not_enter_cash_reconciliation(self):
+        inventory = {
+            "現金_TWD": {"TWD": 187000.0},
+            "現金_USD": {"USD": 0.0},
+            "質押負債": {"Current_Debt": 0.0, "History": []},
+        }
+        debt = tx(
+            Action.SET_BALANCE,
+            quantity="1870000",
+            symbol="TWD",
+            asset_type="質押負債",
+            transaction_id="00000000-0000-0000-0000-000000000041",
+        )
+        updated, events = apply_reconciliation_events(inventory, [debt])
+        self.assertEqual(updated, (debt,))
+        self.assertEqual(events, [])
+        self.assertEqual(inventory["現金_TWD"]["TWD"], 187000.0)
+
     def test_reconciliation_is_not_external_flow_or_market_pnl(self):
         ledger = PortfolioLedger([tx(Action.DEPOSIT, quantity="120000", transaction_id="00000000-0000-0000-0000-000000000031")])
         reconciliation = ledger.reconcile_cash_balance("TWD", Decimal("150000"), transaction_id="00000000-0000-0000-0000-000000000030")

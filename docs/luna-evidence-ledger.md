@@ -53,3 +53,28 @@ python -m unittest discover -s tests -q
 - Yahoo 行情來源在該次執行出現 fallback 訊息，但未造成部署失敗；資料品質與 stale guardrail 仍由測試與 runtime 狀態保護。
 - 公開入口回傳 Demo；私有入口未授權時只回傳登入殼層，不嵌入金額或 service-role key。
 - Supabase Table Editor 唯讀檢查最新私有快照：`netAsset=150000`、現金 asset-tree value=150000，與原始 `SET_BALANCE` 交易目標一致。
+
+## Final verification addendum (2026-08-14)
+
+This append-only addendum supersedes older run references above; historical
+entries remain unchanged for auditability.
+
+| Evidence | Result | Authoritative check |
+|---|---|---|
+| PR #132 / commit `23c677e` | PASS | Legacy reconciliation replay accepts a derived-delta change without mutating the immutable row. |
+| Production Actions run `31792755754` | PASS | Build and deploy jobs passed on `main`; the log records 44 transactions appended, private snapshot uploaded, Telegram forced notification sent, and public sanitizer checks passed. |
+| Supabase private snapshot | PASS | Latest `portfolio_snapshots` row generated at `2026-08-14 18:35:04.720799+00`; `status=ok`, history series present, and private asset tree serialized. |
+| Exact cash acceptance | PASS | `portfolio_transactions` contains `表單回覆 3:23`, `SET_BALANCE`, `TWD`, quantity `150000`, compatibility target; no later TWD transaction exists after `2026-08-13`. USD cash is separate and therefore the aggregate cash component can differ from TWD 150000 after conversion. |
+| Public boundary | PASS | Public DOM shows Demo-only percentages and no private amount, symbol, transaction, or risk values. |
+| Private boundary | PASS | Unauthenticated `/private/` shows the Telegram re-entry message and no portfolio data. |
+| Scheduled operations | PASS | `cron.yml` retains Taiwan 05:40 and 14:45 fallback schedules; recent scheduled runs and watchdog run are successful. |
+| Regression suite | PASS | `python -m unittest discover -s tests -q` → 167 tests passed. |
+
+### Reopened compatibility regression fixed on this branch
+
+Historical non-cash `SET_BALANCE` rows (legacy “replace” snapshots for
+securities, funds, and pledge debt) must remain in the inventory baseline. Only
+cash `SET_BALANCE` rows are routed through reconciliation events. This prevents
+historical holdings/debt from disappearing and prevents a debt snapshot from
+being mistaken for TWD cash. Tests cover both preservation and cash-only event
+routing.
