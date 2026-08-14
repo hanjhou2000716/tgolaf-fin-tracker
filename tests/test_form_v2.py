@@ -1,6 +1,7 @@
 import unittest
 from decimal import Decimal
 
+from transaction_command import CommandStatus, command_from_transaction
 from transaction_schema import Action, parse_transaction_rows
 
 
@@ -22,6 +23,9 @@ class FormV2Tests(unittest.TestCase):
         self.assertEqual(len(result.accepted), 1)
         self.assertEqual(result.accepted[0].action, Action.SET_BALANCE)
         self.assertEqual(result.accepted[0].quantity, Decimal("150000"))
+        status = command_from_transaction(result.accepted[0])
+        self.assertEqual(status.status, CommandStatus.APPLIED_WITH_COMPATIBILITY)
+        self.assertEqual(status.compatibility_used, "legacy_target_from_price_field")
 
     def test_set_balance_uses_target_balance_and_is_idempotent_by_source_row(self):
         row = [
