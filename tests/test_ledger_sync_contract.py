@@ -45,6 +45,8 @@ class LedgerSyncContractTests(unittest.TestCase):
         source = Path("dashboard_pipeline.py").read_text(encoding="utf-8")
         self.assertIn("accepted_transactions, ledger_sync_result = calculate_current_assets()", source)
         self.assertIn("return inventory, history_sheet, accepted_transactions, ledger_sync_result", source)
+        self.assertIn("accepted_transactions, reconciliation_events = apply_reconciliation_events(inventory, accepted_transactions)", source)
+        self.assertNotIn("if not data_rows:\n        ledger_sync_result = upload_private_transactions", source)
 
 
 if __name__ == "__main__":

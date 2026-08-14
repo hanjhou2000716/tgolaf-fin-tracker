@@ -206,10 +206,6 @@ def calculate_current_assets():
             "sheets": transaction_audits,
             "transactionIngestion": build_ingestion_contract(transaction_ingestion),
         })
-    if not data_rows:
-        ledger_sync_result = upload_private_transactions(accepted_transactions)
-        return {}, history_sheet, accepted_transactions, ledger_sync_result
-        
     def parse_date(row):
         if not row: return datetime.datetime.min
         ts_str = str(row[0]).strip()
