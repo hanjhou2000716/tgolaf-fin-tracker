@@ -24,8 +24,18 @@ def _same_legacy_reconciliation(previous: dict, current: dict) -> bool:
         "source_row_id", "action", "symbol", "currency", "asset_type", "unit",
         "quantity", "price", "reversal_of", "transaction_date",
     )
-    if any(previous.get(key) != current.get(key) for key in stable_keys):
-        return False
+    for key in stable_keys:
+        before, after = previous.get(key), current.get(key)
+        if key in {"quantity", "price"}:
+            try:
+                from decimal import Decimal
+                if Decimal(str(before)) != Decimal(str(after)):
+                    return False
+                continue
+            except Exception:
+                pass
+        if before != after:
+            return False
     try:
         from decimal import Decimal
 

@@ -153,6 +153,23 @@ class SupabaseSyncTests(unittest.TestCase):
             self.assertEqual(upload_private_transactions([current], session=session), "unchanged")
         self.assertEqual(len(session.calls), 1)
 
+    def test_legacy_reconciliation_replay_accepts_numeric_formatting_only(self):
+        """A replay may serialize 150000 as 150000.0 without changing the event."""
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        old = sample_transaction("150000")
+        old = Transaction(**{**old.__dict__, "action": Action.SET_BALANCE, "symbol": "TWD", "unit": "TWD", "compatibility_used": "legacy_target_from_price_field"})
+        current = Transaction(**{**old.__dict__, "quantity": Decimal("150000.0"), "compatibility_used": None})
+        existing = [{"transaction_id": old.transaction_id, "payload": transaction_payload(old)}]
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(upload_private_transactions([current], session=FakeSession(existing)), "unchanged")
+
     def test_goal_state_uses_private_service_boundary(self):
         env = {
             "SUPABASE_URL": "https://example.supabase.co",
