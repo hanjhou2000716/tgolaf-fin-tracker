@@ -78,3 +78,21 @@ cash `SET_BALANCE` rows are routed through reconciliation events. This prevents
 historical holdings/debt from disappearing and prevents a debt snapshot from
 being mistaken for TWD cash. Tests cover both preservation and cash-only event
 routing.
+
+## Post-merge production verification (2026-08-14)
+
+| Evidence | Result | Authoritative check |
+|---|---|---|
+| PR #134 / merge `f328b3c` | PASS | Marked legacy replay compatibility merged to `main`. |
+| Final Actions run `31800559417` | PASS | `main` build and Pages deploy both passed; formula/unit tests, tracker generation, sanitizer, Supabase upload, and deploy completed. |
+| Legacy replay log | PASS | Run log accepted the former conflicting UUID `d224445e-56ee-5ac4-8533-06e2bd3c462b` and other marked legacy rows without mutation. |
+| Telegram | PASS | Run log: `Telegram notification sent; window=manual, forced=True`. |
+| Production private snapshot | PASS | Supabase row generated `2026-08-14 20:30:12.45519+00`, `status=ok`, `netAsset=8517904.07`; asset blocks include `現金／基金／其它=177000`, and the asset tree contains `現金=150000`, `FUND=27000`, historical Taiwan holdings, and pledged Taiwan holdings. |
+| Exact original row | PASS | Supabase ledger row `表單回覆 3:23` is `SET_BALANCE`, `現金_TWD`, `TWD`, quantity `150000`. |
+| Public production page | PASS | DOM shows only Demo percentages and the safe-data policy; no private amounts, symbols, transactions, or risk values. |
+| Private production page | PASS | Unauthenticated `/private/` shows only the Telegram re-entry message and no portfolio data. |
+| Scheduled operations | PASS | Both configured cron expressions remain `40 21 * * 1-5` UTC (Taiwan 05:40) and `45 6 * * 1-5` UTC (Taiwan 14:45); recent schedule runs and watchdog runs are successful. |
+
+The aggregate cash block is intentionally `177000` because it includes the
+separate FUND balance; the acceptance invariant is the TWD cash leaf, exactly
+`150000`, not the combined cash/fund display.
