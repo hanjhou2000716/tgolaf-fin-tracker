@@ -36,14 +36,15 @@ def _same_legacy_reconciliation(previous: dict, current: dict) -> bool:
                 pass
         if before != after:
             return False
-    try:
-        from decimal import Decimal
-
-        return Decimal(str(previous.get("reconciliation_delta"))) == Decimal(
-            str(current.get("reconciliation_delta"))
-        )
-    except Exception:
-        return previous.get("reconciliation_delta") == current.get("reconciliation_delta")
+    # ``reconciliation_delta`` is derived from the replay state immediately
+    # before this command.  It can legitimately change when a migration
+    # restores historical deposits/withdrawals that were previously omitted
+    # from the legacy inventory stream.  It must therefore not turn an
+    # otherwise identical immutable command into a UUID conflict.  The
+    # immutable facts above (source, action, cash target, currency and date)
+    # remain strict; the current run records its own derived adjustment in the
+    # audit payload without mutating the stored transaction row.
+    return True
 
 
 def _finite_json(value):
