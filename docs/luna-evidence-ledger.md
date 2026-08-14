@@ -32,5 +32,14 @@
 
 ```text
 python -m unittest discover -s tests -q
-159 tests passed
+160 tests passed
 ```
+
+## Latest verification note (2026-08-14)
+
+- Form V2 duplicate branch headers are resolved by selecting the first non-empty
+  value for repeated currency, date, note, and amount columns.
+- `tests.test_form_v2` covers a stock row with repeated Google Form headers;
+  the full suite is 160 tests passing.
+- PR #123 remains open for review; post-merge production acceptance is pending
+  until the PR is merged.
