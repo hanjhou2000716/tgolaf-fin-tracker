@@ -193,6 +193,18 @@ def build_ingestion_contract(rows) -> dict[str, Any]:
     return {"summary": summary, "recent": rows[-5:]}
 
 
+def inventory_rows_from_transactions(transactions, accepted_rows):
+    """Exclude SET_BALANCE from the legacy adapter; reconciliation applies it once."""
+    transactions = tuple(transactions or ())
+    accepted_rows = tuple(accepted_rows or ())
+    if len(transactions) != len(accepted_rows):
+        raise ValueError("accepted transaction and legacy row counts must match")
+    return tuple(
+        row for transaction, row in zip(transactions, accepted_rows)
+        if transaction.action != Action.SET_BALANCE
+    )
+
+
 def apply_reconciliation_events(inventory: dict[str, dict[str, Any]], transactions):
     """Apply SET_BALANCE through an explicit delta and return immutable events.
 
