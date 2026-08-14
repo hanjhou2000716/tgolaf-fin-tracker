@@ -21,7 +21,7 @@ from asset_tree import build_asset_tree
 from public_site import write_public_site
 from supabase_sync import load_goal_state, save_goal_state, upload_private_snapshot, upload_private_transactions
 from transaction_schema import TransactionSchemaError, parse_transaction_rows
-from transaction_command import apply_reconciliation_events, build_ingestion_contract, build_ingestion_status
+from transaction_command import apply_reconciliation_events, build_ingestion_contract, build_ingestion_status, inventory_rows_from_transactions
 from performance import performance_breakdown
 from market_data import MarketDataService, Quote
 from metrics import summarize_performance
@@ -138,6 +138,7 @@ def write_json(path, payload):
     with open(path, "w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
 
+
 # ==========================================
 # 2. Google Sheets 動態資產結算核心
 # ==========================================
@@ -183,7 +184,7 @@ def calculate_current_assets():
                             rejected=parsed.rejected,
                         ))
                         transaction_audits.append({"sheet": ws.title, **parsed.audit_payload()})
-                        data_rows.extend(parsed.accepted_rows)
+                        data_rows.extend(inventory_rows_from_transactions(parsed.accepted, parsed.accepted_rows))
                     except TransactionSchemaError as error:
                         if not FORM_SCHEMA_LEGACY_COMPAT:
                             raise
