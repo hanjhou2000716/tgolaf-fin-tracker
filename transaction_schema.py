@@ -284,23 +284,34 @@ V2_HEADERS = {
 }
 
 
-def _v2_mapping(headers: Sequence[str]) -> dict[str, int]:
-    normalized = {_normalize_header(value): index for index, value in enumerate(headers)}
-    mapping: dict[str, int] = {}
+def _v2_mapping(headers: Sequence[str]) -> dict[str, tuple[int, ...]]:
+    """Return every matching column, preserving duplicate Form headers.
+
+    Google Forms repeats labels such as 幣別、交易日期 and 備註 for each
+    branched section.  A last-column-wins mapping silently reads an empty
+    financing field for a stock row, so the adapter keeps all candidates and
+    resolves the first non-empty response per row.
+    """
+    normalized = {}
+    for index, value in enumerate(headers):
+        normalized.setdefault(_normalize_header(value), []).append(index)
+    mapping: dict[str, tuple[int, ...]] = {}
     for field, aliases in V2_HEADERS.items():
         for alias in aliases:
-            index = normalized.get(_normalize_header(alias))
-            if index is not None:
-                mapping[field] = index
+            indexes = normalized.get(_normalize_header(alias))
+            if indexes:
+                mapping[field] = tuple(indexes)
                 break
     return mapping
 
 
-def _v2_value(row: Sequence[str], mapping: dict[str, int], field: str) -> str:
-    index = mapping.get(field)
-    if index is None or index >= len(row):
-        return ""
-    return str(row[index]).strip()
+def _v2_value(row: Sequence[str], mapping: dict[str, tuple[int, ...]], field: str) -> str:
+    for index in mapping.get(field, ()):
+        if index < len(row):
+            value = str(row[index]).strip()
+            if value:
+                return value
+    return ""
 
 
 def _v2_decimal(value: str, label: str, *, allow_zero: bool = False) -> Decimal:
