@@ -170,6 +170,19 @@ def command_from_transaction(transaction: Transaction) -> TransactionCommand:
     return TransactionCommand(transaction, CommandStatus.APPLIED if transaction.approved else CommandStatus.PENDING)
 
 
+def _is_cash_set_balance(transaction: Transaction) -> bool:
+    """Return whether a SET_BALANCE belongs to the cash reconciliation path."""
+    if transaction.action != Action.SET_BALANCE:
+        return False
+    asset_type = str(transaction.asset_type or "").strip().lower()
+    # Explicit V2 cash rows use 現金_TWD／現金_USD.  Keep the symbol-only
+    # fallback for old exports that omitted asset_type but had TWD/USD.
+    return asset_type.startswith(("現金", "cash")) or (
+        asset_type in {"", "twd", "usd"}
+        and str(transaction.symbol or "").upper() in {"TWD", "USD"}
+    )
+
+
 def build_ingestion_status(*, accepted=(), pending=(), rejected=(), compatibility=()) -> list[dict[str, Any]]:
     """Return the latest status rows without exposing submitter email."""
     rows: list[dict[str, Any]] = []
@@ -194,14 +207,22 @@ def build_ingestion_contract(rows) -> dict[str, Any]:
 
 
 def inventory_rows_from_transactions(transactions, accepted_rows):
-    """Exclude SET_BALANCE from the legacy adapter; reconciliation applies it once."""
+    """Build the legacy inventory stream without double-applying cash corrections.
+
+    ``SET_BALANCE`` is the canonical command for cash reconciliation, so cash
+    rows are applied exactly once by :func:`apply_reconciliation_events`.
+    Historical Form rows also used the old "replace" operation for securities,
+    pledge debt and funds.  Those rows are snapshot baselines, not cash
+    corrections, and must remain in the compatibility inventory stream or the
+    migration would silently erase historical holdings and debt.
+    """
     transactions = tuple(transactions or ())
     accepted_rows = tuple(accepted_rows or ())
     if len(transactions) != len(accepted_rows):
         raise ValueError("accepted transaction and legacy row counts must match")
     return tuple(
         row for transaction, row in zip(transactions, accepted_rows)
-        if transaction.action != Action.SET_BALANCE
+        if not _is_cash_set_balance(transaction)
     )
 
 
@@ -215,7 +236,7 @@ def apply_reconciliation_events(inventory: dict[str, dict[str, Any]], transactio
     updated = []
     events: list[dict[str, Any]] = []
     for transaction in sorted(transactions, key=lambda item: (item.transaction_date, item.source_row_id)):
-        if transaction.action != Action.SET_BALANCE:
+        if not _is_cash_set_balance(transaction):
             updated.append(transaction)
             continue
         currency = transaction.currency.upper()
