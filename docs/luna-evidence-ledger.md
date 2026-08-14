@@ -35,7 +35,7 @@ Supabase SQL 唯讀查詢確認原始來源列 `表單回覆 3:23` 仍以 immuta
 
 ## Completion debt
 
-1. 仍需從已登入的私有 MiniApp／Supabase API 做一次唯讀畫面驗證，確認最新私有快照的現金元件直接顯示 `150000`；Actions 已證明私有快照上傳成功，交易列也已確認。
+1. RESOLVED：Supabase Table Editor 唯讀檢查最新私有快照，確認 `netAsset=150000`、現金 asset-tree value=150000，且表內為單筆最新 record。
 2. 仍需保留一筆新的 Form V2 實際提交回應作為端到端人工證據；既有舊列的相容解析與重複提交測試已通過。
 3. Cron 與 watchdog 已有近期成功 run；若要做時刻級驗收，需在下一個 05:40／14:45 視窗補一筆新的 schedule run ID。
 
@@ -52,3 +52,4 @@ python -m unittest discover -s tests -q
 - 正式 run `31776066730` 由 `workflow_dispatch(force_telegram=true)` 觸發，Build／Deploy、資料驗證、公開 Demo 脫敏、Supabase 私有同步與 Telegram 強制通知全部成功。
 - Yahoo 行情來源在該次執行出現 fallback 訊息，但未造成部署失敗；資料品質與 stale guardrail 仍由測試與 runtime 狀態保護。
 - 公開入口回傳 Demo；私有入口未授權時只回傳登入殼層，不嵌入金額或 service-role key。
+- Supabase Table Editor 唯讀檢查最新私有快照：`netAsset=150000`、現金 asset-tree value=150000，與原始 `SET_BALANCE` 交易目標一致。
