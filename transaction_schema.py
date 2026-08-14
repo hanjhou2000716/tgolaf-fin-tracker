@@ -199,6 +199,14 @@ def _parse_bool(value: str) -> bool:
 
 
 def _parse_date(value: str) -> date:
+    # Google Sheets localizes timestamps (例如「2026/8/13 下午 3:08:19」).
+    # Extract the calendar part before trying strict ISO parsing.
+    match = re.search(r"(\d{4})[/-](\d{1,2})[/-](\d{1,2})", str(value or ""))
+    if match:
+        try:
+            return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        except ValueError:
+            pass
     try:
         return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
     except ValueError:
@@ -255,6 +263,271 @@ def _parse_action(value: str) -> Action:
     return Action(normalized)
 
 
+# Form V2 deliberately keeps the user-facing form small.  The response sheet
+# therefore does not contain the internal ledger headers used by the legacy
+# fixed-schema form.  This adapter is intentionally separate from the legacy
+# parser so historical rows remain byte-for-byte compatible.
+V2_HEADERS = {
+    "timestamp": ("Timestamp", "時間戳記"),
+    "email": ("Email Address", "電子郵件地址", "Email"),
+    "transaction_type": ("交易類型", "交易类型", "transaction_type"),
+    "target_balance": ("目標餘額", "目標金額", "target_balance"),
+    "market": ("市場", "market"),
+    "symbol": ("資產代號", "標的代號", "symbol"),
+    "quantity": ("數量", "股數", "quantity"),
+    "unit": ("單位", "unit"),
+    "price": ("價格", "成交價格", "price"),
+    "amount": ("金額", "amount"),
+    "currency": ("幣別", "貨幣", "currency"),
+    "transaction_date": ("交易日期", "日期", "transaction_date"),
+    "note": ("備註", "說明", "note"),
+}
+
+
+def _v2_mapping(headers: Sequence[str]) -> dict[str, int]:
+    normalized = {_normalize_header(value): index for index, value in enumerate(headers)}
+    mapping: dict[str, int] = {}
+    for field, aliases in V2_HEADERS.items():
+        for alias in aliases:
+            index = normalized.get(_normalize_header(alias))
+            if index is not None:
+                mapping[field] = index
+                break
+    return mapping
+
+
+def _v2_value(row: Sequence[str], mapping: dict[str, int], field: str) -> str:
+    index = mapping.get(field)
+    if index is None or index >= len(row):
+        return ""
+    return str(row[index]).strip()
+
+
+def _v2_decimal(value: str, label: str, *, allow_zero: bool = False) -> Decimal:
+    if not value:
+        raise ValueError(f"{label} is required")
+    try:
+        parsed = Decimal(value.replace(",", "").replace("$", "").strip())
+    except (InvalidOperation, ValueError) as error:
+        raise ValueError(f"{label} must be numeric") from error
+    if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):
+        raise ValueError(f"{label} must be finite and positive")
+    return parsed
+
+
+def _v2_action(value: str) -> Action:
+    normalized = _normalize_header(value)
+    if normalized in {"買入", "buy"}:
+        return Action.BUY
+    if normalized in {"賣出", "sell"}:
+        return Action.SELL
+    if normalized in {"存入", "deposit"}:
+        return Action.DEPOSIT
+    if normalized in {"提領", "withdrawal", "withdraw"}:
+        return Action.WITHDRAWAL
+    if normalized in {"借款", "borrow"}:
+        return Action.BORROW
+    if normalized in {"還款", "repay", "repayment"}:
+        return Action.REPAY
+    if normalized in {"現金餘額校正", "現金餘額設定", "setbalance", "set_balance"}:
+        return Action.SET_BALANCE
+    raise ValueError(f"unsupported transaction type: {value}")
+
+
+def _v2_asset_type(action: Action, market: str, currency: str) -> str:
+    if action in {Action.DEPOSIT, Action.WITHDRAWAL, Action.BORROW, Action.REPAY, Action.SET_BALANCE}:
+        return "現金_TWD" if currency == "TWD" else "現金_USD"
+    market_key = _normalize_header(market)
+    if market_key in {"台股", "tw", "taiwan"}:
+        return "現貨台股"
+    if market_key in {"美股", "us", "usa", "美國"}:
+        return "現貨美股"
+    raise ValueError("market must be 台股 or 美股")
+
+
+def _parse_v2_transaction_rows(
+    headers: Sequence[str],
+    rows: Sequence[Sequence[str]],
+    *,
+    source_sheet: str,
+    existing_ids: set[str] | None = None,
+) -> TransactionParseResult:
+    mapping = _v2_mapping(headers)
+    if "transaction_type" not in mapping:
+        raise TransactionSchemaError("Form V2 requires 交易類型")
+    # Historical response sheets may predate email collection.  New V2 rows
+    # still fail closed below when a transaction type is present; legacy rows
+    # remain readable so migration does not erase the existing portfolio.
+    normalized_list = [_normalize_header(value) for value in headers]
+
+    def first_index(*aliases: str) -> int | None:
+        keys = {_normalize_header(alias) for alias in aliases}
+        for index, key in enumerate(normalized_list):
+            if key in keys:
+                return index
+        return None
+
+    legacy_asset_index = first_index("資產類別", "asset_type")
+    legacy_symbol_index = first_index("資產代號", "asset_type", "symbol")
+    legacy_action_index = first_index("交易類型", "action")
+    legacy_quantity_index = first_index("數量/股數/金額 (直接填正數即可)", "數量", "quantity")
+    legacy_currency_index = first_index("currency", "幣別")
+    legacy_unit_index = first_index("unit", "單位")
+
+    def legacy_value(row: Sequence[str], index: int | None) -> str:
+        return str(row[index]).strip() if index is not None and index < len(row) else ""
+
+    def legacy_output(asset_type: str, symbol: str, action: Action, quantity: Decimal, transaction_date: date):
+        asset = asset_type
+        if asset in {"台股", "現貨台股"}:
+            asset = "?啗"
+        elif asset in {"美股", "現貨美股"}:
+            asset = "蝢"
+        elif asset.startswith("現金") or asset == "現金_TWD":
+            asset = "?暸?_TWD"
+        elif asset == "現金_USD":
+            asset = "?暸?_USD"
+        mode = {
+            Action.BUY: "鞎瑕",
+            Action.DEPOSIT: "摮",
+            Action.BORROW: "摮",
+            Action.SELL: "鞈?",
+            Action.WITHDRAWAL: "??",
+            Action.REPAY: "??",
+            Action.SET_BALANCE: "?誨",
+        }.get(action, "?誨")
+        return (transaction_date.isoformat(), asset, symbol, mode, str(quantity))
+    seen = set(existing_ids or set())
+    accepted, pending, rejected, accepted_rows = [], [], [], []
+    for row_number, raw_row in enumerate(rows, start=2):
+        row = tuple(str(value) for value in raw_row)
+        source_row_id = f"{source_sheet}:{row_number}"
+        transaction_id = str(uuid5(NAMESPACE_URL, source_row_id))
+        try:
+            if transaction_id in seen:
+                raise ValueError("duplicate_transaction_id")
+            raw_type = _v2_value(row, mapping, "transaction_type")
+            # The response sheet is mixed during migration.  Rows written by
+            # the old five-column form have no V2 transaction type.  Keep
+            # those rows as a compatibility snapshot, while promoting the
+            # exact cash-balance row to a canonical SET_BALANCE event.
+            if not raw_type:
+                legacy_description = _v2_value(row, mapping, "target_balance")
+                numeric_tail = next(
+                    (value for value in reversed(row) if re.fullmatch(r"\$?[0-9][0-9,]*(?:\.[0-9]+)?", value.strip())),
+                    "",
+                )
+                if "取代台幣現金金額" in legacy_description and numeric_tail:
+                    transaction_date = _parse_date(_v2_value(row, mapping, "timestamp") or "2026-01-01")
+                    target = _v2_decimal(numeric_tail, "target balance", allow_zero=True)
+                    transaction = Transaction(
+                        transaction_id=transaction_id,
+                        source_row_id=source_row_id,
+                        submitted_at=_v2_value(row, mapping, "timestamp"),
+                        submitter_email="legacy@local.invalid",
+                        approved=True,
+                        transaction_date=transaction_date,
+                        asset_type="現金_TWD",
+                        symbol="TWD",
+                        action=Action.SET_BALANCE,
+                        quantity=target,
+                        unit="TWD",
+                        currency="TWD",
+                        compatibility_used="legacy_target_from_price_field",
+                    )
+                    accepted.append(transaction)
+                    accepted_rows.append(legacy_output("現金_TWD", "TWD", Action.SET_BALANCE, target, transaction_date))
+                    seen.add(transaction_id)
+                    continue
+                old_asset = legacy_value(row, legacy_asset_index)
+                old_symbol = legacy_value(row, legacy_symbol_index)
+                old_action = legacy_value(row, legacy_action_index)
+                old_quantity = legacy_value(row, legacy_quantity_index)
+                if old_asset and old_action and old_quantity:
+                    old_date = _parse_date(_v2_value(row, mapping, "timestamp") or "2026-01-01")
+                    old_currency = legacy_value(row, legacy_currency_index).upper() or ("USD" if old_asset == "美股" else "TWD")
+                    old_unit = legacy_value(row, legacy_unit_index) or ("股" if "股" in old_quantity else old_currency)
+                    old_number = re.sub(r"[^0-9.\-]", "", old_quantity)
+                    old_qty = _v2_decimal(old_number, "legacy quantity", allow_zero=True)
+                    if "買入" in old_action:
+                        old_mode = Action.BUY
+                    elif "賣出" in old_action:
+                        old_mode = Action.SELL
+                    elif "存入" in old_action:
+                        old_mode = Action.DEPOSIT
+                    elif "提領" in old_action:
+                        old_mode = Action.WITHDRAWAL
+                    elif "借款" in old_action:
+                        old_mode = Action.BORROW
+                    elif "還款" in old_action:
+                        old_mode = Action.REPAY
+                    else:
+                        # 「全部取代／覆蓋」 is a legacy snapshot operation.
+                        # It is retained only in the compatibility inventory
+                        # stream; new ledger rows must use explicit SET_BALANCE
+                        # for cash and never infer BUY as a default.
+                        old_mode = Action.SET_BALANCE
+                    if old_unit in {"張", "撘?"}:
+                        old_qty *= Decimal(1000)
+                    accepted_rows.append(legacy_output(old_asset, old_symbol or old_currency, old_mode, old_qty, old_date))
+                    seen.add(transaction_id)
+                    continue
+                # Ignore blank migration rows rather than treating them as a
+                # malformed new submission.
+                if not any(row):
+                    continue
+                raise ValueError("transaction type is required")
+            email = _v2_value(row, mapping, "email")
+            if "email" not in mapping:
+                raise ValueError("Form V2 requires Email Address")
+            if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+                raise ValueError("submitter_email is invalid")
+            submitted_at = _v2_value(row, mapping, "timestamp")
+            raw_date = _v2_value(row, mapping, "transaction_date") or submitted_at
+            transaction_date = _parse_date(raw_date)
+            action = _v2_action(raw_type)
+            currency = _v2_value(row, mapping, "currency").upper()
+            if currency not in {"TWD", "USD"}:
+                raise ValueError("currency must be TWD or USD")
+            asset_type = _v2_asset_type(action, _v2_value(row, mapping, "market"), currency)
+            symbol = _v2_value(row, mapping, "symbol") or currency
+            price = None
+            if action in {Action.BUY, Action.SELL}:
+                quantity, canonical_unit = parse_quantity(
+                    _v2_value(row, mapping, "quantity"), _v2_value(row, mapping, "unit")
+                )
+                price = _v2_decimal(_v2_value(row, mapping, "price"), "price")
+            elif action == Action.SET_BALANCE:
+                quantity = _v2_decimal(_v2_value(row, mapping, "target_balance"), "target balance", allow_zero=True)
+                canonical_unit = currency
+                symbol = currency
+            else:
+                quantity = _v2_decimal(_v2_value(row, mapping, "amount"), "amount")
+                canonical_unit = currency
+                symbol = currency
+            transaction = Transaction(
+                transaction_id=transaction_id,
+                source_row_id=source_row_id,
+                submitted_at=submitted_at,
+                submitter_email=email,
+                approved=True,
+                transaction_date=transaction_date,
+                asset_type=asset_type,
+                symbol=symbol,
+                action=action,
+                quantity=quantity,
+                unit=canonical_unit,
+                currency=currency,
+                price=price,
+            )
+            accepted.append(transaction)
+            accepted_rows.append(legacy_output(asset_type, symbol, action, quantity, transaction_date))
+            seen.add(transaction_id)
+        except (ValueError, InvalidOperation) as error:
+            rejected.append(RejectedTransaction(source_row_id, "invalid_transaction", str(error)))
+    return TransactionParseResult(tuple(accepted), tuple(pending), tuple(rejected), tuple(accepted_rows))
+
+
 def parse_transaction_rows(
     headers: Sequence[str],
     rows: Sequence[Sequence[str]],
@@ -276,6 +549,17 @@ def parse_transaction_rows(
             existing_ids=existing_ids,
             compact_index=compact_index,
             normalized_headers=normalized_headers,
+        )
+    # Form V2 uses a compact, user-facing set of questions and therefore does
+    # not expose internal UUID/approval columns.  It is checked after the
+    # explicit legacy compact marker so mixed historical sheets preserve their
+    # old parser path.
+    if _normalize_header("交易類型") in normalized_headers:
+        return _parse_v2_transaction_rows(
+            headers,
+            rows,
+            source_sheet=source_sheet,
+            existing_ids=existing_ids,
         )
 
     mapping = resolve_headers(headers)

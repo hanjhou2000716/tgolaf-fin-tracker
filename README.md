@@ -372,6 +372,21 @@ queue instead of being guessed. If an `approved` column is retained, `false`
 continues to route the row to the pending queue; otherwise a successfully
 parsed compact row is accepted after the form's account restriction.
 
+### Form V2（四種交易情境）
+
+現行表單以「交易類型」作為入口，使用者只填必要資訊，解析器再轉成固定
+ledger schema：
+
+- `現金餘額校正`：`目標餘額`、`幣別`（產生 `SET_BALANCE`，例如 TWD 150000）。
+- `買入`／`賣出`：`市場`、`資產代號`、`數量`、`單位`、`價格`、`幣別`。
+- `存入`／`提領`：`金額`、`幣別`。
+- `借款`／`還款`：`金額`、`幣別`。
+
+`交易日期`可留白，會使用表單時間；無法解析、單位不明、幣別不支援或新列缺少
+提交者 Email 時會進入 rejected audit，不會默默寫入帳本。歷史回覆列仍透過
+legacy adapter 讀取，原始「取代台幣現金金額」與舊 price=150000 的現金校正列
+會標記 `legacy_target_from_price_field` 並轉為 append-only `SET_BALANCE`。
+
 ### SET_BALANCE / 對帳命令
 
 現金餘額校正使用獨立的 `SET_BALANCE` 命令，不可用 `存入` 或 `提領` 代替。必要欄位是 `source_row_id`、`currency`（`TWD`／`USD`）與非負的 `target_balance`，資產必須是現金；例如：
