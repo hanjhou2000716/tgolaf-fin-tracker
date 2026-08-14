@@ -18,7 +18,17 @@ def _same_legacy_reconciliation(previous: dict, current: dict) -> bool:
     ledger remains immutable: this helper only accepts the replay when every
     financial/source field is identical and never mutates the stored row.
     """
-    if previous.get("compatibility_used") != "legacy_target_from_price_field":
+    # Legacy mixed-form snapshot rows (including securities, funds, and
+    # pledge debt) were historically serialized with a derived adjustment.
+    # The compatibility marker is the allow-list boundary; ordinary UUID
+    # conflicts must still fail closed.
+    legacy_markers = {
+        "legacy_target_from_price_field",
+        "legacy_mixed_form_row",
+    }
+    if previous.get("compatibility_used") not in legacy_markers:
+        return False
+    if current.get("compatibility_used") not in legacy_markers | {None}:
         return False
     stable_keys = (
         "source_row_id", "action", "symbol", "currency", "asset_type", "unit",

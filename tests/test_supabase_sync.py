@@ -198,6 +198,31 @@ class SupabaseSyncTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             self.assertEqual(upload_private_transactions([current], session=FakeSession(existing)), "unchanged")
 
+    def test_legacy_non_cash_snapshot_replay_ignores_derived_delta_change(self):
+        """Restoring non-cash legacy baselines must not conflict on derived delta."""
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        old = sample_transaction("1870000")
+        old = Transaction(**{
+            **old.__dict__,
+            "action": Action.SET_BALANCE,
+            "asset_type": "質押負債",
+            "symbol": "TWD",
+            "unit": "TWD",
+            "compatibility_used": "legacy_mixed_form_row",
+            "reconciliation_delta": Decimal("1843000"),
+        })
+        current = Transaction(**{**old.__dict__, "reconciliation_delta": None})
+        existing = [{"transaction_id": old.transaction_id, "payload": transaction_payload(old)}]
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(upload_private_transactions([current], session=FakeSession(existing)), "unchanged")
+
     def test_goal_state_uses_private_service_boundary(self):
         env = {
             "SUPABASE_URL": "https://example.supabase.co",
