@@ -417,7 +417,11 @@ def main():
         },
     )
     
-    debt = inventory["質押負債"].get("Current_Debt", 0)
+    # Current_Debt is the ledger's pledge-loan principal.  Keep it separate
+    # from accrued interest: the latter is a liability for risk calculations,
+    # but must never overwrite the principal shown to the user.
+    debt_principal = float(inventory["質押負債"].get("Current_Debt", 0) or 0)
+    debt = debt_principal
     debt_history = inventory["質押負債"].get("History", [])
     rate_history = inventory["質押利率"].get("History", [])
 
@@ -482,8 +486,10 @@ def main():
     )
     # 資產板塊採用可動用台股／質押借款／現貨美股的風險視角。
     # 質押台股此處代表借款金額，而非擔保品的市值。
-    spot_tw_value = max(0, tw_stock_value - total_debt)
-    pledged_loan_value = total_debt
+    spot_tw_value = max(0, tw_stock_value - debt_principal)
+    # A pledge is represented by its collateral loan principal in the asset
+    # composition.  Accrued interest remains a liability, not an asset block.
+    pledged_loan_value = debt_principal
     other_asset_value = max(
         0,
         total_asset - spot_tw_value - pledged_loan_value - us_stock_value_twd,
@@ -520,6 +526,7 @@ def main():
     # clients will obtain private data through the Supabase API in P0-SEC-02.
     asset_tree_json = json.dumps({"label": "總資產", "value": 0, "kind": "root", "children": []}, ensure_ascii=False)
     liabilities_payload = {
+        "principal": round(debt_principal, 2),
         "debt": round(total_debt, 2),
         "interest": round(accumulated_interest, 2),
         "netAsset": round(net_asset, 2),
@@ -870,7 +877,7 @@ def main():
             <div id="assetTreemapHint" class="asset-treemap-hint">點擊色塊查看下一層；每個色塊顯示市值與占比。</div>
             <div class="asset-treemap-note">
                 <span><strong>淨資產</strong> NT${net_asset:,.0f}（{net_asset_pct:.1f}%）</span>
-                <span><strong>質押借款</strong> NT${total_debt:,.0f}（含利息，{debt_ratio:.1f}%）</span>
+                <span><strong>質押借款本金</strong> NT${debt_principal:,.0f}（含利息 NT${accumulated_interest:,.0f}；風控負債 NT${total_debt:,.0f}，{debt_ratio:.1f}%）</span>
                 <span><strong>更新</strong> {benchmark_updated}</span>
             </div>
         </div>
@@ -884,7 +891,7 @@ def main():
                 <div class="sec-title" style="margin-bottom:10px;">槓桿 <span class="sec-note">Leverage &amp; collateral</span></div>
                 <div class="risk-pair">
                     <div class="risk-column"><span class="metric-label">有效Beta</span><strong>{effective_leverage:.2f} ×</strong><div class="risk-detail"><span class="risk-detail-label">凱利安全邊界</span><span class="risk-detail-value">{half_kelly_limit:.2f} 倍</span><span class="status {beta_status_class}">{beta_status}</span><span class="capacity {beta_status_class}">容量: {beta_capacity:.1f}%</span><span class="capacity {'risk-good' if guardrails['eligible'] else 'risk-alert'}">Guardrail：{guardrails['recommendation']}</span></div></div>
-                    <div class="risk-column"><span class="metric-label">質押借款</span><strong class="risk-alert">${total_debt:,.0f}</strong><small>含利息 ${accumulated_interest:,.0f}</small><div class="risk-detail"><span class="risk-detail-label">質押維持率</span><span class="risk-detail-value {maintenance_status_class}">{maintenance_ratio:.1f}%</span><span class="status {maintenance_status_class}">{ratio_status}</span></div></div>
+                    <div class="risk-column"><span class="metric-label">質押借款本金</span><strong class="risk-alert">${debt_principal:,.0f}</strong><small>含利息 ${accumulated_interest:,.0f} · 風控負債 ${total_debt:,.0f}</small><div class="risk-detail"><span class="risk-detail-label">質押維持率</span><span class="risk-detail-value {maintenance_status_class}">{maintenance_ratio:.1f}%</span><span class="status {maintenance_status_class}">{ratio_status}</span></div></div>
                 </div>
             </div>
             <div class="risk-section">
@@ -1331,6 +1338,7 @@ def main():
             "totalAsset": round(total_asset, 2),
             "netAsset": round(net_asset, 2),
             "totalDebt": round(total_debt, 2),
+            "pledgePrincipal": round(debt_principal, 2),
             "totalMarketValue": round(total_market_value, 2),
             "assetBlocks": asset_blocks,
             "marketMix": market_mix,
