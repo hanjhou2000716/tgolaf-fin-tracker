@@ -59,6 +59,33 @@ class DataHealthLayoutTests(unittest.TestCase):
         self.assertIn(".health-card .health{margin:14px 18px 9px}", self.html)
         self.assertIn(".health-card #advisor{margin:0 18px 14px}", self.html)
 
+    def test_recent_updates_are_inside_health_card_only(self):
+        self.assertIn('class="health-subsection"', self.html)
+        self.assertIn('id="transactionSummary"', self.html)
+        self.assertIn('id="transactionIngestion"', self.html)
+        self.assertNotIn(
+            '<section class="section"><div class="section-heading"><h2>最近資產更新</h2>',
+            self.html,
+        )
+        self.assertLess(
+            self.html.index('id="transactionIngestion"'),
+            self.html.index('</details></section>'),
+        )
+
+    def test_recent_update_summary_and_mobile_rows_are_present(self):
+        self.assertIn("dataset.ingestionCount", self.html)
+        self.assertIn("目前沒有交易狀態紀錄", self.html)
+        self.assertIn(
+            ".ingestion-status.applied_with_compatibility,.ingestion-status.pending{color:var(--orange)}",
+            self.html,
+        )
+        self.assertIn(".ingestion-status.rejected{color:var(--brick)}", self.html)
+        self.assertIn(".health-subsection{margin:0 18px 14px", self.html)
+        self.assertIn(
+            ".health-card .ingestion-row{grid-template-columns:1fr;gap:3px;padding:8px 9px}",
+            self.html,
+        )
+
     def test_existing_action_buttons_remain_blue_and_miniapp_safe(self):
         self.assertIn(".btn.secondary{background:var(--navy);color:#fff;border-color:var(--navy)}", self.html)
         self.assertNotIn('target="_blank"', self.html)
