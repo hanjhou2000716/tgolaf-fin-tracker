@@ -5,6 +5,7 @@ import datetime
 import math
 import re
 import time
+import copy
 import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
@@ -20,7 +21,7 @@ from risk import (
 from validation import validate_history_sheet, validate_inventory, validate_quote
 from asset_tree import build_asset_tree
 from public_site import write_public_site
-from supabase_sync import load_goal_state, save_goal_state, upload_private_snapshot, upload_private_transactions
+from supabase_sync import load_goal_state, load_private_snapshot, save_goal_state, upload_private_snapshot, upload_private_transactions
 from transaction_schema import (
     TransactionSchemaError,
     RejectedTransaction,
@@ -170,6 +171,51 @@ def write_json(path, payload):
 # ==========================================
 # 2. Google Sheets 動態資產結算核心
 # ==========================================
+def _empty_inventory():
+    return {
+        "台股": {}, "美股": {}, "基金": {},
+        "現金_TWD": {"TWD": 0.0}, "現金_USD": {"USD": 0.0},
+        "質押負債": {"Current_Debt": 0.0, "History": []},
+        "質押利率": {"Rate": 3.3, "History": []}, "擔保品": {},
+    }
+
+
+def _serialize_inventory(inventory):
+    """Make the canonical inventory safe for the private snapshot JSON."""
+    if isinstance(inventory, datetime.date):
+        return inventory.isoformat()
+    if isinstance(inventory, tuple):
+        return [_serialize_inventory(item) for item in inventory]
+    if isinstance(inventory, list):
+        return [_serialize_inventory(item) for item in inventory]
+    if isinstance(inventory, dict):
+        return {key: _serialize_inventory(value) for key, value in inventory.items()}
+    return inventory
+
+
+def _inventory_from_lkg(payload):
+    """Validate and restore a previously serialized canonical inventory."""
+    raw = payload.get("inventory") if isinstance(payload, dict) else None
+    if not isinstance(raw, dict):
+        return None
+    required = {"台股", "美股", "基金", "現金_TWD", "現金_USD", "質押負債", "質押利率", "擔保品"}
+    if not required.issubset(raw):
+        return None
+    restored = copy.deepcopy(raw)
+    for key in ("質押負債", "質押利率"):
+        history = restored.get(key, {}).get("History", [])
+        normalized = []
+        for item in history:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                continue
+            try:
+                normalized.append((datetime.date.fromisoformat(str(item[0])[:10]), float(item[1])))
+            except (TypeError, ValueError):
+                continue
+        restored[key]["History"] = normalized
+    return restored
+
+
 def calculate_current_assets():
     creds_dict = json.loads(GCP_CREDENTIALS_JSON)
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
@@ -299,12 +345,18 @@ def calculate_current_assets():
 
     data_rows.sort(key=parse_date)
 
-    inventory = {
-        "台股": {}, "美股": {}, "基金": {}, 
-        "現金_TWD": {"TWD": 0.0}, "現金_USD": {"USD": 0.0},
-        "質押負債": {"Current_Debt": 0.0, "History": []},
-        "質押利率": {"Rate": 3.3, "History": []}, "擔保品": {}  
-    }
+    lkg_snapshot = None
+    lkg_inventory = None
+    schema_drift_detected = any(item.reason == "schema_drift" for item in ingestion_rejections)
+    if schema_drift_detected:
+        lkg_snapshot = load_private_snapshot()
+        if lkg_snapshot:
+            lkg_inventory = _inventory_from_lkg(lkg_snapshot.get("payload", {}))
+        if lkg_inventory is not None:
+            # A header-level drift invalidates the whole new batch.  Do not
+            # combine partial rows with the previous canonical state.
+            data_rows = []
+    inventory = lkg_inventory or _empty_inventory()
     symbol_overrides = {'6208': '006208', '403A': '00403A', '886': '00886', '895': '00895', '878': '00878', '685L': '00685L'}
     known_symbols = ['6208', '006208', '403A', '00403A', '886', '00886', '895', '00895', '878', '00878', '3455', '8033', '2330', '3665', '685L', '00685L', 'QQQM', 'NVDA', 'SPYG', 'TSM', 'VOO', 'VTI', 'TSLA', 'AAPL', 'QQQ', 'FUND', 'TWD', 'USD', 'CURRENT_DEBT', 'RATE']
     
@@ -409,6 +461,9 @@ def calculate_current_assets():
                         if ingestion_rejections
                         else None
                     ),
+                    "lkgUsed": bool(lkg_inventory),
+                    "portfolioDataAsOf": lkg_snapshot.get("generated_at") if lkg_inventory and lkg_snapshot else None,
+                    "lastSuccessfulIngestionAt": None if lkg_inventory else datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 },
             ),
             "reconciliationEvents": reconciliation_events,
@@ -1493,6 +1548,10 @@ def main():
             "scenarioLab": scenario_lab,
             "runtimeExtensions": runtime_extensions,
             "transactionIngestion": transaction_ingestion,
+            # Private-only canonical state used as the next Last-Known-Good
+            # snapshot.  public_site.py receives a separate Demo contract.
+            "inventory": _serialize_inventory(inventory),
+            "portfolioDataAsOf": ingestion_health.get("portfolioDataAsOf") or tw_now.isoformat(),
             "nvdaExposure": {"value": round(nvda_exposure_twd, 2), "percent": round(nvda_pct, 1), "etfWeights": {symbol: {"weight": round(weight * 100, 2), "source": source} for symbol, (weight, source) in etf_nvda_weights.items()}},
         },
     }
@@ -1504,6 +1563,8 @@ def main():
         "snapshotResult": snapshot_result,
         "portfolioValueAvailable": total_asset > 0,
         "ingestionHealth": ingestion_health,
+        "pipelineGeneratedAt": tw_now.isoformat(),
+        "portfolioDataAsOf": ingestion_health.get("portfolioDataAsOf") or tw_now.isoformat(),
         "freshness": {
             "expectedCadenceHours": 12,
             "staleAfterHours": 18,
@@ -1516,6 +1577,8 @@ def main():
     }
     data_for_web["status"] = data_status
     data_for_web["generatedAt"] = tw_now.isoformat()
+    data_for_web["pipelineGeneratedAt"] = tw_now.isoformat()
+    data_for_web["portfolioDataAsOf"] = ingestion_health.get("portfolioDataAsOf") or tw_now.isoformat()
     data_for_web["snapshotResult"] = snapshot_result
     data_for_web["ledgerSyncResult"] = ledger_sync_result
     data_for_web["dataQuality"] = status_payload

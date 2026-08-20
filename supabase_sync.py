@@ -196,6 +196,48 @@ def upload_private_snapshot(path: str, *, session=None) -> str:
     return "uploaded"
 
 
+def load_private_snapshot(*, session=None) -> dict | None:
+    """Load the latest private snapshot for LKG recovery inside the worker.
+
+    This endpoint is never called by the public site.  It is only used when a
+    whole Form header is invalid, so the pipeline can publish a fresh health
+    status while retaining the last validated portfolio state.
+    """
+    config = _required_config()
+    if not all(config.values()):
+        return None
+    headers = {
+        "apikey": config["service_role_key"],
+        "Authorization": f"Bearer {config['service_role_key']}",
+    }
+    http = session or requests
+    response = http.get(
+        f"{config['url']}/rest/v1/portfolio_snapshots",
+        headers=headers,
+        params={
+            "user_id": f"eq.{config['user_id']}",
+            "select": "generated_at,payload",
+            "order": "generated_at.desc",
+            "limit": "1",
+        },
+        timeout=20,
+    )
+    if getattr(response, "status_code", 200) == 404:
+        return None
+    response.raise_for_status()
+    rows = response.json()
+    if not rows:
+        return None
+    row = rows[0] if isinstance(rows[0], dict) else {}
+    payload = row.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    return {
+        "generated_at": row.get("generated_at") or payload.get("generatedAt"),
+        "payload": payload,
+    }
+
+
 def upload_private_transactions(transactions, *, session=None) -> str:
     """Append transactions without overwriting existing ledger entries.
 
