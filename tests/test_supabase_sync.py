@@ -7,7 +7,7 @@ from unittest.mock import patch
 from datetime import date
 from decimal import Decimal
 
-from supabase_sync import load_goal_state, save_goal_state, upload_private_snapshot, upload_private_transactions
+from supabase_sync import load_goal_state, load_private_snapshot, save_goal_state, upload_private_snapshot, upload_private_transactions
 from transaction_schema import Action, Transaction
 
 
@@ -57,6 +57,22 @@ def sample_transaction(quantity="1"):
 
 
 class SupabaseSyncTests(unittest.TestCase):
+    def test_private_snapshot_loader_returns_lkg_payload_only(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+        }
+        session = FakeSession(existing=[{
+            "generated_at": "2026-08-20T05:40:00+00:00",
+            "payload": {"inventory": {"台股": {"006208": 1}}},
+        }])
+        with patch.dict(os.environ, env, clear=True):
+            result = load_private_snapshot(session=session)
+        self.assertEqual(result["generated_at"], "2026-08-20T05:40:00+00:00")
+        self.assertEqual(result["payload"]["inventory"]["台股"]["006208"], 1)
+        self.assertIn("portfolio_snapshots", session.calls[0][0][0])
+
     def test_missing_config_skips_without_private_upload(self):
         with patch.dict(os.environ, {}, clear=True):
             with tempfile.TemporaryDirectory() as directory:
