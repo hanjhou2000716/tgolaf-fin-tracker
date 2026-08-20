@@ -219,6 +219,72 @@ class SupabaseSyncTests(unittest.TestCase):
         second = dict(first, quantity="100.0", transaction_id="different", source_row_id="Form:99")
         self.assertEqual(transaction_fingerprint(first), transaction_fingerprint(second))
 
+    def test_estimated_price_change_is_derived_replay(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        old = Transaction(**{
+            **sample_transaction("1").__dict__,
+            "price": Decimal("100"),
+            "compatibility_used": "settlement_quote_estimate:FinMind",
+        })
+        current = Transaction(**{
+            **old.__dict__,
+            "price": Decimal("105"),
+            "compatibility_used": "settlement_quote_estimate:Yahoo Finance",
+        })
+        session = FakeSession([{"transaction_id": old.transaction_id, "payload": transaction_payload(old)}])
+        with patch.dict(os.environ, env, clear=True):
+            result = upload_private_transactions([current], session=session)
+        self.assertEqual(result, "unchanged")
+        self.assertEqual(result.derived_price_replays[0]["classification"], "REPLAY_DERIVED_PRICE")
+        self.assertEqual(result.derived_price_replays[0]["ignored_derived_fields"], ["price"])
+        self.assertEqual(len(session.calls), 1)
+
+    def test_explicit_price_change_remains_conflict(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        old = sample_transaction("1")
+        current = Transaction(**{**old.__dict__, "price": Decimal("105")})
+        session = FakeSession([{"transaction_id": old.transaction_id, "payload": transaction_payload(old)}])
+        with patch.dict(os.environ, env, clear=True):
+            result = upload_private_transactions([current], session=session)
+        self.assertEqual(result, "degraded")
+        self.assertEqual(result.conflicts[0]["classification"], "CONFLICT")
+        self.assertIn("price", result.conflicts[0]["changed_fields"])
+
+    def test_estimated_price_cannot_replace_explicit_price(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        old = sample_transaction("1")
+        current = Transaction(**{
+            **old.__dict__,
+            "price": Decimal("105"),
+            "compatibility_used": "settlement_quote_estimate:FinMind",
+        })
+        session = FakeSession([{"transaction_id": old.transaction_id, "payload": transaction_payload(old)}])
+        with patch.dict(os.environ, env, clear=True):
+            result = upload_private_transactions([current], session=session)
+        self.assertEqual(result, "degraded")
+        self.assertEqual(result.conflicts[0]["classification"], "CONFLICT")
+
     def test_valid_transactions_upload_while_conflict_is_quarantined(self):
         env = {
             "SUPABASE_URL": "https://example.supabase.co",
