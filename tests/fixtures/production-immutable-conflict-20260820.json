@@ -1,0 +1,10 @@
+{
+  "workflow": "Tranquil Growth Web App Deployment",
+  "run_id": 32340912399,
+  "head_sha": "3451a041becc12455482058d622bc16167031582",
+  "failed_step": "Run Tracker Script (Generate private snapshot and public Demo)",
+  "exception_type": "RuntimeError",
+  "exception_message": "immutable ledger conflict for transaction_id 39c68de3-381d-5ecf-bdc8-5920d51676b5",
+  "transaction_id": "39c68de3-381d-5ecf-bdc8-5920d51676b5",
+  "expected_recovery": "quarantine row, preserve immutable history, continue valid rows"
+}
