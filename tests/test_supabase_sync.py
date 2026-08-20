@@ -57,6 +57,22 @@ def sample_transaction(quantity="1"):
 
 
 class SupabaseSyncTests(unittest.TestCase):
+    def test_production_conflict_fixture_is_quarantined(self):
+        fixture = json.loads((Path(__file__).parent / "fixtures" / "production-immutable-conflict-20260820.json").read_text(encoding="utf-8"))
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        transaction = Transaction(**{**sample_transaction().__dict__, "transaction_id": fixture["transaction_id"]})
+        from ledger import transaction_payload
+        existing = [{"transaction_id": fixture["transaction_id"], "payload": transaction_payload(Transaction(**{**transaction.__dict__, "quantity": Decimal("2")}))}]
+        with patch.dict(os.environ, env, clear=True):
+            result = upload_private_transactions([transaction], session=FakeSession(existing))
+        self.assertEqual(result, "degraded")
+        self.assertEqual(result.conflicts[0]["transaction_id"], fixture["transaction_id"])
+
     def test_private_snapshot_loader_returns_lkg_payload_only(self):
         env = {
             "SUPABASE_URL": "https://example.supabase.co",
