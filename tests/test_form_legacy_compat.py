@@ -18,6 +18,13 @@ class FormLegacyCompatTests(unittest.TestCase):
         self.assertIn("except TransactionSchemaError as error:", source)
         self.assertIn("if not FORM_SCHEMA_LEGACY_COMPAT:", source)
 
+    def test_unknown_schema_does_not_enter_raw_inventory_fallback(self):
+        source = (ROOT / "dashboard_pipeline.py").read_text(encoding="utf-8")
+        self.assertIn("detect_schema(rows[0])", source)
+        self.assertIn('if schema_version == "LEGACY":', source)
+        self.assertIn("adapt_known_legacy_rows(rows[0], rows[1:])", source)
+        self.assertIn('reason = "schema_drift"', source)
+
 
 if __name__ == "__main__":
     unittest.main()

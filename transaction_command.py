@@ -195,15 +195,30 @@ def build_ingestion_status(*, accepted=(), pending=(), rejected=(), compatibilit
     return rows[-3:]
 
 
-def build_ingestion_contract(rows) -> dict[str, Any]:
-    """Serialize a status summary and a small, private recent-status feed."""
+def build_ingestion_contract(rows, *, schema="CURRENT", ingestion_health=None) -> dict[str, Any]:
+    """Serialize status rows plus an explicit ingestion-health contract.
+
+    ``recent`` remains backwards compatible for the Mini App.  The additional
+    ``ingestionHealth`` object lets the dashboard distinguish a healthy
+    pipeline from a pipeline that ran successfully but quarantined bad input.
+    """
     rows = list(rows or [])
     summary = {
         "applied": sum(1 for row in rows if row.get("status") in {CommandStatus.APPLIED, CommandStatus.APPLIED_WITH_COMPATIBILITY}),
         "pending": sum(1 for row in rows if row.get("status") == CommandStatus.PENDING),
         "rejected": sum(1 for row in rows if row.get("status") == CommandStatus.REJECTED),
     }
-    return {"summary": summary, "recent": rows[-5:]}
+    health = {
+        "status": "DEGRADED" if summary["rejected"] else "OK",
+        "schema": schema,
+        "accepted": summary["applied"],
+        "rejected": summary["rejected"],
+        "reasonCode": None,
+        "message": None,
+    }
+    if ingestion_health:
+        health.update({key: value for key, value in ingestion_health.items() if value is not None})
+    return {"summary": summary, "recent": rows[-5:], "ingestionHealth": health}
 
 
 def inventory_rows_from_transactions(transactions, accepted_rows):

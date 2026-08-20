@@ -9,6 +9,33 @@ import requests
 from ledger import transaction_payload
 
 
+class TransactionSyncResult(str):
+    """String-compatible sync result with row-level quarantine details.
+
+    Existing callers historically compared the return value with strings such
+    as ``"uploaded"``.  Keeping this as a ``str`` subclass preserves that
+    contract while allowing the pipeline to expose immutable conflicts as
+    ingestion health details instead of aborting the whole build.
+    """
+
+    def __new__(cls, status: str, *, conflicts=(), uploaded=0, unchanged=0):
+        instance = super().__new__(cls, status)
+        instance.status = status
+        instance.conflicts = tuple(conflicts)
+        instance.uploaded = int(uploaded)
+        instance.unchanged = int(unchanged)
+        return instance
+
+
+def _conflict_record(payload: dict) -> dict:
+    return {
+        "transaction_id": str(payload.get("transaction_id") or ""),
+        "source_row_id": str(payload.get("source_row_id") or ""),
+        "reason": "immutable_ledger_conflict",
+        "detail": "既有 Supabase immutable ledger payload 與本次解析結果不同；已隔離，未覆寫歷史事件。",
+    }
+
+
 def _same_legacy_reconciliation(previous: dict, current: dict) -> bool:
     """Allow a safe replay after the Form V2 compatibility migration.
 
@@ -172,19 +199,21 @@ def upload_private_snapshot(path: str, *, session=None) -> str:
 def upload_private_transactions(transactions, *, session=None) -> str:
     """Append transactions without overwriting existing ledger entries.
 
-    Existing UUIDs are compared before inserts. A matching replay is ignored;
-    reusing an UUID with different content fails closed as an immutable-ledger
-    conflict. The service-role key is only read inside this server-side job.
+    Existing UUIDs are compared before inserts. A matching replay is ignored.
+    Reusing a UUID with different content is quarantined as an immutable-ledger
+    conflict; valid rows still upload and the caller receives a degraded result
+    with the conflict details. The service-role key is only read inside this
+    server-side job.
     """
     config = _required_config()
     required = os.getenv("SUPABASE_PRIVATE_SYNC_REQUIRED", "false").lower() in {"1", "true", "yes", "on"}
     if not transactions:
-        return "skipped"
+        return TransactionSyncResult("skipped")
     if not all(config.values()):
         if required:
             raise RuntimeError("Supabase transaction sync is required but credentials are missing")
         print("Supabase transaction sync skipped; credentials are not configured")
-        return "skipped"
+        return TransactionSyncResult("skipped")
 
     payloads = [transaction_payload(transaction) for transaction in transactions]
     ids = [payload["transaction_id"] for payload in payloads]
@@ -206,6 +235,7 @@ def upload_private_transactions(transactions, *, session=None) -> str:
     )
     response.raise_for_status()
     existing = {str(row["transaction_id"]): row.get("payload", {}) for row in response.json()}
+    conflicts = []
     for payload in payloads:
         previous = existing.get(payload["transaction_id"])
         if previous is not None and previous != payload:
@@ -215,11 +245,21 @@ def upload_private_transactions(transactions, *, session=None) -> str:
                     f"immutable row preserved: {payload['transaction_id']}"
                 )
                 continue
-            raise RuntimeError(
-                f"immutable ledger conflict for transaction_id {payload['transaction_id']}"
-            )
+            conflicts.append(_conflict_record(payload))
 
-    missing = [payload for payload in payloads if payload["transaction_id"] not in existing]
+    conflict_ids = {item["transaction_id"] for item in conflicts}
+    if conflicts:
+        print(
+            "Supabase immutable ledger conflicts quarantined: "
+            + ", ".join(item["transaction_id"] for item in conflicts)
+        )
+
+    missing = [
+        payload
+        for payload in payloads
+        if payload["transaction_id"] not in existing
+        and payload["transaction_id"] not in conflict_ids
+    ]
     if missing:
         rows = [
             {
@@ -240,6 +280,11 @@ def upload_private_transactions(transactions, *, session=None) -> str:
         )
         insert_response.raise_for_status()
         print(f"Supabase transactions appended: {len(missing)}")
-        return "uploaded"
+        status = "degraded" if conflicts else "uploaded"
+        return TransactionSyncResult(status, conflicts=conflicts, uploaded=len(missing))
     print("Supabase transactions already synchronized")
-    return "unchanged"
+    return TransactionSyncResult(
+        "degraded" if conflicts else "unchanged",
+        conflicts=conflicts,
+        unchanged=len(payloads) - len(conflicts),
+    )

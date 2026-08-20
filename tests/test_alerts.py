@@ -29,6 +29,16 @@ class AlertTests(unittest.TestCase):
         self.assertTrue(engine.states["concentration_warning"].acknowledged)
         self.assertFalse(engine.acknowledge("missing"))
 
+    def test_ingestion_degraded_is_actionable_warning(self):
+        engine = AlertEngine(now=lambda: datetime(2026, 8, 20, tzinfo=timezone.utc))
+        alerts = engine.evaluate({
+            "ingestionDegraded": True,
+            "ingestionMessage": "IMMUTABLE_LEDGER_CONFLICT",
+        })
+        item = next(alert for alert in alerts if alert["key"] == "ingestion_warning")
+        self.assertTrue(item["triggered"])
+        self.assertEqual(item["message"], "IMMUTABLE_LEDGER_CONFLICT")
+
 
 if __name__ == "__main__":
     unittest.main()

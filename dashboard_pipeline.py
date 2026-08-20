@@ -21,8 +21,15 @@ from validation import validate_history_sheet, validate_inventory, validate_quot
 from asset_tree import build_asset_tree
 from public_site import write_public_site
 from supabase_sync import load_goal_state, save_goal_state, upload_private_snapshot, upload_private_transactions
-from transaction_schema import TransactionSchemaError, parse_transaction_rows
+from transaction_schema import (
+    TransactionSchemaError,
+    RejectedTransaction,
+    adapt_known_legacy_rows,
+    detect_schema,
+    parse_transaction_rows,
+)
 from transaction_command import apply_reconciliation_events, build_ingestion_contract, build_ingestion_status, inventory_rows_from_transactions
+from settlement_pricing import enrich_missing_trade_prices
 from performance import performance_breakdown
 from market_data import MarketDataService, Quote
 from metrics import summarize_performance
@@ -181,6 +188,8 @@ def calculate_current_assets():
     data_rows, history_sheet = [], None
     transaction_audits, accepted_transactions, seen_transaction_ids = [], [], set()
     transaction_ingestion = []
+    schema_versions = []
+    ingestion_rejections = []
     for ws in sheet.worksheets():
         title_clean = ws.title.strip().lower()
         if "history" in title_clean or "歷史" in title_clean or "紀錄" in title_clean:
@@ -188,6 +197,8 @@ def calculate_current_assets():
         elif "表單" in title_clean or "form" in title_clean or "回覆" in title_clean or "異動" in title_clean:
             rows = ws.get_all_values()
             if len(rows) > 1:
+                schema_version = detect_schema(rows[0])
+                schema_versions.append(schema_version)
                 if FORM_SCHEMA_STRICT:
                     try:
                         parsed = parse_transaction_rows(
@@ -196,28 +207,69 @@ def calculate_current_assets():
                             source_sheet=ws.title,
                             existing_ids=seen_transaction_ids,
                         )
-                        seen_transaction_ids.update(item.transaction_id for item in parsed.accepted)
-                        seen_transaction_ids.update(item.transaction_id for item in parsed.pending)
-                        accepted_transactions.extend(parsed.accepted)
+                        priced = enrich_missing_trade_prices(
+                            parsed.accepted,
+                            _settlement_quote_for_transaction,
+                        )
+                        accepted_ids = {item.transaction_id for item in priced.accepted}
+                        accepted_rows = tuple(
+                            row for item, row in zip(parsed.accepted, parsed.accepted_rows)
+                            if item.transaction_id in accepted_ids
+                        )
+                        pending = tuple(parsed.pending) + tuple(priced.pending)
+                        seen_transaction_ids.update(item.transaction_id for item in priced.accepted)
+                        seen_transaction_ids.update(item.transaction_id for item in pending)
+                        accepted_transactions.extend(priced.accepted)
                         transaction_ingestion.extend(build_ingestion_status(
-                            accepted=parsed.accepted,
-                            pending=parsed.pending,
+                            accepted=priced.accepted,
+                            pending=pending,
                             rejected=parsed.rejected,
                         ))
-                        transaction_audits.append({"sheet": ws.title, **parsed.audit_payload()})
-                        data_rows.extend(inventory_rows_from_transactions(parsed.accepted, parsed.accepted_rows))
+                        ingestion_rejections.extend(parsed.rejected)
+                        audit_payload = parsed.audit_payload()
+                        audit_payload["accepted"] = len(priced.accepted)
+                        audit_payload["pending"].extend(
+                            {
+                                "transaction_id": item.transaction_id,
+                                "source_row_id": item.source_row_id,
+                                "submitter_email": item.submitter_email,
+                                "transaction_date": item.transaction_date.isoformat(),
+                                "asset_type": item.asset_type,
+                                "symbol": item.symbol,
+                                "action": item.action.value,
+                                "quantity": str(item.quantity),
+                                "unit": item.unit,
+                                "currency": item.currency,
+                                "compatibility_used": item.compatibility_used,
+                            }
+                            for item in priced.pending
+                        )
+                        transaction_audits.append({"sheet": ws.title, **audit_payload})
+                        data_rows.extend(inventory_rows_from_transactions(priced.accepted, accepted_rows))
                     except TransactionSchemaError as error:
                         if not FORM_SCHEMA_LEGACY_COMPAT:
                             raise
+                        if schema_version == "LEGACY":
+                            migrated_rows = adapt_known_legacy_rows(rows[0], rows[1:])
+                            data_rows.extend(migrated_rows)
+                            reason = "legacy_schema_migration"
+                        else:
+                            # UNKNOWN / drifted headers are quarantined.  Do
+                            # not send raw rows into the legacy reducer.
+                            reason = "schema_drift"
+                            ingestion_rejections.append(
+                                RejectedTransaction(
+                                    f"{ws.title}:header",
+                                    "schema_drift",
+                                    f"{schema_version}: {error}",
+                                )
+                            )
                         transaction_audits.append({
                             "sheet": ws.title,
                             "accepted": 0,
                             "pending": [],
-                            "rejected": [{"source_row_id": f"{ws.title}:header", "reason": "legacy_schema_compat", "detail": str(error)}],
+                            "rejected": [{"source_row_id": f"{ws.title}:header", "reason": reason, "detail": str(error)}],
                         })
-                        # Existing legacy rows are retained only as a temporary
-                        # asset snapshot source while the Form is migrated.
-                        data_rows.extend(rows[1:])
                 else:
                     data_rows.extend(rows[1:])
                 
@@ -225,7 +277,15 @@ def calculate_current_assets():
         write_json(".private-build/transaction_audit.json", {
             "strict": FORM_SCHEMA_STRICT,
             "sheets": transaction_audits,
-            "transactionIngestion": build_ingestion_contract(transaction_ingestion),
+            "transactionIngestion": build_ingestion_contract(
+                transaction_ingestion,
+                schema=schema_versions[-1] if schema_versions else "UNKNOWN",
+                ingestion_health={
+                    "status": "DEGRADED" if ingestion_rejections else "OK",
+                    "reasonCode": "SCHEMA_DRIFT" if ingestion_rejections else None,
+                    "message": "Google Form schema drift; affected rows quarantined" if ingestion_rejections else None,
+                },
+            ),
         })
     def parse_date(row):
         if not row: return datetime.datetime.min
@@ -316,11 +376,41 @@ def calculate_current_assets():
 
     accepted_transactions, reconciliation_events = apply_reconciliation_events(inventory, accepted_transactions)
     ledger_sync_result = upload_private_transactions(accepted_transactions)
+    sync_conflicts = tuple(getattr(ledger_sync_result, "conflicts", ()))
+    if sync_conflicts:
+        conflict_rejections = tuple(
+            RejectedTransaction(
+                item.get("source_row_id") or item.get("transaction_id") or "supabase",
+                item.get("reason", "immutable_ledger_conflict"),
+                item.get("detail", "immutable ledger conflict"),
+            )
+            for item in sync_conflicts
+        )
+        ingestion_rejections.extend(conflict_rejections)
+        transaction_ingestion.extend(build_ingestion_status(rejected=conflict_rejections))
     if transaction_audits:
         write_json(".private-build/transaction_audit.json", {
             "strict": FORM_SCHEMA_STRICT,
             "sheets": transaction_audits,
-            "transactionIngestion": build_ingestion_contract(transaction_ingestion),
+            "transactionIngestion": build_ingestion_contract(
+                transaction_ingestion,
+                schema=schema_versions[-1] if schema_versions else "UNKNOWN",
+                ingestion_health={
+                    "status": "DEGRADED" if ingestion_rejections else "OK",
+                    "reasonCode": (
+                        "IMMUTABLE_LEDGER_CONFLICT" if sync_conflicts
+                        else "SCHEMA_DRIFT" if ingestion_rejections
+                        else None
+                    ),
+                    "message": (
+                        "Supabase immutable ledger conflict quarantined"
+                        if sync_conflicts
+                        else "Google Form schema drift; affected rows quarantined"
+                        if ingestion_rejections
+                        else None
+                    ),
+                },
+            ),
             "reconciliationEvents": reconciliation_events,
         })
     return inventory, history_sheet, accepted_transactions, ledger_sync_result
@@ -351,6 +441,25 @@ def get_us_stock_price(symbol):
         try: return yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1]
         except: return 0
 
+
+def _settlement_quote_for_transaction(transaction):
+    """Return a quality-aware current settlement quote for a missing trade price."""
+    if transaction.currency.upper() == "TWD":
+        return MARKET_DATA.get_taiwan(transaction.symbol, FINMIND_TOKEN)
+
+    def fetch_us(symbol):
+        value = float(get_us_stock_price(symbol))
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError(f"US quote unavailable for {symbol}")
+        return value
+
+    return MARKET_DATA.get(
+        transaction.symbol,
+        currency="USD",
+        fetcher=fetch_us,
+        source="Yahoo Finance/yfinance",
+    )
+
 # ==========================================
 # 4. 主程序與 HTML (Web App) 生成
 # ==========================================
@@ -368,6 +477,7 @@ def main():
             transaction_ingestion = audit_payload.get("transactionIngestion") or transaction_ingestion
         except (OSError, ValueError, TypeError):
             pass
+    ingestion_health = transaction_ingestion.get("ingestionHealth", {}) if isinstance(transaction_ingestion, dict) else {}
     validate_inventory(inventory)
     validate_history_sheet(history_sheet)
     history_records = history_sheet.get_all_records()
@@ -602,6 +712,8 @@ def main():
         "cashMonths": 999,
         "isStale": False,
         "reconciled": attribution["reconciled"],
+        "ingestionDegraded": ingestion_health.get("status") == "DEGRADED",
+        "ingestionMessage": ingestion_health.get("message") or ingestion_health.get("reasonCode"),
     })
 
     def inline_daily_change(key):
@@ -1391,6 +1503,7 @@ def main():
         "generatedAt": tw_now.isoformat(),
         "snapshotResult": snapshot_result,
         "portfolioValueAvailable": total_asset > 0,
+        "ingestionHealth": ingestion_health,
         "freshness": {
             "expectedCadenceHours": 12,
             "staleAfterHours": 18,
@@ -1423,6 +1536,9 @@ def main():
         msg_body = f"💸 可憐的阿洲，今天賠了 {abs(int(daily_diff)):,} 元 ({daily_pct:.1f}%)"
 
     tg_text = f"✅ {display_date} 結算完畢！\n{msg_body}"
+    if ingestion_health.get("status") == "DEGRADED":
+        reason = ingestion_health.get("message") or ingestion_health.get("reasonCode") or "部分資料已隔離"
+        tg_text += f"\n⚠️ Growth 資料輸入異常\n原因：{reason}\n有效資料仍已部署，異常資料已隔離。"
 
     keyboard = {
         "inline_keyboard": [

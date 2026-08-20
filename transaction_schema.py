@@ -26,6 +26,7 @@ class Action(str, Enum):
     FX_CONVERSION = "FX_CONVERSION"
     REVERSAL = "REVERSAL"
     SET_BALANCE = "SET_BALANCE"
+    SET_PLEDGE_RATE = "SET_PLEDGE_RATE"
 
 
 class TransactionSchemaError(ValueError):
@@ -127,6 +128,75 @@ COMPACT_DESCRIPTION_ALIASES = (
     "description",
     "transaction_text",
 )
+
+# The response sheet is an input transport, not the domain contract.  These
+# names are the only schema versions accepted at the ingestion boundary.
+CURRENT_FORM_SCHEMA = "CURRENT"
+FORM_V2_SCHEMA = "FORM_V2"
+LEGACY_SCHEMA = "LEGACY"
+LEGACY_COMPACT_SCHEMA = "LEGACY_COMPACT"
+UNKNOWN_SCHEMA = "UNKNOWN"
+
+
+def _has_any_normalized(normalized: set[str], aliases: Sequence[str]) -> bool:
+    return any(_normalize_header(alias) in normalized for alias in aliases)
+
+
+def detect_schema(headers: Sequence[str]) -> str:
+    """Detect a known response shape without inspecting row values.
+
+    Unknown headers intentionally return ``UNKNOWN``.  They must never be
+    routed into the historical heuristic inventory reducer.
+    """
+    normalized = {_normalize_header(value) for value in headers}
+    # Import lazily to avoid simple_transaction -> transaction_schema cycles.
+    from simple_transaction import is_simple_form_headers
+    if is_simple_form_headers(headers):
+        return CURRENT_FORM_SCHEMA
+    if _has_any_normalized(normalized, COMPACT_DESCRIPTION_ALIASES):
+        return LEGACY_COMPACT_SCHEMA
+    if _normalize_header("交易類型") in normalized or _has_any_normalized(
+        normalized, ("market", "市場")
+    ) and _has_any_normalized(normalized, ("symbol", "資產代號")):
+        return FORM_V2_SCHEMA
+    try:
+        resolve_headers(headers)
+        return LEGACY_SCHEMA
+    except TransactionSchemaError:
+        return UNKNOWN_SCHEMA
+
+
+def adapt_known_legacy_rows(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> tuple[tuple[str, ...], ...]:
+    """Migrate only a recognized legacy inventory shape to five canonical cells.
+
+    This is deliberately header-mapped.  It is not a fallback that scans an
+    arbitrary row for numbers or keywords.
+    """
+    normalized = {_normalize_header(value): index for index, value in enumerate(headers)}
+
+    def index_for(*aliases: str) -> int | None:
+        for alias in aliases:
+            index = normalized.get(_normalize_header(alias))
+            if index is not None:
+                return index
+        return None
+
+    indexes = {
+        "date": index_for("Timestamp", "時間戳記", "transaction_date", "交易日期", "日期"),
+        "asset": index_for("asset_type", "資產類別", "資產類型"),
+        "symbol": index_for("symbol", "資產代號", "股票代號", "代號"),
+        "action": index_for("action", "交易類型", "異動類型", "操作"),
+        "quantity": index_for("quantity", "數量", "數量/股數/金額 (直接填正數即可)", "金額"),
+    }
+    if any(index is None for index in indexes.values()):
+        raise TransactionSchemaError("Known legacy schema is missing migration columns")
+
+    migrated = []
+    for row in rows:
+        values = tuple(str(row[indexes[field]]).strip() if indexes[field] < len(row) else "" for field in ("date", "asset", "symbol", "action", "quantity"))
+        if any(values[1:]):
+            migrated.append(values)
+    return tuple(migrated)
 
 
 def _normalize_header(value) -> str:
@@ -245,6 +315,9 @@ def _parse_action(value: str) -> Action:
         "交易稅": Action.TAX,
         "借款": Action.BORROW,
         "還款": Action.REPAY,
+        "利率": Action.SET_PLEDGE_RATE,
+        "設定利率": Action.SET_PLEDGE_RATE,
+        "SET_PLEDGE_RATE": Action.SET_PLEDGE_RATE,
         "分割": Action.SPLIT,
         "分拆": Action.SPIN_OFF,
         "轉移": Action.TRANSFER,
@@ -340,6 +413,8 @@ def _v2_action(value: str) -> Action:
         return Action.BORROW
     if normalized in {"還款", "repay", "repayment"}:
         return Action.REPAY
+    if normalized in {"利率", "設定利率", "setpledgerate", "set_pledge_rate"}:
+        return Action.SET_PLEDGE_RATE
     if normalized in {"現金餘額校正", "現金餘額設定", "setbalance", "set_balance"}:
         return Action.SET_BALANCE
     raise ValueError(f"unsupported transaction type: {value}")
@@ -430,8 +505,9 @@ def _parse_v2_transaction_rows(
             Action.BORROW: "存入",
             Action.SELL: "賣出",
             Action.WITHDRAWAL: "提領",
-            Action.REPAY: "提領",
-            Action.SET_BALANCE: "取代",
+        Action.REPAY: "提領",
+        Action.SET_BALANCE: "取代",
+        Action.SET_PLEDGE_RATE: "取代",
         }.get(action, "取代")
         if signed and action in {Action.BUY, Action.DEPOSIT, Action.BORROW}:
             mode = f"{mode} (+)"
@@ -638,6 +714,18 @@ def parse_transaction_rows(
             compact_index=compact_index,
             normalized_headers=normalized_headers,
         )
+    # The current public form is a single page with three user-entered
+    # questions.  Its explicit 交易單位／交易數量 headers distinguish it from
+    # the older Form V2 branch, which uses generic 單位／數量 headers.
+    from simple_transaction import is_simple_form_headers, parse_simple_transaction_rows
+
+    if is_simple_form_headers(headers):
+        return parse_simple_transaction_rows(
+            headers,
+            rows,
+            source_sheet=source_sheet,
+            existing_ids=existing_ids,
+        )
     # Form V2 uses a compact, user-facing set of questions and therefore does
     # not expose internal UUID/approval columns.  It is checked after the
     # explicit legacy compact marker so mixed historical sheets preserve their
@@ -769,6 +857,7 @@ def _parse_compact_transaction_rows(
         Action.BORROW: "存入",
         Action.REPAY: "提領",
         Action.SET_BALANCE: "SET_BALANCE",
+        Action.SET_PLEDGE_RATE: "取代",
     }
 
     for row_number, raw_row in enumerate(rows, start=2):
