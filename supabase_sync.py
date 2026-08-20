@@ -1,6 +1,7 @@
 """Upload the private snapshot to Supabase without exposing service credentials."""
 
 import json
+import hashlib
 import math
 import os
 from pathlib import Path
@@ -18,21 +19,102 @@ class TransactionSyncResult(str):
     ingestion health details instead of aborting the whole build.
     """
 
-    def __new__(cls, status: str, *, conflicts=(), uploaded=0, unchanged=0):
+    def __new__(cls, status: str, *, conflicts=(), replays=(), conflict_report=(), uploaded=0, unchanged=0):
         instance = super().__new__(cls, status)
         instance.status = status
         instance.conflicts = tuple(conflicts)
+        instance.replays = tuple(replays)
+        instance.conflict_report = tuple(conflict_report)
         instance.uploaded = int(uploaded)
         instance.unchanged = int(unchanged)
         return instance
 
 
-def _conflict_record(payload: dict) -> dict:
+_FINGERPRINT_KEYS = (
+    "submitted_at", "transaction_date", "asset_type", "symbol", "action",
+    "quantity", "unit", "currency", "price", "reversal_of",
+)
+_CORE_KEYS = (
+    "transaction_date", "asset_type", "symbol", "action", "quantity",
+    "unit", "currency", "price", "reversal_of",
+)
+
+
+def _normalise_value(value):
+    """Canonicalise payload values without changing their financial meaning."""
+    if value in (None, ""):
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return str(value)
+    text = str(value).strip()
+    # Decimal serialisation is deliberately normalised so 100 and 100.0 are
+    # treated as the same replay, while non-numeric values remain exact.
+    try:
+        from decimal import Decimal
+        number = Decimal(text.replace(",", ""))
+        if number.is_finite():
+            normalised = format(number, "f")
+            if "." in normalised:
+                normalised = normalised.rstrip("0").rstrip(".")
+            return normalised or "0"
+    except Exception:
+        pass
+    return text
+
+
+def _canonical_event(payload: dict, *, include_submitted_at=True) -> dict:
+    keys = _FINGERPRINT_KEYS if include_submitted_at else _CORE_KEYS
+    return {key: _normalise_value(payload.get(key)) for key in keys}
+
+
+def transaction_fingerprint(payload: dict) -> str:
+    """Return a stable identity for one financial event.
+
+    Source row numbers and transaction UUIDs are intentionally excluded. This
+    lets a reordered Sheet row be recognised as a replay while the timestamp
+    and financial fields still distinguish two otherwise identical trades.
+    """
+    existing = payload.get("source_fingerprint")
+    if existing:
+        return str(existing)
+    canonical = _canonical_event(payload)
+    encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _changed_fields(previous: dict, current: dict) -> list[str]:
+    """List immutable financial fields changed by a candidate replay."""
+    changed = []
+    for key in _CORE_KEYS:
+        if _normalise_value(previous.get(key)) != _normalise_value(current.get(key)):
+            changed.append(key)
+    return changed
+
+
+def _replay_record(payload: dict, previous_id: str | None = None) -> dict:
+    return {
+        "transaction_id": str(payload.get("transaction_id") or ""),
+        "source_row_id": str(payload.get("source_row_id") or ""),
+        "matched_existing_transaction_id": str(previous_id or payload.get("transaction_id") or ""),
+        "classification": "REPLAY",
+        "reason": "same_financial_event",
+    }
+
+
+def _conflict_record(payload: dict, previous: dict | None = None, *, matched_id: str | None = None) -> dict:
+    previous = previous or {}
     return {
         "transaction_id": str(payload.get("transaction_id") or ""),
         "source_row_id": str(payload.get("source_row_id") or ""),
         "reason": "immutable_ledger_conflict",
         "detail": "既有 Supabase immutable ledger payload 與本次解析結果不同；已隔離，未覆寫歷史事件。",
+        "classification": "CONFLICT",
+        "matched_existing_transaction_id": str(matched_id or payload.get("transaction_id") or ""),
+        "changed_fields": _changed_fields(previous, payload),
+        "existing_payload": previous,
+        "current_payload": payload,
     }
 
 
@@ -258,6 +340,10 @@ def upload_private_transactions(transactions, *, session=None) -> str:
         return TransactionSyncResult("skipped")
 
     payloads = [transaction_payload(transaction) for transaction in transactions]
+    for payload in payloads:
+        # Stored privately with the ledger row. It is never included in the
+        # public Demo contract and makes row-number changes replay-safe.
+        payload["source_fingerprint"] = transaction_fingerprint(payload)
     ids = [payload["transaction_id"] for payload in payloads]
     headers = {
         "apikey": config["service_role_key"],
@@ -270,37 +356,48 @@ def upload_private_transactions(transactions, *, session=None) -> str:
         headers=headers,
         params={
             "user_id": f"eq.{config['user_id']}",
-            "transaction_id": f"in.({','.join(ids)})",
             "select": "transaction_id,payload",
         },
         timeout=20,
     )
     response.raise_for_status()
     existing = {str(row["transaction_id"]): row.get("payload", {}) for row in response.json()}
+    existing_by_fingerprint = {}
+    for existing_id, existing_payload in existing.items():
+        if isinstance(existing_payload, dict):
+            existing_by_fingerprint.setdefault(transaction_fingerprint(existing_payload), (existing_id, existing_payload))
     conflicts = []
+    conflict_report = []
+    replays = []
     for payload in payloads:
         previous = existing.get(payload["transaction_id"])
-        if previous is not None and previous != payload:
-            if _same_legacy_reconciliation(previous, payload):
-                print(
-                    "Supabase legacy reconciliation replay accepted; "
-                    f"immutable row preserved: {payload['transaction_id']}"
-                )
+        if previous is not None:
+            if previous == payload or transaction_fingerprint(previous) == payload["source_fingerprint"] or _same_legacy_reconciliation(previous, payload):
+                replays.append(_replay_record(payload, payload["transaction_id"]))
                 continue
-            conflicts.append(_conflict_record(payload))
+            record = _conflict_record(payload, previous)
+            conflicts.append(record)
+            conflict_report.append(record)
+            continue
+        matched = existing_by_fingerprint.get(payload["source_fingerprint"])
+        if matched:
+            # The source row/UUID changed, but immutable financial facts did
+            # not. Keep the original ledger row and classify this as REPLAY.
+            replays.append(_replay_record(payload, matched[0]))
 
     conflict_ids = {item["transaction_id"] for item in conflicts}
+    replay_ids = {item["transaction_id"] for item in replays}
     if conflicts:
-        print(
-            "Supabase immutable ledger conflicts quarantined: "
-            + ", ".join(item["transaction_id"] for item in conflicts)
-        )
+        print(f"Supabase immutable ledger conflicts quarantined: {len(conflicts)}")
+    if replays:
+        print(f"Supabase ledger replays accepted: {len(replays)}")
 
     missing = [
         payload
         for payload in payloads
         if payload["transaction_id"] not in existing
         and payload["transaction_id"] not in conflict_ids
+        and payload["transaction_id"] not in replay_ids
     ]
     if missing:
         rows = [
@@ -323,10 +420,19 @@ def upload_private_transactions(transactions, *, session=None) -> str:
         insert_response.raise_for_status()
         print(f"Supabase transactions appended: {len(missing)}")
         status = "degraded" if conflicts else "uploaded"
-        return TransactionSyncResult(status, conflicts=conflicts, uploaded=len(missing))
+        return TransactionSyncResult(
+            status,
+            conflicts=conflicts,
+            replays=replays,
+            conflict_report=conflict_report,
+            uploaded=len(missing),
+            unchanged=len(replays),
+        )
     print("Supabase transactions already synchronized")
     return TransactionSyncResult(
         "degraded" if conflicts else "unchanged",
         conflicts=conflicts,
-        unchanged=len(payloads) - len(conflicts),
+        replays=replays,
+        conflict_report=conflict_report,
+        unchanged=len(replays),
     )
