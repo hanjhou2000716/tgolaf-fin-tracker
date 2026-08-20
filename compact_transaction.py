@@ -38,6 +38,7 @@ _ACTION_PATTERNS: tuple[tuple[Action, str], ...] = (
     (Action.DEPOSIT, r"存入|入金|存款|deposit"),
     (Action.BORROW, r"借款|借入|borrow"),
     (Action.REPAY, r"還款|償還|還借款|repay"),
+    (Action.SET_PLEDGE_RATE, r"質押\s*利率|set[_ ]?pledge[_ ]?rate"),
     (Action.DIVIDEND, r"股息|配息|dividend"),
     (Action.INTEREST, r"利息|interest"),
     (Action.FEE, r"手續費|費用|fee"),
@@ -62,6 +63,8 @@ def _decimal(value: str) -> Decimal:
 
 
 def _currency(text: str, symbol: str) -> str:
+    if symbol.upper() == "RATE":
+        return "TWD"
     if re.search(r"USD|美金|美元", text, re.I):
         return "USD"
     if re.search(r"TWD|台幣|新台幣|台元|NT\$|元", text, re.I):
@@ -79,6 +82,8 @@ def _symbol(text: str, action: Action, currency: str) -> str:
     known = [m for m in matches if m in _KNOWN_SYMBOLS]
     if action == Action.SET_BALANCE and currency:
         return currency
+    if action == Action.SET_PLEDGE_RATE:
+        return "RATE"
     if action in {Action.DEPOSIT, Action.WITHDRAWAL} and currency and not known:
         return currency
     if len(set(known)) > 1:
@@ -105,6 +110,8 @@ def _symbol(text: str, action: Action, currency: str) -> str:
 
 def _asset_type(symbol: str, text: str) -> str:
     upper = symbol.upper()
+    if symbol == "RATE":
+        return "質押利率"
     if symbol == "CURRENT_DEBT" or re.search(r"質押|借款|還款", text):
         return "質押負債"
     if symbol in {"TWD", "USD"} or re.search(r"現金|現鈔|cash", text, re.I):

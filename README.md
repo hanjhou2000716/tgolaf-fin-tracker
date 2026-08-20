@@ -336,11 +336,10 @@ show the Demo dataset.
 
 ## P0-SEC-03 Google Form 交易入口鎖定
 
-When `FORM_SCHEMA_STRICT=true` (the GitHub Actions default), Form response
-headers must include `transaction_id`, `Timestamp`, `Email Address`,
-`approved`, `transaction_date`, `asset_type`, `symbol`, `action`, `quantity`,
-`unit`, and `currency`. The parser does not scan arbitrary cells to infer a
-transaction.
+When `FORM_SCHEMA_STRICT=true` (the GitHub Actions default), the parser accepts
+the current three-question header shape, the Form V2 migration shape, and the
+canonical fixed ledger shape. It uses explicit header mappings for each shape;
+it never scans arbitrary cells to infer a transaction.
 
 - `transaction_id` must be a UUID and is deduplicated across the current run.
 - `approved=false` rows go to the private transaction audit queue and do not
@@ -358,19 +357,37 @@ does not assign a default action: historical cash rows labelled `取代`/`覆蓋
 (or the original `取代台幣現金金額` description with a numeric `price`) are
 the only rows adapted to `SET_BALANCE`; new rows must use an explicit command.
 
-### Compact four-field form
+### 三欄一頁式表單（目前入口）
 
-The form may instead expose four user-facing fields: `交易內容` (required),
-`交易日期` (optional), `價格／匯率` (optional), and `備註` (optional). Google
-Forms still supplies `Timestamp` and `Email Address` automatically. The
-compact parser recognizes explicit descriptions such as `買入 006208 2 張，價格
-55.30`, `賣出 QQQM 3 股 USD`, and `存入 100000 TWD`, then derives the internal
-action, asset type, symbol, quantity, unit, currency, price, and transaction ID.
-The transaction ID is deterministic for the source row, so replaying a row is
-idempotent. Ambiguous or incomplete descriptions are rejected into the audit
-queue instead of being guessed. If an `approved` column is retained, `false`
-continues to route the row to the pending queue; otherwise a successfully
-parsed compact row is accepted after the form's account restriction.
+使用者只需要填三題：`交易類型`、`交易單位`、`交易數量`。Google Forms
+仍會自動提供 `Timestamp` 與 `Email Address`，並以帳號限制取代使用者填寫
+`approved`。
+
+`交易類型`固定使用「標的／主體＋動作」格式，例如：
+
+```text
+006208 買入
+QQQM 賣出
+現金 存入
+質押 借款
+質押 利率
+006208 取代
+```
+
+交易單位限定為 `張`、`股`、`台幣`、`美金`、`%`；`1 張`固定換算為
+`1000 股`，`%`只允許用於質押利率。交易數量只接受數字，取代事件允許
+輸入 0 以清除目前數值。
+
+買入／賣出不再要求成交價，系統會在結算時使用新鮮收盤行情建立
+`settlement_quote_estimate`。行情不存在、過期或使用 stale fallback 時，
+該筆會進入 `PENDING`，不會寫入正式帳本。重複來源列仍以 deterministic
+transaction ID 去重；格式錯誤、幣別／單位不相容或無法辨識標的一律進入
+audit，不會默默猜測。
+
+### Legacy compact four-field form
+
+歷史回覆仍可使用 `交易內容`、`交易日期`、`價格／匯率` 與 `備註` 的舊格式。
+解析器保留舊資料相容層，不刪除既有回覆列；新表單不應再建立分支欄位。
 
 ### Form V2（四種交易情境）
 

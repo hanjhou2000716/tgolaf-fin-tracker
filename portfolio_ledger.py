@@ -122,6 +122,26 @@ def _set_cash_balance(state: PortfolioState, currency: str, target: Decimal) -> 
         state.cash.pop(currency, None)
 
 
+def _set_position_balance(state: PortfolioState, key: tuple[str, str], target: Decimal) -> None:
+    target = Decimal(target)
+    if not target.is_finite() or target < 0:
+        raise PortfolioLedgerError("SET_BALANCE target must be finite and non-negative")
+    if target:
+        state.positions[key] = target
+    else:
+        state.positions.pop(key, None)
+
+
+def _set_debt_balance(state: PortfolioState, currency: str, target: Decimal) -> None:
+    target = Decimal(target)
+    if not target.is_finite() or target < 0:
+        raise PortfolioLedgerError("SET_BALANCE target must be finite and non-negative")
+    if target:
+        state.debt[currency.upper()] = target
+    else:
+        state.debt.pop(currency.upper(), None)
+
+
 def _notional(tx: Transaction) -> Decimal:
     price = tx.price
     if price is None:
@@ -203,11 +223,20 @@ def _apply_one(state: PortfolioState, tx: Transaction, *, inverse: bool = False)
             _change_cash(state, currency, -amount)
         return
 
+    if action == Action.SET_PLEDGE_RATE:
+        # The rate is persisted by the inventory compatibility adapter; it is
+        # metadata and must not affect cash, debt, P&L, or position quantities.
+        return
+
     if action == Action.SET_BALANCE:
         currency = _currency(tx)
-        if not (tx.asset_type.strip().lower().startswith(("現金", "cash")) or tx.symbol.upper() == currency):
-            raise PortfolioLedgerError("SET_BALANCE only supports an explicit cash asset")
-        _set_cash_balance(state, currency, tx.quantity)
+        asset_type = tx.asset_type.strip().lower()
+        if asset_type.startswith(("現金", "cash")) or tx.symbol.upper() == currency:
+            _set_cash_balance(state, currency, tx.quantity)
+        elif asset_type.startswith("質押負債") or tx.symbol.upper() == "CURRENT_DEBT":
+            _set_debt_balance(state, currency, tx.quantity)
+        else:
+            _set_position_balance(state, _position_key(tx), tx.quantity)
         return
 
     if action == Action.SPLIT:

@@ -52,6 +52,8 @@ class BalanceCommandTests(unittest.TestCase):
         contract = build_ingestion_contract(rows)
         self.assertEqual(contract["summary"]["rejected"], 1)
         self.assertTrue(contract["recent"][0]["reason"])
+        self.assertEqual(contract["ingestionHealth"]["status"], "DEGRADED")
+        self.assertEqual(contract["ingestionHealth"]["schema"], "CURRENT")
 
     def test_ambiguous_and_unsafe_values_fail_closed(self):
         with self.assertRaises(CommandValidationError):

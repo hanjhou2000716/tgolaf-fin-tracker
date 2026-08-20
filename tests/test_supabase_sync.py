@@ -106,7 +106,7 @@ class SupabaseSyncTests(unittest.TestCase):
         self.assertIn("resolution=ignore-duplicates", post_kwargs["headers"]["Prefer"])
         self.assertEqual(post_kwargs["json"][0]["transaction_id"], sample_transaction().transaction_id)
 
-    def test_transaction_conflict_fails_closed(self):
+    def test_transaction_conflict_is_not_written_or_overwritten(self):
         env = {
             "SUPABASE_URL": "https://example.supabase.co",
             "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
@@ -116,8 +116,44 @@ class SupabaseSyncTests(unittest.TestCase):
         from ledger import transaction_payload
         existing = [{"transaction_id": sample_transaction().transaction_id, "payload": transaction_payload(sample_transaction("2"))}]
         with patch.dict(os.environ, env, clear=True):
-            with self.assertRaises(RuntimeError):
-                upload_private_transactions([sample_transaction("1")], session=FakeSession(existing))
+            result = upload_private_transactions([sample_transaction("1")], session=FakeSession(existing))
+        self.assertEqual(result, "degraded")
+        self.assertEqual(len(result.conflicts), 1)
+
+    def test_transaction_conflict_is_quarantined_without_blocking_build(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        existing = [{"transaction_id": sample_transaction().transaction_id, "payload": transaction_payload(sample_transaction("2"))}]
+        with patch.dict(os.environ, env, clear=True):
+            result = upload_private_transactions([sample_transaction("1")], session=FakeSession(existing))
+        self.assertEqual(result, "degraded")
+        self.assertEqual(len(result.conflicts), 1)
+        self.assertEqual(result.conflicts[0]["reason"], "immutable_ledger_conflict")
+
+    def test_valid_transactions_upload_while_conflict_is_quarantined(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        valid = Transaction(**{**sample_transaction().__dict__, "transaction_id": "55555555-5555-4555-8555-555555555556"})
+        existing = [{"transaction_id": sample_transaction().transaction_id, "payload": transaction_payload(sample_transaction("2"))}]
+        session = FakeSession(existing)
+        with patch.dict(os.environ, env, clear=True):
+            result = upload_private_transactions([sample_transaction("1"), valid], session=session)
+        self.assertEqual(result, "degraded")
+        self.assertEqual(result.uploaded, 1)
+        self.assertEqual(len(result.conflicts), 1)
+        self.assertEqual(len(session.calls), 2)
 
     def test_legacy_reconciliation_replay_preserves_immutable_row(self):
         env = {

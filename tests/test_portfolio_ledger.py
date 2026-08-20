@@ -78,6 +78,20 @@ class PortfolioLedgerTests(unittest.TestCase):
         with self.assertRaises(PortfolioLedgerError):
             PortfolioLedger([tx(Action.SELL, quantity="1", price="10")])
 
+    def test_set_balance_can_replace_position_or_debt(self):
+        position = tx(Action.SET_BALANCE, quantity="2000", symbol="006208", asset_type="台股")
+        debt = tx(Action.SET_BALANCE, quantity="1870000", symbol="Current_Debt", asset_type="質押負債")
+        ledger = PortfolioLedger([position, debt])
+        self.assertEqual(ledger.state.position("台股", "006208"), Decimal("2000"))
+        self.assertEqual(ledger.state.debt_balance("TWD"), Decimal("1870000"))
+
+    def test_set_pledge_rate_is_metadata_not_cash_or_position(self):
+        rate = tx(Action.SET_PLEDGE_RATE, quantity="2.25", symbol="Rate", asset_type="質押利率")
+        ledger = PortfolioLedger([rate])
+        self.assertEqual(ledger.state.cash, {})
+        self.assertEqual(ledger.state.positions, {})
+        self.assertEqual(ledger.state.debt, {})
+
 
 if __name__ == "__main__":
     unittest.main()

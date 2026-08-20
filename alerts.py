@@ -32,6 +32,7 @@ class AlertEngine:
             ("concentration_warning", Severity.WARNING, metrics.get("maxCompanyExposure", 0) > 35, "單一公司曝險超過 35%"),
             ("cash_watch", Severity.WATCH, metrics.get("cashMonths", 999) < 6, "現金低於六個月需求"),
             ("stale_warning", Severity.WARNING, metrics.get("isStale", False), "行情超過 24 小時未更新"),
+            ("ingestion_warning", Severity.WARNING, metrics.get("ingestionDegraded", False), metrics.get("ingestionMessage") or "Google Form ingestion 有資料被隔離"),
             ("reconciliation_critical", Severity.CRITICAL, not metrics.get("reconciled", True), "帳本與快照無法對帳"),
         ]
         now = self.now()
