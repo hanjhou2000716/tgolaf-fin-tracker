@@ -499,12 +499,15 @@ def calculate_current_assets():
     ledger_sync_result = upload_private_transactions(accepted_transactions)
     sync_conflicts = tuple(getattr(ledger_sync_result, "conflicts", ()))
     sync_replays = tuple(getattr(ledger_sync_result, "replays", ()))
+    derived_price_replays = tuple(getattr(ledger_sync_result, "derived_price_replays", ()))
     conflict_report = tuple(getattr(ledger_sync_result, "conflict_report", sync_conflicts))
     ledger_audit = {
         "status": "DEGRADED" if sync_conflicts else "OK",
         "replayCount": len(sync_replays),
+        "derivedPriceReplayCount": len(derived_price_replays),
         "conflictCount": len(sync_conflicts),
         "replays": list(sync_replays),
+        "derivedPriceReplays": list(derived_price_replays),
         "conflicts": list(conflict_report),
     }
     # This file is private Actions evidence only. It is never copied into the
@@ -607,12 +610,15 @@ def main():
     inventory, history_sheet, accepted_transactions, ledger_sync_result = calculate_current_assets()
     sync_conflicts = tuple(getattr(ledger_sync_result, "conflicts", ()))
     sync_replays = tuple(getattr(ledger_sync_result, "replays", ()))
+    derived_price_replays = tuple(getattr(ledger_sync_result, "derived_price_replays", ()))
     conflict_report = tuple(getattr(ledger_sync_result, "conflict_report", sync_conflicts))
     ledger_audit = {
         "status": "DEGRADED" if sync_conflicts else "OK",
         "replayCount": len(sync_replays),
+        "derivedPriceReplayCount": len(derived_price_replays),
         "conflictCount": len(sync_conflicts),
         "replays": list(sync_replays),
+        "derivedPriceReplays": list(derived_price_replays),
         "conflicts": list(conflict_report),
     }
     transaction_ingestion = build_ingestion_contract(build_ingestion_status(accepted=accepted_transactions))
@@ -1677,6 +1683,7 @@ def main():
     status_payload["ledgerAudit"] = {
         "status": ledger_audit["status"],
         "replayCount": ledger_audit["replayCount"],
+        "derivedPriceReplayCount": ledger_audit["derivedPriceReplayCount"],
         "conflictCount": ledger_audit["conflictCount"],
     }
     # Private data is retained only in the ignored build directory. GitHub

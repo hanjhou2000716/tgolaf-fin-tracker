@@ -19,11 +19,12 @@ class TransactionSyncResult(str):
     ingestion health details instead of aborting the whole build.
     """
 
-    def __new__(cls, status: str, *, conflicts=(), replays=(), conflict_report=(), uploaded=0, unchanged=0):
+    def __new__(cls, status: str, *, conflicts=(), replays=(), derived_price_replays=(), conflict_report=(), uploaded=0, unchanged=0):
         instance = super().__new__(cls, status)
         instance.status = status
         instance.conflicts = tuple(conflicts)
         instance.replays = tuple(replays)
+        instance.derived_price_replays = tuple(derived_price_replays)
         instance.conflict_report = tuple(conflict_report)
         instance.uploaded = int(uploaded)
         instance.unchanged = int(unchanged)
@@ -38,6 +39,13 @@ _CORE_KEYS = (
     "transaction_date", "asset_type", "symbol", "action", "quantity",
     "unit", "currency", "price", "reversal_of",
 )
+_FINGERPRINT_VERSION = "2"
+
+
+def _is_derived_price(payload: dict) -> bool:
+    """Return whether price was supplied by settlement quote enrichment."""
+    marker = str(payload.get("compatibility_used") or "").strip().lower()
+    return marker.startswith("settlement_quote_estimate:")
 
 
 def _normalise_value(value):
@@ -64,9 +72,13 @@ def _normalise_value(value):
     return text
 
 
-def _canonical_event(payload: dict, *, include_submitted_at=True) -> dict:
+def _canonical_event(payload: dict, *, include_submitted_at=True, include_price=True) -> dict:
     keys = _FINGERPRINT_KEYS if include_submitted_at else _CORE_KEYS
-    return {key: _normalise_value(payload.get(key)) for key in keys}
+    if not include_price:
+        keys = tuple(key for key in keys if key != "price")
+    event = {key: _normalise_value(payload.get(key)) for key in keys}
+    event["price_mode"] = "derived" if _is_derived_price(payload) else "explicit"
+    return event
 
 
 def transaction_fingerprint(payload: dict) -> str:
@@ -77,9 +89,9 @@ def transaction_fingerprint(payload: dict) -> str:
     and financial fields still distinguish two otherwise identical trades.
     """
     existing = payload.get("source_fingerprint")
-    if existing:
+    if existing and str(payload.get("source_fingerprint_version")) == _FINGERPRINT_VERSION:
         return str(existing)
-    canonical = _canonical_event(payload)
+    canonical = _canonical_event(payload, include_price=not _is_derived_price(payload))
     encoded = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
@@ -101,6 +113,13 @@ def _replay_record(payload: dict, previous_id: str | None = None) -> dict:
         "classification": "REPLAY",
         "reason": "same_financial_event",
     }
+
+
+def _derived_price_replay(previous: dict, current: dict) -> bool:
+    """Allow only system-estimate price changes to replay safely."""
+    if not _is_derived_price(current) or not _is_derived_price(previous):
+        return False
+    return _canonical_event(previous, include_price=False) == _canonical_event(current, include_price=False)
 
 
 def _conflict_record(payload: dict, previous: dict | None = None, *, matched_id: str | None = None) -> dict:
@@ -343,6 +362,7 @@ def upload_private_transactions(transactions, *, session=None) -> str:
     for payload in payloads:
         # Stored privately with the ledger row. It is never included in the
         # public Demo contract and makes row-number changes replay-safe.
+        payload["source_fingerprint_version"] = _FINGERPRINT_VERSION
         payload["source_fingerprint"] = transaction_fingerprint(payload)
     ids = [payload["transaction_id"] for payload in payloads]
     headers = {
@@ -363,16 +383,44 @@ def upload_private_transactions(transactions, *, session=None) -> str:
     response.raise_for_status()
     existing = {str(row["transaction_id"]): row.get("payload", {}) for row in response.json()}
     existing_by_fingerprint = {}
+    existing_by_derived_core = {}
     for existing_id, existing_payload in existing.items():
         if isinstance(existing_payload, dict):
             existing_by_fingerprint.setdefault(transaction_fingerprint(existing_payload), (existing_id, existing_payload))
+            if _is_derived_price(existing_payload):
+                derived_key = json.dumps(
+                    _canonical_event(existing_payload, include_price=False),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                existing_by_derived_core.setdefault(derived_key, (existing_id, existing_payload))
     conflicts = []
     conflict_report = []
     replays = []
+    derived_price_replays = []
     for payload in payloads:
         previous = existing.get(payload["transaction_id"])
         if previous is not None:
-            if previous == payload or transaction_fingerprint(previous) == payload["source_fingerprint"] or _same_legacy_reconciliation(previous, payload):
+            if previous == payload:
+                replays.append(_replay_record(payload, payload["transaction_id"]))
+                continue
+            if _derived_price_replay(previous, payload):
+                if _normalise_value(previous.get("price")) != _normalise_value(payload.get("price")):
+                    replay = _replay_record(payload, payload["transaction_id"])
+                    replay.update({
+                        "classification": "REPLAY_DERIVED_PRICE",
+                        "reason": "settlement_quote_changed",
+                        "ignored_derived_fields": ["price"],
+                        "previous_price": previous.get("price"),
+                        "current_price": payload.get("price"),
+                    })
+                    derived_price_replays.append(replay)
+                    replays.append(replay)
+                    continue
+                replays.append(_replay_record(payload, payload["transaction_id"]))
+                continue
+            if transaction_fingerprint(previous) == payload["source_fingerprint"] or _same_legacy_reconciliation(previous, payload):
                 replays.append(_replay_record(payload, payload["transaction_id"]))
                 continue
             record = _conflict_record(payload, previous)
@@ -383,7 +431,39 @@ def upload_private_transactions(transactions, *, session=None) -> str:
         if matched:
             # The source row/UUID changed, but immutable financial facts did
             # not. Keep the original ledger row and classify this as REPLAY.
-            replays.append(_replay_record(payload, matched[0]))
+            if _derived_price_replay(matched[1], payload) and _normalise_value(matched[1].get("price")) != _normalise_value(payload.get("price")):
+                replay = _replay_record(payload, matched[0])
+                replay.update({
+                    "classification": "REPLAY_DERIVED_PRICE",
+                    "reason": "settlement_quote_changed",
+                    "ignored_derived_fields": ["price"],
+                    "previous_price": matched[1].get("price"),
+                    "current_price": payload.get("price"),
+                })
+                derived_price_replays.append(replay)
+                replays.append(replay)
+            else:
+                replays.append(_replay_record(payload, matched[0]))
+            continue
+        if _is_derived_price(payload):
+            derived_key = json.dumps(
+                _canonical_event(payload, include_price=False),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            matched = existing_by_derived_core.get(derived_key)
+            if matched:
+                replay = _replay_record(payload, matched[0])
+                replay.update({
+                    "classification": "REPLAY_DERIVED_PRICE",
+                    "reason": "settlement_quote_changed",
+                    "ignored_derived_fields": ["price"],
+                    "previous_price": matched[1].get("price"),
+                    "current_price": payload.get("price"),
+                })
+                derived_price_replays.append(replay)
+                replays.append(replay)
 
     conflict_ids = {item["transaction_id"] for item in conflicts}
     replay_ids = {item["transaction_id"] for item in replays}
@@ -391,6 +471,8 @@ def upload_private_transactions(transactions, *, session=None) -> str:
         print(f"Supabase immutable ledger conflicts quarantined: {len(conflicts)}")
     if replays:
         print(f"Supabase ledger replays accepted: {len(replays)}")
+    if derived_price_replays:
+        print(f"Supabase derived price replays accepted: {len(derived_price_replays)}")
 
     missing = [
         payload
@@ -424,6 +506,7 @@ def upload_private_transactions(transactions, *, session=None) -> str:
             status,
             conflicts=conflicts,
             replays=replays,
+            derived_price_replays=derived_price_replays,
             conflict_report=conflict_report,
             uploaded=len(missing),
             unchanged=len(replays),
@@ -433,6 +516,7 @@ def upload_private_transactions(transactions, *, session=None) -> str:
         "degraded" if conflicts else "unchanged",
         conflicts=conflicts,
         replays=replays,
+        derived_price_replays=derived_price_replays,
         conflict_report=conflict_report,
         unchanged=len(replays),
     )

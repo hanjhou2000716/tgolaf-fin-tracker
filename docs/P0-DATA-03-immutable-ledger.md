@@ -2,8 +2,9 @@
 
 ## 行為
 
-- 每筆私有交易 payload 會產生 `source_fingerprint`。指紋使用交易日期、標的、動作、數量、單位、幣別、價格與提交時間，不包含工作表列號或交易 UUID。
+- 每筆私有交易 payload 會產生版本化 `source_fingerprint`。指紋使用交易日期、標的、動作、數量、單位、幣別與提交時間，不包含工作表列號或交易 UUID；使用者明確輸入的價格才納入指紋。
 - 同一金融事實再次出現時標記為 `REPLAY`，保留原 Supabase row，不重複入帳，也不覆寫 immutable ledger。
+- 三欄表單產生的 `settlement_quote_estimate:*` 價格屬於衍生估值；價格變化標記為 `REPLAY_DERIVED_PRICE`，保留第一次估算價。
 - 核心欄位不同時標記為 `CONFLICT`，新資料不寫入正式帳本。
 - 每次執行會在 `.private-build/ledger_conflicts.json` 留下私有稽核資料：交易 ID、來源列、舊／新 payload、差異欄位與處理結果。該檔案不會部署到 GitHub Pages。
 
