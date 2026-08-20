@@ -1,5 +1,6 @@
 import os
 import json
+import hashlib
 import requests
 import datetime
 import math
@@ -61,7 +62,7 @@ FORM_SCHEMA_LEGACY_COMPAT = os.getenv("FORM_SCHEMA_LEGACY_COMPAT", "false").stri
 WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/private/"
 
 
-HISTORY_EXTRA_COLUMNS = ["TW_Stock_Value", "US_Stock_Value", "Cash_Value", "Fund_Value", "NVDA_QQQM_Weight", "NVDA_SPYG_Weight", "NVDA_VOO_Weight", "Settlement_Notification_Sent_At"]
+HISTORY_EXTRA_COLUMNS = ["TW_Stock_Value", "US_Stock_Value", "Cash_Value", "Fund_Value", "NVDA_QQQM_Weight", "NVDA_SPYG_Weight", "NVDA_VOO_Weight", "Settlement_Notification_Sent_At", "Ledger_Conflict_Alert_Marker"]
 ETF_NVDA_WEIGHT_FALLBACKS = {"QQQM": 0.095, "SPYG": 0.075, "VOO": 0.070}
 MARKET_DATA = MarketDataService()
 TRANSIENT_SHEETS_STATUS = frozenset({429, 500, 502, 503, 504})
@@ -132,6 +133,74 @@ def mark_settlement_notification_sent(history_sheet, snapshot_date, window_key, 
     marker_a1 = column_to_a1(marker_column)
     history_sheet.update(
         f"{marker_a1}{row_number}",
+        [[json.dumps(markers, ensure_ascii=False, separators=(",", ":"))]],
+    )
+
+
+def _ledger_conflict_digest(conflicts):
+    """Create a repeatable, non-sensitive marker for a conflict set."""
+    values = [
+        {
+            "transaction_id": item.get("transaction_id"),
+            "matched": item.get("matched_existing_transaction_id"),
+            "changed": sorted(item.get("changed_fields") or []),
+            # Include before/after values in the digest so a later genuine
+            # change to the same transaction is not suppressed by an older
+            # alert marker. Only the digest is persisted to Sheets.
+            "before": item.get("existing_payload") or {},
+            "after": item.get("current_payload") or {},
+        }
+        for item in conflicts
+    ]
+    encoded = json.dumps(sorted(values, key=lambda value: (value["transaction_id"], value["matched"])), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
+
+
+def ledger_conflict_alert_sent(history_sheet, snapshot_date, digest):
+    """Return whether this exact conflict set was already notified."""
+    if history_sheet is None or not digest:
+        return False
+    header_map = build_header_map(history_sheet.row_values(1))
+    marker_column = header_map.get("Ledger_Conflict_Alert_Marker")
+    if not marker_column:
+        return False
+    row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
+    if row_number is None:
+        return False
+    row = history_sheet.row_values(row_number)
+    raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
+    try:
+        markers = json.loads(raw_marker) if raw_marker else {}
+    except json.JSONDecodeError:
+        return False
+    return isinstance(markers, dict) and digest in markers
+
+
+def mark_ledger_conflict_alert_sent(history_sheet, snapshot_date, digest, sent_at):
+    """Persist only a digest, never the private conflict payload itself."""
+    if history_sheet is None or not digest:
+        return
+    header_map = build_header_map(history_sheet.row_values(1))
+    marker_column = header_map.get("Ledger_Conflict_Alert_Marker")
+    if not marker_column:
+        return
+    row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
+    if row_number is None:
+        return
+    row = history_sheet.row_values(row_number)
+    raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
+    try:
+        markers = json.loads(raw_marker) if raw_marker else {}
+    except json.JSONDecodeError:
+        markers = {}
+    if not isinstance(markers, dict):
+        markers = {}
+    markers[digest] = sent_at
+    # Keep the marker bounded so an ever-growing History cell cannot become a
+    # new source of operational failures.
+    markers = dict(list(markers.items())[-20:])
+    history_sheet.update(
+        f"{column_to_a1(marker_column)}{row_number}",
         [[json.dumps(markers, ensure_ascii=False, separators=(",", ":"))]],
     )
 
@@ -429,6 +498,18 @@ def calculate_current_assets():
     accepted_transactions, reconciliation_events = apply_reconciliation_events(inventory, accepted_transactions)
     ledger_sync_result = upload_private_transactions(accepted_transactions)
     sync_conflicts = tuple(getattr(ledger_sync_result, "conflicts", ()))
+    sync_replays = tuple(getattr(ledger_sync_result, "replays", ()))
+    conflict_report = tuple(getattr(ledger_sync_result, "conflict_report", sync_conflicts))
+    ledger_audit = {
+        "status": "DEGRADED" if sync_conflicts else "OK",
+        "replayCount": len(sync_replays),
+        "conflictCount": len(sync_conflicts),
+        "replays": list(sync_replays),
+        "conflicts": list(conflict_report),
+    }
+    # This file is private Actions evidence only. It is never copied into the
+    # public-site directory and may contain old/new financial payloads.
+    write_json(".private-build/ledger_conflicts.json", ledger_audit)
     if sync_conflicts:
         conflict_rejections = tuple(
             RejectedTransaction(
@@ -440,34 +521,34 @@ def calculate_current_assets():
         )
         ingestion_rejections.extend(conflict_rejections)
         transaction_ingestion.extend(build_ingestion_status(rejected=conflict_rejections))
-    if transaction_audits:
-        write_json(".private-build/transaction_audit.json", {
-            "strict": FORM_SCHEMA_STRICT,
-            "sheets": transaction_audits,
-            "transactionIngestion": build_ingestion_contract(
-                transaction_ingestion,
-                schema=schema_versions[-1] if schema_versions else "UNKNOWN",
-                ingestion_health={
-                    "status": "DEGRADED" if ingestion_rejections else "OK",
-                    "reasonCode": (
-                        "IMMUTABLE_LEDGER_CONFLICT" if sync_conflicts
-                        else "SCHEMA_DRIFT" if ingestion_rejections
-                        else None
-                    ),
-                    "message": (
-                        "Supabase immutable ledger conflict quarantined"
-                        if sync_conflicts
-                        else "Google Form schema drift; affected rows quarantined"
-                        if ingestion_rejections
-                        else None
-                    ),
-                    "lkgUsed": bool(lkg_inventory),
-                    "portfolioDataAsOf": lkg_snapshot.get("generated_at") if lkg_inventory and lkg_snapshot else None,
-                    "lastSuccessfulIngestionAt": None if lkg_inventory else datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                },
-            ),
-            "reconciliationEvents": reconciliation_events,
-        })
+    write_json(".private-build/transaction_audit.json", {
+        "strict": FORM_SCHEMA_STRICT,
+        "sheets": transaction_audits,
+        "transactionIngestion": build_ingestion_contract(
+            transaction_ingestion,
+            schema=schema_versions[-1] if schema_versions else "UNKNOWN",
+            ingestion_health={
+                "status": "DEGRADED" if ingestion_rejections else "OK",
+                "reasonCode": (
+                    "IMMUTABLE_LEDGER_CONFLICT" if sync_conflicts
+                    else "SCHEMA_DRIFT" if ingestion_rejections
+                    else None
+                ),
+                "message": (
+                    f"Supabase immutable ledger conflict quarantined ({len(sync_conflicts)})"
+                    if sync_conflicts
+                    else "Google Form schema drift; affected rows quarantined"
+                    if ingestion_rejections
+                    else None
+                ),
+                "lkgUsed": bool(lkg_inventory),
+                "portfolioDataAsOf": lkg_snapshot.get("generated_at") if lkg_inventory and lkg_snapshot else None,
+                "lastSuccessfulIngestionAt": None if lkg_inventory else datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            },
+        ),
+        "reconciliationEvents": reconciliation_events,
+        "ledgerAudit": ledger_audit,
+    })
     return inventory, history_sheet, accepted_transactions, ledger_sync_result
 
 # ==========================================
@@ -524,6 +605,16 @@ def main():
     display_date = tw_now.strftime("%m/%d")
         
     inventory, history_sheet, accepted_transactions, ledger_sync_result = calculate_current_assets()
+    sync_conflicts = tuple(getattr(ledger_sync_result, "conflicts", ()))
+    sync_replays = tuple(getattr(ledger_sync_result, "replays", ()))
+    conflict_report = tuple(getattr(ledger_sync_result, "conflict_report", sync_conflicts))
+    ledger_audit = {
+        "status": "DEGRADED" if sync_conflicts else "OK",
+        "replayCount": len(sync_replays),
+        "conflictCount": len(sync_conflicts),
+        "replays": list(sync_replays),
+        "conflicts": list(conflict_report),
+    }
     transaction_ingestion = build_ingestion_contract(build_ingestion_status(accepted=accepted_transactions))
     audit_path = ".private-build/transaction_audit.json"
     if os.path.isfile(audit_path):
@@ -1581,7 +1672,13 @@ def main():
     data_for_web["portfolioDataAsOf"] = ingestion_health.get("portfolioDataAsOf") or tw_now.isoformat()
     data_for_web["snapshotResult"] = snapshot_result
     data_for_web["ledgerSyncResult"] = ledger_sync_result
+    data_for_web["ledgerAudit"] = ledger_audit
     data_for_web["dataQuality"] = status_payload
+    status_payload["ledgerAudit"] = {
+        "status": ledger_audit["status"],
+        "replayCount": ledger_audit["replayCount"],
+        "conflictCount": ledger_audit["conflictCount"],
+    }
     # Private data is retained only in the ignored build directory. GitHub
     # Pages receives a separate fixed Demo contract and never sees this
     # payload. Supabase Auth + RLS will replace this local handoff in P0-SEC-02.
@@ -1599,7 +1696,11 @@ def main():
         msg_body = f"💸 可憐的阿洲，今天賠了 {abs(int(daily_diff)):,} 元 ({daily_pct:.1f}%)"
 
     tg_text = f"✅ {display_date} 結算完畢！\n{msg_body}"
-    if ingestion_health.get("status") == "DEGRADED":
+    conflict_digest = _ledger_conflict_digest(sync_conflicts) if sync_conflicts else ""
+    conflict_already_alerted = ledger_conflict_alert_sent(
+        history_sheet, tw_now.strftime("%Y-%m-%d"), conflict_digest
+    ) if conflict_digest else False
+    if ingestion_health.get("status") == "DEGRADED" and not (sync_conflicts and conflict_already_alerted):
         reason = ingestion_health.get("message") or ingestion_health.get("reasonCode") or "部分資料已隔離"
         tg_text += f"\n⚠️ Growth 資料輸入異常\n原因：{reason}\n有效資料仍已部署，異常資料已隔離。"
 
@@ -1637,6 +1738,10 @@ def main():
             }, timeout=10)
             response.raise_for_status()
             mark_settlement_notification_sent(history_sheet, snapshot_date, settlement_window, tw_now.isoformat())
+            if conflict_digest and not conflict_already_alerted:
+                mark_ledger_conflict_alert_sent(
+                    history_sheet, snapshot_date, conflict_digest, tw_now.isoformat()
+                )
             print(f"Telegram notification sent; window={settlement_window}, forced={FORCE_TELEGRAM}")
         except requests.RequestException as error:
             print(f"Telegram notification failed: {error}")

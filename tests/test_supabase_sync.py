@@ -7,7 +7,7 @@ from unittest.mock import patch
 from datetime import date
 from decimal import Decimal
 
-from supabase_sync import load_goal_state, load_private_snapshot, save_goal_state, upload_private_snapshot, upload_private_transactions
+from supabase_sync import load_goal_state, load_private_snapshot, save_goal_state, transaction_fingerprint, upload_private_snapshot, upload_private_transactions
 from transaction_schema import Action, Transaction
 
 
@@ -167,6 +167,57 @@ class SupabaseSyncTests(unittest.TestCase):
         self.assertEqual(result, "degraded")
         self.assertEqual(len(result.conflicts), 1)
         self.assertEqual(result.conflicts[0]["reason"], "immutable_ledger_conflict")
+
+    def test_conflict_report_contains_changed_fields_and_private_payloads(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        current = sample_transaction("1")
+        previous = transaction_payload(sample_transaction("2"))
+        with patch.dict(os.environ, env, clear=True):
+            result = upload_private_transactions(
+                [current], session=FakeSession([{"transaction_id": current.transaction_id, "payload": previous}])
+            )
+        report = result.conflict_report[0]
+        self.assertEqual(report["classification"], "CONFLICT")
+        self.assertIn("quantity", report["changed_fields"])
+        self.assertEqual(report["existing_payload"]["quantity"], "2")
+        self.assertEqual(report["current_payload"]["quantity"], "1")
+
+    def test_source_row_reorder_is_replay_not_new_transaction(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        old = sample_transaction()
+        current = Transaction(**{
+            **old.__dict__,
+            "transaction_id": "55555555-5555-4555-8555-555555555556",
+            "source_row_id": "Form:9",
+        })
+        previous = transaction_payload(old)
+        with patch.dict(os.environ, env, clear=True):
+            session = FakeSession([{"transaction_id": old.transaction_id, "payload": previous}])
+            result = upload_private_transactions([current], session=session)
+        self.assertEqual(result, "unchanged")
+        self.assertEqual(result.replays[0]["classification"], "REPLAY")
+        self.assertEqual(result.replays[0]["matched_existing_transaction_id"], old.transaction_id)
+        self.assertEqual(len(session.calls), 1)
+
+    def test_numeric_formatting_has_same_fingerprint(self):
+        from ledger import transaction_payload
+        first = transaction_payload(sample_transaction("100"))
+        second = dict(first, quantity="100.0", transaction_id="different", source_row_id="Form:99")
+        self.assertEqual(transaction_fingerprint(first), transaction_fingerprint(second))
 
     def test_valid_transactions_upload_while_conflict_is_quarantined(self):
         env = {
