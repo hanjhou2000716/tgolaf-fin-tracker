@@ -207,17 +207,15 @@ def _conflict_summary(conflicts, replays=()) -> dict:
             (item.get("current_payload") or {}).get("compatibility_used")
         )
         marker_pairs[f"{previous_marker}->{current_marker}"] += 1
-    replay_classes = Counter(
-        str(item.get("classification") or "REPLAY")
-        for item in replays
-        if str(item.get("classification") or "REPLAY") == "REPLAY_METADATA"
-    )
+    replay_classes = Counter(str(item.get("classification") or "REPLAY") for item in replays)
     return {
         "conflictCount": len(conflicts),
         "transactionConflictCount": len(conflicts),
         "coreConflictCount": len(conflicts) - metadata_only,
         "metadataOnlyConflictCount": metadata_only,
         "metadataReplayCount": replay_classes.get("REPLAY_METADATA", 0),
+        "sourceFingerprintReplayCount": replay_classes.get("REPLAY_SOURCE_FINGERPRINT", 0),
+        "derivedPriceReplayCount": replay_classes.get("REPLAY_DERIVED_PRICE", 0),
         "sourceRowIdDriftCount": source_row_drifts,
         "changedFieldCounts": dict(sorted(field_counts.items())),
         "compatibilityMarkerPairs": dict(sorted(marker_pairs.items())),
@@ -488,6 +486,23 @@ def upload_private_transactions(transactions, *, session=None) -> str:
         if previous is not None:
             if previous == payload:
                 replays.append(_replay_record(payload, payload["transaction_id"]))
+                continue
+            fingerprint_match = existing_by_fingerprint.get(payload["source_fingerprint"])
+            if fingerprint_match and fingerprint_match[0] != payload["transaction_id"]:
+                # Google Forms row numbers are not stable: inserting a new
+                # response can reuse an old UUID5(row-number) for a different
+                # event.  A full source fingerprint match to another
+                # immutable row proves this is the original event, so retain
+                # that row and quarantine neither event.  No field is
+                # normalised or overwritten here; unmatched core changes
+                # continue through the strict CONFLICT path below.
+                replay = _replay_record(payload, fingerprint_match[0])
+                replay.update({
+                    "classification": "REPLAY_SOURCE_FINGERPRINT",
+                    "reason": "source_row_id_reused_after_sheet_row_shift",
+                    "ignored_identity_fields": ["transaction_id", "source_row_id"],
+                })
+                replays.append(replay)
                 continue
             if _derived_price_replay(previous, payload):
                 if _normalise_value(previous.get("price")) != _normalise_value(payload.get("price")):

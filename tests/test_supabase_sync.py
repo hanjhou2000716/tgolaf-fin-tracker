@@ -215,6 +215,34 @@ class SupabaseSyncTests(unittest.TestCase):
         self.assertNotIn("existing_payload", summary)
         self.assertNotIn("current_payload", summary)
 
+    def test_row_id_collision_replays_by_source_fingerprint(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        current = sample_transaction("1")
+        colliding = Transaction(**{
+            **current.__dict__,
+            "transaction_id": "66666666-6666-4666-8666-666666666666",
+            "symbol": "2330",
+            "quantity": Decimal("2"),
+        })
+        existing = [
+            {"transaction_id": current.transaction_id, "payload": transaction_payload(colliding)},
+            {"transaction_id": colliding.transaction_id, "payload": transaction_payload(current)},
+        ]
+        with patch.dict(os.environ, env, clear=True):
+            result = upload_private_transactions([current], session=FakeSession(existing))
+        self.assertEqual(result, "unchanged")
+        self.assertEqual(result.conflicts, ())
+        self.assertEqual(result.replays[0]["classification"], "REPLAY_SOURCE_FINGERPRINT")
+        self.assertEqual(result.replays[0]["matched_existing_transaction_id"], colliding.transaction_id)
+        self.assertEqual(result.conflict_summary["sourceFingerprintReplayCount"], 1)
+
     def test_conflict_report_contains_changed_fields_and_private_payloads(self):
         env = {
             "SUPABASE_URL": "https://example.supabase.co",
