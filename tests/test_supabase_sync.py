@@ -321,6 +321,58 @@ class SupabaseSyncTests(unittest.TestCase):
         self.assertEqual(result.derived_price_replays[0]["ignored_derived_fields"], ["price"])
         self.assertEqual(len(session.calls), 1)
 
+    def test_legacy_mixed_form_estimated_price_change_is_derived_replay(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        old = Transaction(**{
+            **sample_transaction("1").__dict__,
+            "price": Decimal("100"),
+            "compatibility_used": "legacy_mixed_form_row",
+        })
+        current = Transaction(**{
+            **old.__dict__,
+            "price": Decimal("105"),
+        })
+        session = FakeSession([{"transaction_id": old.transaction_id, "payload": transaction_payload(old)}])
+        with patch.dict(os.environ, env, clear=True):
+            result = upload_private_transactions([current], session=session)
+        self.assertEqual(result, "unchanged")
+        self.assertEqual(result.derived_price_replays[0]["classification"], "REPLAY_DERIVED_PRICE")
+        self.assertEqual(result.derived_price_replays[0]["reason"], "legacy_mixed_form_settlement_quote_changed")
+        self.assertEqual(result.conflicts, ())
+
+    def test_legacy_mixed_form_core_change_remains_conflict(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        old = Transaction(**{
+            **sample_transaction("1").__dict__,
+            "price": Decimal("100"),
+            "compatibility_used": "legacy_mixed_form_row",
+        })
+        current = Transaction(**{
+            **old.__dict__,
+            "quantity": Decimal("2"),
+            "price": Decimal("105"),
+        })
+        session = FakeSession([{"transaction_id": old.transaction_id, "payload": transaction_payload(old)}])
+        with patch.dict(os.environ, env, clear=True):
+            result = upload_private_transactions([current], session=session)
+        self.assertEqual(result, "degraded")
+        self.assertEqual(result.conflicts[0]["classification"], "CONFLICT")
+        self.assertEqual(result.conflicts[0]["changed_fields"], ["quantity", "price"])
+
     def test_explicit_price_change_remains_conflict(self):
         env = {
             "SUPABASE_URL": "https://example.supabase.co",
