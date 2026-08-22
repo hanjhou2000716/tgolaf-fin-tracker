@@ -168,6 +168,53 @@ class SupabaseSyncTests(unittest.TestCase):
         self.assertEqual(len(result.conflicts), 1)
         self.assertEqual(result.conflicts[0]["reason"], "immutable_ledger_conflict")
 
+    def test_metadata_only_replay_is_safe_and_summarized(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        old = sample_transaction()
+        current = Transaction(**{
+            **old.__dict__,
+            "submitted_at": "2026/08/04 下午 08:00:00",
+            "submitter_email": "legacy@local.invalid",
+        })
+        existing = [{"transaction_id": old.transaction_id, "payload": transaction_payload(old)}]
+        with patch.dict(os.environ, env, clear=True):
+            result = upload_private_transactions([current], session=FakeSession(existing))
+        self.assertEqual(result, "unchanged")
+        self.assertEqual(result.replays[0]["classification"], "REPLAY_METADATA")
+        self.assertEqual(result.conflict_summary["conflictCount"], 0)
+        self.assertEqual(result.conflict_summary["transactionConflictCount"], 0)
+        self.assertEqual(result.conflict_summary["metadataReplayCount"], 1)
+
+    def test_conflict_summary_contains_no_payload_values(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        current = sample_transaction("1")
+        previous = transaction_payload(sample_transaction("2"))
+        with patch.dict(os.environ, env, clear=True):
+            result = upload_private_transactions(
+                [current], session=FakeSession([{"transaction_id": current.transaction_id, "payload": previous}])
+            )
+        summary = result.conflict_summary
+        self.assertEqual(summary["conflictCount"], 1)
+        self.assertEqual(summary["transactionConflictCount"], 1)
+        self.assertEqual(summary["coreConflictCount"], 1)
+        self.assertEqual(summary["changedFieldCounts"], {"quantity": 1})
+        self.assertNotIn("existing_payload", summary)
+        self.assertNotIn("current_payload", summary)
+
     def test_conflict_report_contains_changed_fields_and_private_payloads(self):
         env = {
             "SUPABASE_URL": "https://example.supabase.co",

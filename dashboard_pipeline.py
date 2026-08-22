@@ -45,6 +45,8 @@ from history_store import (
     column_to_a1,
     ensure_history_columns,
     find_row_by_key,
+    ledger_conflict_alert_sent,
+    mark_ledger_conflict_alert_sent,
     upsert_history_snapshot,
 )
 from runtime_extensions import build_runtime_extensions
@@ -154,55 +156,6 @@ def _ledger_conflict_digest(conflicts):
     ]
     encoded = json.dumps(sorted(values, key=lambda value: (value["transaction_id"], value["matched"])), sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
-
-
-def ledger_conflict_alert_sent(history_sheet, snapshot_date, digest):
-    """Return whether this exact conflict set was already notified."""
-    if history_sheet is None or not digest:
-        return False
-    header_map = build_header_map(history_sheet.row_values(1))
-    marker_column = header_map.get("Ledger_Conflict_Alert_Marker")
-    if not marker_column:
-        return False
-    row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
-    if row_number is None:
-        return False
-    row = history_sheet.row_values(row_number)
-    raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
-    try:
-        markers = json.loads(raw_marker) if raw_marker else {}
-    except json.JSONDecodeError:
-        return False
-    return isinstance(markers, dict) and digest in markers
-
-
-def mark_ledger_conflict_alert_sent(history_sheet, snapshot_date, digest, sent_at):
-    """Persist only a digest, never the private conflict payload itself."""
-    if history_sheet is None or not digest:
-        return
-    header_map = build_header_map(history_sheet.row_values(1))
-    marker_column = header_map.get("Ledger_Conflict_Alert_Marker")
-    if not marker_column:
-        return
-    row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
-    if row_number is None:
-        return
-    row = history_sheet.row_values(row_number)
-    raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
-    try:
-        markers = json.loads(raw_marker) if raw_marker else {}
-    except json.JSONDecodeError:
-        markers = {}
-    if not isinstance(markers, dict):
-        markers = {}
-    markers[digest] = sent_at
-    # Keep the marker bounded so an ever-growing History cell cannot become a
-    # new source of operational failures.
-    markers = dict(list(markers.items())[-20:])
-    history_sheet.update(
-        f"{column_to_a1(marker_column)}{row_number}",
-        [[json.dumps(markers, ensure_ascii=False, separators=(",", ":"))]],
-    )
 
 
 def get_etf_nvda_weight(symbol, history_records):
@@ -501,6 +454,7 @@ def calculate_current_assets():
     sync_replays = tuple(getattr(ledger_sync_result, "replays", ()))
     derived_price_replays = tuple(getattr(ledger_sync_result, "derived_price_replays", ()))
     conflict_report = tuple(getattr(ledger_sync_result, "conflict_report", sync_conflicts))
+    conflict_summary = dict(getattr(ledger_sync_result, "conflict_summary", {}) or {})
     ledger_audit = {
         "status": "DEGRADED" if sync_conflicts else "OK",
         "replayCount": len(sync_replays),
@@ -508,6 +462,7 @@ def calculate_current_assets():
         "conflictCount": len(sync_conflicts),
         "replays": list(sync_replays),
         "derivedPriceReplays": list(derived_price_replays),
+        "conflictSummary": conflict_summary,
         "conflicts": list(conflict_report),
     }
     # This file is private Actions evidence only. It is never copied into the
@@ -612,6 +567,7 @@ def main():
     sync_replays = tuple(getattr(ledger_sync_result, "replays", ()))
     derived_price_replays = tuple(getattr(ledger_sync_result, "derived_price_replays", ()))
     conflict_report = tuple(getattr(ledger_sync_result, "conflict_report", sync_conflicts))
+    conflict_summary = dict(getattr(ledger_sync_result, "conflict_summary", {}) or {})
     ledger_audit = {
         "status": "DEGRADED" if sync_conflicts else "OK",
         "replayCount": len(sync_replays),
@@ -619,6 +575,7 @@ def main():
         "conflictCount": len(sync_conflicts),
         "replays": list(sync_replays),
         "derivedPriceReplays": list(derived_price_replays),
+        "conflictSummary": conflict_summary,
         "conflicts": list(conflict_report),
     }
     transaction_ingestion = build_ingestion_contract(build_ingestion_status(accepted=accepted_transactions))

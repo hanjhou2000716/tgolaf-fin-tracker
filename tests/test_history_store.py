@@ -4,6 +4,8 @@ from history_store import (
     build_header_map,
     column_to_a1,
     ensure_history_columns,
+    ledger_conflict_alert_sent,
+    mark_ledger_conflict_alert_sent,
     upsert_history_snapshot,
 )
 
@@ -87,6 +89,16 @@ class HistoryStoreTests(unittest.TestCase):
         self.assertEqual(result, "created")
         self.assertEqual(sheet.rows[0], ["Date", "Telegram_Marker", "Total_Asset"])
         self.assertEqual(sheet.rows[1], ["2026-08-05", "", 123.45])
+
+    def test_conflict_alert_digest_is_deduplicated_across_dates(self):
+        sheet = FakeHistorySheet([
+            ["Date", "Ledger_Conflict_Alert_Marker"],
+            ["2026-08-21", "{}"],
+            ["2026-08-22", "{}"],
+        ])
+        mark_ledger_conflict_alert_sent(sheet, "2026-08-21", "digest-a", "2026-08-21T05:40:00+08:00")
+        self.assertTrue(ledger_conflict_alert_sent(sheet, "2026-08-22", "digest-a"))
+        self.assertFalse(ledger_conflict_alert_sent(sheet, "2026-08-22", "digest-b"))
 
 
 if __name__ == "__main__":
