@@ -147,6 +147,30 @@ def _derived_price_replay(previous: dict, current: dict) -> bool:
     return _canonical_event(previous, include_price=False) == _canonical_event(current, include_price=False)
 
 
+def _legacy_mixed_derived_price_replay(previous: dict, current: dict) -> bool:
+    """Recognise prices enriched on legacy mixed-form trade rows.
+
+    The legacy mixed-form parser intentionally emits BUY/SELL rows without a
+    price.  Settlement enrichment then attaches a quote while preserving the
+    compatibility marker, so those payloads still carry
+    ``legacy_mixed_form_row`` instead of the newer settlement marker.  Only a
+    price-only change on an otherwise identical trade is eligible here; all
+    other core-field changes continue through the strict conflict path.
+    """
+    if previous.get("compatibility_used") != "legacy_mixed_form_row":
+        return False
+    if current.get("compatibility_used") != "legacy_mixed_form_row":
+        return False
+    if str(previous.get("action") or "") not in {"BUY", "SELL", "買入", "賣出"}:
+        return False
+    if previous.get("price") in (None, "") or current.get("price") in (None, ""):
+        return False
+    if _normalise_value(previous.get("price")) == _normalise_value(current.get("price")):
+        return False
+    changed = _changed_fields(previous, current)
+    return changed == ["price"]
+
+
 def _metadata_only_replay(previous: dict, current: dict) -> bool:
     """Accept non-financial serialization changes without weakening core guards.
 
@@ -466,6 +490,7 @@ def upload_private_transactions(transactions, *, session=None) -> str:
     existing = {str(row["transaction_id"]): row.get("payload", {}) for row in response.json()}
     existing_by_fingerprint = {}
     existing_by_derived_core = {}
+    existing_by_legacy_derived_core = {}
     for existing_id, existing_payload in existing.items():
         if isinstance(existing_payload, dict):
             existing_by_fingerprint.setdefault(transaction_fingerprint(existing_payload), (existing_id, existing_payload))
@@ -477,6 +502,14 @@ def upload_private_transactions(transactions, *, session=None) -> str:
                     separators=(",", ":"),
                 )
                 existing_by_derived_core.setdefault(derived_key, (existing_id, existing_payload))
+            if existing_payload.get("compatibility_used") == "legacy_mixed_form_row":
+                legacy_key = json.dumps(
+                    _canonical_event(existing_payload, include_price=False),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                existing_by_legacy_derived_core.setdefault(legacy_key, (existing_id, existing_payload))
     conflicts = []
     conflict_report = []
     replays = []
@@ -519,6 +552,16 @@ def upload_private_transactions(transactions, *, session=None) -> str:
                     continue
                 replays.append(_replay_record(payload, payload["transaction_id"]))
                 continue
+            if _legacy_mixed_derived_price_replay(previous, payload):
+                replay = _replay_record(payload, payload["transaction_id"])
+                replay.update({
+                    "classification": "REPLAY_DERIVED_PRICE",
+                    "reason": "legacy_mixed_form_settlement_quote_changed",
+                    "ignored_derived_fields": ["price"],
+                })
+                derived_price_replays.append(replay)
+                replays.append(replay)
+                continue
             if _metadata_only_replay(previous, payload):
                 replay = _replay_record(payload, payload["transaction_id"])
                 replay.update({
@@ -553,6 +596,24 @@ def upload_private_transactions(transactions, *, session=None) -> str:
             else:
                 replays.append(_replay_record(payload, matched[0]))
             continue
+        if payload.get("compatibility_used") == "legacy_mixed_form_row":
+            legacy_key = json.dumps(
+                _canonical_event(payload, include_price=False),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            legacy_match = existing_by_legacy_derived_core.get(legacy_key)
+            if legacy_match and _legacy_mixed_derived_price_replay(legacy_match[1], payload):
+                replay = _replay_record(payload, legacy_match[0])
+                replay.update({
+                    "classification": "REPLAY_DERIVED_PRICE",
+                    "reason": "legacy_mixed_form_settlement_quote_changed",
+                    "ignored_derived_fields": ["price"],
+                })
+                derived_price_replays.append(replay)
+                replays.append(replay)
+                continue
         if _is_derived_price(payload):
             derived_key = json.dumps(
                 _canonical_event(payload, include_price=False),
