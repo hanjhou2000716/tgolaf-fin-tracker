@@ -4,6 +4,7 @@ import json
 import hashlib
 import math
 import os
+from collections import Counter
 from pathlib import Path
 
 import requests
@@ -19,13 +20,14 @@ class TransactionSyncResult(str):
     ingestion health details instead of aborting the whole build.
     """
 
-    def __new__(cls, status: str, *, conflicts=(), replays=(), derived_price_replays=(), conflict_report=(), uploaded=0, unchanged=0):
+    def __new__(cls, status: str, *, conflicts=(), replays=(), derived_price_replays=(), conflict_report=(), conflict_summary=None, uploaded=0, unchanged=0):
         instance = super().__new__(cls, status)
         instance.status = status
         instance.conflicts = tuple(conflicts)
         instance.replays = tuple(replays)
         instance.derived_price_replays = tuple(derived_price_replays)
         instance.conflict_report = tuple(conflict_report)
+        instance.conflict_summary = dict(conflict_summary or {})
         instance.uploaded = int(uploaded)
         instance.unchanged = int(unchanged)
         return instance
@@ -39,6 +41,15 @@ _CORE_KEYS = (
     "transaction_date", "asset_type", "symbol", "action", "quantity",
     "unit", "currency", "price", "reversal_of",
 )
+_METADATA_KEYS = (
+    "submitted_at", "submitter_email", "approved", "source_row_id",
+    "compatibility_used", "reconciliation_delta", "source_fingerprint",
+    "source_fingerprint_version",
+)
+_LEGACY_MARKERS = frozenset({
+    "legacy_target_from_price_field",
+    "legacy_mixed_form_row",
+})
 _FINGERPRINT_VERSION = "2"
 
 
@@ -46,6 +57,20 @@ def _is_derived_price(payload: dict) -> bool:
     """Return whether price was supplied by settlement quote enrichment."""
     marker = str(payload.get("compatibility_used") or "").strip().lower()
     return marker.startswith("settlement_quote_estimate:")
+
+
+def _marker_class(value) -> str:
+    """Return a non-sensitive compatibility category for diagnostics."""
+    marker = str(value or "").strip().lower()
+    if not marker:
+        return "none"
+    if marker.startswith("settlement_quote_estimate:"):
+        return "settlement_quote_estimate"
+    if marker.startswith("settlement_quote_pending:"):
+        return "settlement_quote_pending"
+    if marker in _LEGACY_MARKERS:
+        return marker
+    return "other"
 
 
 def _normalise_value(value):
@@ -122,6 +147,26 @@ def _derived_price_replay(previous: dict, current: dict) -> bool:
     return _canonical_event(previous, include_price=False) == _canonical_event(current, include_price=False)
 
 
+def _metadata_only_replay(previous: dict, current: dict) -> bool:
+    """Accept non-financial serialization changes without weakening core guards.
+
+    This is intentionally checked only after an existing transaction ID has
+    matched.  A source-row reorder still goes through the fingerprint and
+    legacy matching paths, so two legitimate identical trades are not merged
+    merely because their financial fields happen to match.
+    """
+    if not previous or _is_derived_price(previous) != _is_derived_price(current):
+        return False
+    return not _changed_fields(previous, current)
+
+
+def _metadata_changed_fields(previous: dict, current: dict) -> list[str]:
+    return [
+        key for key in _METADATA_KEYS
+        if _normalise_value(previous.get(key)) != _normalise_value(current.get(key))
+    ]
+
+
 def _conflict_record(payload: dict, previous: dict | None = None, *, matched_id: str | None = None) -> dict:
     previous = previous or {}
     return {
@@ -132,8 +177,50 @@ def _conflict_record(payload: dict, previous: dict | None = None, *, matched_id:
         "classification": "CONFLICT",
         "matched_existing_transaction_id": str(matched_id or payload.get("transaction_id") or ""),
         "changed_fields": _changed_fields(previous, payload),
+        "metadata_changed_fields": _metadata_changed_fields(previous, payload),
+        "source_row_id_changed": _normalise_value(previous.get("source_row_id")) != _normalise_value(payload.get("source_row_id")),
+        "compatibility_marker_previous": _marker_class(previous.get("compatibility_used")),
+        "compatibility_marker_current": _marker_class(payload.get("compatibility_used")),
         "existing_payload": previous,
         "current_payload": payload,
+    }
+
+
+def _conflict_summary(conflicts, replays=()) -> dict:
+    """Summarize conflicts without exposing private financial values."""
+    field_counts = Counter()
+    marker_pairs = Counter()
+    metadata_only = 0
+    source_row_drifts = 0
+    for item in conflicts:
+        changed = tuple(sorted(str(field) for field in (item.get("changed_fields") or [])))
+        if not changed:
+            metadata_only += 1
+        for field in changed:
+            field_counts[field] += 1
+        if item.get("source_row_id_changed"):
+            source_row_drifts += 1
+        previous_marker = item.get("compatibility_marker_previous") or _marker_class(
+            (item.get("existing_payload") or {}).get("compatibility_used")
+        )
+        current_marker = item.get("compatibility_marker_current") or _marker_class(
+            (item.get("current_payload") or {}).get("compatibility_used")
+        )
+        marker_pairs[f"{previous_marker}->{current_marker}"] += 1
+    replay_classes = Counter(
+        str(item.get("classification") or "REPLAY")
+        for item in replays
+        if str(item.get("classification") or "REPLAY") == "REPLAY_METADATA"
+    )
+    return {
+        "conflictCount": len(conflicts),
+        "transactionConflictCount": len(conflicts),
+        "coreConflictCount": len(conflicts) - metadata_only,
+        "metadataOnlyConflictCount": metadata_only,
+        "metadataReplayCount": replay_classes.get("REPLAY_METADATA", 0),
+        "sourceRowIdDriftCount": source_row_drifts,
+        "changedFieldCounts": dict(sorted(field_counts.items())),
+        "compatibilityMarkerPairs": dict(sorted(marker_pairs.items())),
     }
 
 
@@ -150,10 +237,7 @@ def _same_legacy_reconciliation(previous: dict, current: dict) -> bool:
     # pledge debt) were historically serialized with a derived adjustment.
     # The compatibility marker is the allow-list boundary; ordinary UUID
     # conflicts must still fail closed.
-    legacy_markers = {
-        "legacy_target_from_price_field",
-        "legacy_mixed_form_row",
-    }
+    legacy_markers = _LEGACY_MARKERS
     if previous.get("compatibility_used") not in legacy_markers:
         return False
     if current.get("compatibility_used") not in legacy_markers | {None}:
@@ -420,6 +504,15 @@ def upload_private_transactions(transactions, *, session=None) -> str:
                     continue
                 replays.append(_replay_record(payload, payload["transaction_id"]))
                 continue
+            if _metadata_only_replay(previous, payload):
+                replay = _replay_record(payload, payload["transaction_id"])
+                replay.update({
+                    "classification": "REPLAY_METADATA",
+                    "reason": "non_financial_serialization_changed",
+                    "ignored_metadata_fields": _metadata_changed_fields(previous, payload),
+                })
+                replays.append(replay)
+                continue
             if transaction_fingerprint(previous) == payload["source_fingerprint"] or _same_legacy_reconciliation(previous, payload):
                 replays.append(_replay_record(payload, payload["transaction_id"]))
                 continue
@@ -465,10 +558,24 @@ def upload_private_transactions(transactions, *, session=None) -> str:
                 derived_price_replays.append(replay)
                 replays.append(replay)
 
+    conflict_summary = _conflict_summary(conflict_report, replays)
     conflict_ids = {item["transaction_id"] for item in conflicts}
     replay_ids = {item["transaction_id"] for item in replays}
     if conflicts:
         print(f"Supabase immutable ledger conflicts quarantined: {len(conflicts)}")
+        fields = ",".join(
+            f"{key}={value}" for key, value in conflict_summary["changedFieldCounts"].items()
+        ) or "none"
+        markers = ",".join(
+            f"{key}={value}" for key, value in conflict_summary["compatibilityMarkerPairs"].items()
+        ) or "none"
+        print(
+            "Supabase conflict summary: "
+            f"core={conflict_summary['coreConflictCount']}, "
+            f"metadata_only={conflict_summary['metadataOnlyConflictCount']}, "
+            f"source_row_drift={conflict_summary['sourceRowIdDriftCount']}, "
+            f"fields={fields}, markers={markers}"
+        )
     if replays:
         print(f"Supabase ledger replays accepted: {len(replays)}")
     if derived_price_replays:
@@ -508,6 +615,7 @@ def upload_private_transactions(transactions, *, session=None) -> str:
             replays=replays,
             derived_price_replays=derived_price_replays,
             conflict_report=conflict_report,
+            conflict_summary=conflict_summary,
             uploaded=len(missing),
             unchanged=len(replays),
         )
@@ -518,5 +626,6 @@ def upload_private_transactions(transactions, *, session=None) -> str:
         replays=replays,
         derived_price_replays=derived_price_replays,
         conflict_report=conflict_report,
+        conflict_summary=conflict_summary,
         unchanged=len(replays),
     )

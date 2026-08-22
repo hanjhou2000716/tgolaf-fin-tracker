@@ -5,6 +5,8 @@ This module keeps updates scoped to the named fields and leaves marker or
 operator-maintained columns untouched.
 """
 
+import json
+
 
 def column_to_a1(column_index: int) -> str:
     """Convert a one-based column number to an A1 column label."""
@@ -100,3 +102,59 @@ def upsert_history_snapshot(history_sheet, values):
         row[header_map[key] - 1] = value
     history_sheet.append_row(row)
     return "created"
+
+
+def ledger_conflict_alert_sent(history_sheet, snapshot_date, digest):
+    """Return whether a conflict digest was already notified recently.
+
+    The marker is written on the current History row, but an unchanged
+    conflict can persist across settlement dates. Scanning recent marker cells
+    prevents a daily duplicate Telegram alert while keeping a changed digest
+    actionable. ``snapshot_date`` remains in the signature for compatibility
+    with existing callers.
+    """
+    if history_sheet is None or not digest:
+        return False
+    header_map = build_header_map(history_sheet.row_values(1))
+    marker_column = header_map.get("Ledger_Conflict_Alert_Marker")
+    if not marker_column:
+        return False
+    rows = history_sheet.get_all_values()
+    for row in reversed(rows[-60:]):
+        raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
+        if not raw_marker:
+            continue
+        try:
+            markers = json.loads(raw_marker)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(markers, dict) and digest in markers:
+            return True
+    return False
+
+
+def mark_ledger_conflict_alert_sent(history_sheet, snapshot_date, digest, sent_at):
+    """Persist only a bounded conflict digest on the current History row."""
+    if history_sheet is None or not digest:
+        return
+    header_map = build_header_map(history_sheet.row_values(1))
+    marker_column = header_map.get("Ledger_Conflict_Alert_Marker")
+    if not marker_column:
+        return
+    row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
+    if row_number is None:
+        return
+    row = history_sheet.row_values(row_number)
+    raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
+    try:
+        markers = json.loads(raw_marker) if raw_marker else {}
+    except json.JSONDecodeError:
+        markers = {}
+    if not isinstance(markers, dict):
+        markers = {}
+    markers[digest] = sent_at
+    markers = dict(list(markers.items())[-20:])
+    history_sheet.update(
+        f"{column_to_a1(marker_column)}{row_number}",
+        [[json.dumps(markers, ensure_ascii=False, separators=(",", ":"))]],
+    )
