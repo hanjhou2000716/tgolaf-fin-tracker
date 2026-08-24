@@ -212,8 +212,44 @@ class SupabaseSyncTests(unittest.TestCase):
         self.assertEqual(summary["transactionConflictCount"], 1)
         self.assertEqual(summary["coreConflictCount"], 1)
         self.assertEqual(summary["changedFieldCounts"], {"quantity": 1})
+        self.assertEqual(summary["priceOnlyConflictCount"], 0)
+        self.assertEqual(summary["legacyPriceOnlyCandidateCount"], 0)
+        self.assertEqual(summary["conflictActionPairs"], {})
+        self.assertEqual(summary["priceProvenancePairs"], {})
         self.assertNotIn("existing_payload", summary)
         self.assertNotIn("current_payload", summary)
+
+    def test_conflict_summary_classifies_legacy_non_trade_price_change(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        old = Transaction(**{
+            **sample_transaction("1").__dict__,
+            "action": Action.SET_BALANCE,
+            "asset_type": "現金_TWD",
+            "symbol": "TWD",
+            "unit": "TWD",
+            "currency": "TWD",
+            "price": Decimal("100"),
+            "compatibility_used": "legacy_mixed_form_row",
+        })
+        current = Transaction(**{**old.__dict__, "price": Decimal("105")})
+        with patch.dict(os.environ, env, clear=True):
+            result = upload_private_transactions(
+                [current], session=FakeSession([{"transaction_id": old.transaction_id, "payload": transaction_payload(old)}])
+            )
+        self.assertEqual(result, "degraded")
+        summary = result.conflict_summary
+        self.assertEqual(summary["priceOnlyConflictCount"], 1)
+        self.assertEqual(summary["legacyPriceOnlyCandidateCount"], 1)
+        self.assertEqual(summary["legacyPriceOnlyNonTradeCount"], 1)
+        self.assertEqual(summary["conflictActionPairs"], {"SET_BALANCE->SET_BALANCE": 1})
+        self.assertEqual(summary["priceProvenancePairs"], {"explicit->explicit": 1})
 
     def test_row_id_collision_replays_by_source_fingerprint(self):
         env = {
