@@ -72,6 +72,9 @@ HISTORY_EXTRA_COLUMNS = ["TW_Stock_Value", "US_Stock_Value", "Cash_Value", "Fund
 ETF_NVDA_WEIGHT_FALLBACKS = {"QQQM": 0.095, "SPYG": 0.075, "VOO": 0.070}
 MARKET_DATA = MarketDataService()
 TRANSIENT_SHEETS_STATUS = frozenset({429, 500, 502, 503, 504})
+# Populated by calculate_current_assets for the private output assembly.  It
+# avoids changing the long-standing four-value compatibility return contract.
+LAST_SCHEMA_DIAGNOSTICS = []
 
 
 def open_spreadsheets_with_retry(client, *, attempts=4, sleep=time.sleep):
@@ -547,6 +550,8 @@ def calculate_current_assets():
         "reconciliationEvents": reconciliation_events,
         "ledgerAudit": ledger_audit,
     })
+    global LAST_SCHEMA_DIAGNOSTICS
+    LAST_SCHEMA_DIAGNOSTICS = schema_diagnostics
     return inventory, history_sheet, accepted_transactions, ledger_sync_result
 
 # ==========================================
@@ -1605,7 +1610,7 @@ def main():
         "lastUpdated": tw_now.strftime("%Y/%m/%d %H:%M:%S"),
         # Private-only header diagnostics.  This contains schema shape and
         # counts, never row values, holdings, or monetary amounts.
-        "schemaDiagnostics": schema_diagnostics,
+        "schemaDiagnostics": LAST_SCHEMA_DIAGNOSTICS,
         "portfolio": {
             "totalAsset": round(total_asset, 2),
             "netAsset": round(net_asset, 2),
