@@ -54,6 +54,7 @@ from history_store import (
     upsert_history_snapshot,
 )
 from runtime_extensions import build_runtime_extensions
+from refresh_recovery import inventory_has_positive_assets, validate_recovery_candidate
 
 # ==========================================
 # 1. 環境變數與金鑰設定
@@ -83,6 +84,12 @@ LAST_REFRESH_CONTROL = {
     "lkgValid": False,
     "lkgGeneratedAt": None,
 }
+
+_REFRESH_READY_STATES = frozenset({"READY", "READY_FROM_FORM"})
+
+
+def _refresh_is_ready(control: dict) -> bool:
+    return str(control.get("state") or "") in _REFRESH_READY_STATES
 
 
 def _refresh_block_digest(control: dict) -> str:
@@ -313,6 +320,8 @@ def calculate_current_assets():
     transaction_ingestion = []
     schema_versions = []
     schema_diagnostics = []
+    schema_recovery_summaries = []
+    schema_recovery_ready = True
     ingestion_rejections = []
     for ws in sheet.worksheets():
         title_clean = ws.title.strip().lower()
@@ -330,14 +339,21 @@ def calculate_current_assets():
                 schema_diagnostics.append(schema_diagnostic)
                 if FORM_SCHEMA_STRICT:
                     try:
-                        if not schema_diagnostic["safe"]:
+                        recovery_mode = not schema_diagnostic["safe"]
+                        if recovery_mode and not FORM_SCHEMA_LEGACY_COMPAT:
                             raise TransactionSchemaError(schema_diagnostic["reason"] or "schema_drift")
+                        if recovery_mode and schema_diagnostic.get("duplicateFields") and not schema_diagnostic.get("duplicateResolved"):
+                            raise TransactionSchemaError("ambiguous_duplicate_response_columns")
+                        # A structurally drifted sheet may still contain a
+                        # deterministic, fully parseable mixed response.  Try
+                        # the same fixed-schema parsers row-by-row; never fall
+                        # back to scanning arbitrary cells or default actions.
                         parsed = parse_transaction_rows(
-                            rows[0],
-                            rows[1:],
-                            source_sheet=ws.title,
+                            rows[0], rows[1:], source_sheet=ws.title,
                             existing_ids=seen_transaction_ids,
                         )
+                        if recovery_mode and (parsed.rejected or parsed.pending):
+                            raise TransactionSchemaError("recovery_candidate_has_quarantined_rows")
                         priced = enrich_missing_trade_prices(
                             parsed.accepted,
                             _settlement_quote_for_transaction,
@@ -377,9 +393,29 @@ def calculate_current_assets():
                         )
                         transaction_audits.append({"sheet": ws.title, **audit_payload})
                         data_rows.extend(inventory_rows_from_transactions(priced.accepted, accepted_rows))
+                        if recovery_mode:
+                            schema_recovery_summaries.append({
+                                "sheet": ws.title,
+                                "fingerprint": schema_diagnostic.get("fingerprint"),
+                                "status": "RECOVERED",
+                                "acceptedRows": len(priced.accepted),
+                                "pendingRows": len(pending),
+                                "rejectedRows": len(parsed.rejected),
+                            })
                     except TransactionSchemaError as error:
                         if not FORM_SCHEMA_LEGACY_COMPAT:
                             raise
+                        if not schema_diagnostic["safe"]:
+                            schema_recovery_ready = False
+                            schema_recovery_summaries.append({
+                                "sheet": ws.title,
+                                "fingerprint": schema_diagnostic.get("fingerprint"),
+                                "status": "BLOCKED",
+                                "acceptedRows": 0,
+                                "pendingRows": 0,
+                                "rejectedRows": int(schema_diagnostic.get("rowCount") or 0),
+                                "reasonCode": "BLOCKED_RECOVERY_INVALID",
+                            })
                         if schema_version == "LEGACY":
                             migrated_rows = adapt_known_legacy_rows(rows[0], rows[1:])
                             data_rows.extend(migrated_rows)
@@ -423,7 +459,18 @@ def calculate_current_assets():
         for item in schema_diagnostics
         if not item.get("safe", True)
     )
-    schema_drift_detected = bool(schema_digest)
+    schema_drift_detected = bool(schema_digest) and not (
+        schema_recovery_summaries and schema_recovery_ready and all(
+            item.get("status") == "RECOVERED" for item in schema_recovery_summaries
+        )
+    )
+    schema_recovered = bool(schema_digest) and not schema_drift_detected
+    write_json(".private-build/schema-recovery-summary.json", {
+        "schemaDigest": schema_digest or None,
+        "status": "READY_FROM_FORM" if schema_recovered else "BLOCKED" if schema_digest else "NOT_NEEDED",
+        "sheets": schema_recovery_summaries,
+        "affectedRows": schema_affected_rows,
+    })
     if transaction_audits or schema_diagnostics:
         write_json(".private-build/transaction_audit.json", {
             "strict": FORM_SCHEMA_STRICT,
@@ -456,8 +503,8 @@ def calculate_current_assets():
     lkg_snapshot = None
     lkg_inventory = None
     refresh_control = {
-        "state": "READY",
-        "reasonCode": None,
+        "state": "READY_FROM_FORM" if schema_recovered else "READY",
+        "reasonCode": "SCHEMA_DRIFT_RECOVERED" if schema_recovered else None,
         "schemaDigest": schema_digest or None,
         "lkgFound": False,
         "lkgValid": False,
@@ -702,7 +749,7 @@ def main():
         except (OSError, ValueError, TypeError):
             pass
     ingestion_health = transaction_ingestion.get("ingestionHealth", {}) if isinstance(transaction_ingestion, dict) else {}
-    if refresh_control.get("state") != "READY":
+    if not _refresh_is_ready(refresh_control):
         ingestion_health = {
             **ingestion_health,
             "status": "BLOCKED",
@@ -721,7 +768,7 @@ def main():
     validate_inventory(inventory)
     validate_history_sheet(history_sheet)
     history_records = history_sheet.get_all_records()
-    if refresh_control.get("state") == "READY" and not _inventory_has_positive_assets(inventory):
+    if _refresh_is_ready(refresh_control) and not _inventory_has_positive_assets(inventory):
         previous_total_asset = 0.0
         for history_row in reversed(history_records):
             try:
@@ -849,26 +896,50 @@ def main():
         if candidate > 0:
             previous_total_asset = candidate
             break
-    if refresh_control.get("state") == "READY" and total_asset <= 0 and previous_total_asset > 0:
+    candidate_validation = validate_recovery_candidate(
+        inventory,
+        total_asset,
+        previous_total_asset=previous_total_asset,
+        # Ambiguous schema rows are quarantined before inventory valuation;
+        # immutable replays remain auditable and do not invalidate a complete
+        # candidate by themselves.
+        quotes_complete=total_asset > 0 or previous_total_asset <= 0,
+    )
+    if _refresh_is_ready(refresh_control) and not candidate_validation["ready"]:
         refresh_control.update({
-            "state": "BLOCKED_ZERO_RESULT",
-            "reasonCode": "BLOCKED_ZERO_RESULT",
+            "state": candidate_validation.get("reasonCode") or "BLOCKED_RECOVERY_INVALID",
+            "reasonCode": candidate_validation.get("reasonCode") or "BLOCKED_RECOVERY_INVALID",
             "lkgFound": False,
             "lkgValid": False,
         })
         ingestion_health = {
             **ingestion_health,
             "status": "BLOCKED",
-            "reasonCode": "BLOCKED_ZERO_RESULT",
-            "message": "資料更新已阻止，計算結果為零且上一份快照仍有資產。",
-            "refreshState": "BLOCKED_ZERO_RESULT",
+            "reasonCode": refresh_control["reasonCode"],
+            "message": "資料更新已阻止，候選資產未通過安全驗證。",
+            "refreshState": refresh_control["state"],
         }
         if isinstance(transaction_ingestion, dict):
             transaction_ingestion = {
                 **transaction_ingestion,
                 "ingestionHealth": ingestion_health,
             }
-    refresh_blocked = refresh_control.get("state") != "READY"
+    # Private, non-financial recovery evidence.  It is kept out of the public
+    # site and distinguishes a form recovery from a snapshot-unavailable
+    # block without exposing portfolio values.
+    try:
+        recovery_summary = json.load(open(".private-build/schema-recovery-summary.json", encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        recovery_summary = {}
+    recovery_summary.update({
+        "refreshState": refresh_control.get("state"),
+        "reasonCode": refresh_control.get("reasonCode"),
+        "lkgFound": bool(refresh_control.get("lkgFound")),
+        "lkgValid": bool(refresh_control.get("lkgValid")),
+        "candidate": candidate_validation,
+    })
+    write_json(".private-build/schema-recovery-summary.json", recovery_summary)
+    refresh_blocked = not _refresh_is_ready(refresh_control)
     
     invested_assets = tw_stock_value + us_stock_value_twd + fund_value
     effective_leverage = ((invested_assets + leveraged_etf_value) / net_asset) if net_asset > 0 else 0
