@@ -67,6 +67,16 @@ jobs:
           FORM_SCHEMA_LEGACY_COMPAT: ${{ secrets.FORM_SCHEMA_LEGACY_COMPAT || 'true' }}
         run: python main.py
 
+      - name: Upload private schema recovery summary
+        # This artifact contains only fingerprints, row counts and control
+        # states.  It deliberately excludes private snapshots, holdings and
+        # monetary values while making recovery decisions auditable.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: schema-recovery-summary
+          path: .private-build/schema-recovery-summary.json
+          if-no-files-found: error
+
       - name: Verify generated public Demo is sanitized
         run: |
           test -s public-site/index.html

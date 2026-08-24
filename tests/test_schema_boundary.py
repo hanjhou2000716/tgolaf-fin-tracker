@@ -8,6 +8,7 @@ from transaction_schema import (
     adapt_known_legacy_rows,
     analyze_schema,
     detect_schema,
+    parse_transaction_rows,
     schema_drift_digest,
 )
 
@@ -75,6 +76,20 @@ class SchemaBoundaryTests(unittest.TestCase):
         ])
         self.assertFalse(result["safe"])
         self.assertEqual(result["reason"], "unknown_accounting_headers")
+
+    def test_recovery_parser_accepts_known_rows_with_extra_accounting_header(self):
+        headers = ["Timestamp", "Email Address", "交易類型", "交易單位", "交易數量", "新交易金額欄位"]
+        rows = [["2026-08-24T05:40:00+08:00", "owner@example.com", "006208 買入", "股", "100", ""]]
+        parsed = parse_transaction_rows(headers, rows, source_sheet="回覆", existing_ids=set())
+        self.assertEqual(len(parsed.accepted), 1)
+        self.assertFalse(parsed.rejected)
+
+    def test_duplicate_candidates_with_two_values_are_not_recovery_safe(self):
+        headers = ["Timestamp", "Email Address", "交易類型", "交易單位", "交易數量", "交易數量"]
+        rows = [["2026-08-24T05:40:00+08:00", "owner@example.com", "006208 買入", "股", "100", "101"]]
+        result = analyze_schema(headers, rows=rows)
+        self.assertFalse(result["duplicateResolved"])
+        self.assertFalse(result["safe"])
 
 
 if __name__ == "__main__":
