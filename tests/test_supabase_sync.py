@@ -383,6 +383,28 @@ class SupabaseSyncTests(unittest.TestCase):
         self.assertEqual(result.derived_price_replays[0]["reason"], "settlement_quote_changed")
         self.assertEqual(result.conflicts, ())
 
+    def test_legacy_missing_price_to_estimate_is_derived_replay(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        from ledger import transaction_payload
+
+        old = Transaction(**{
+            **sample_transaction("1").__dict__,
+            "price": None,
+            "compatibility_used": "legacy_mixed_form_row",
+        })
+        current = Transaction(**{**old.__dict__, "price": Decimal("105")})
+        session = FakeSession([{"transaction_id": old.transaction_id, "payload": transaction_payload(old)}])
+        with patch.dict(os.environ, env, clear=True):
+            result = upload_private_transactions([current], session=session)
+        self.assertEqual(result, "unchanged")
+        self.assertEqual(result.derived_price_replays[0]["classification"], "REPLAY_DERIVED_PRICE")
+        self.assertEqual(result.conflicts, ())
+
     def test_legacy_price_replay_canonicalizes_marker_and_action(self):
         env = {
             "SUPABASE_URL": "https://example.supabase.co",

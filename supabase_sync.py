@@ -71,6 +71,13 @@ def _is_derived_price(payload: dict) -> bool:
     )
 
 
+def _price_provenance(payload: dict) -> str:
+    """Return a non-sensitive price provenance category for diagnostics."""
+    if payload.get("price") in (None, ""):
+        return "missing"
+    return "derived" if _is_derived_price(payload) else "explicit"
+
+
 def _marker_class(value) -> str:
     """Return a non-sensitive compatibility category for diagnostics."""
     marker = str(value or "").strip().lower()
@@ -204,9 +211,12 @@ def _legacy_mixed_derived_price_replay(previous: dict, current: dict) -> bool:
         return False
     if _canonical_action(previous.get("action")) not in {"BUY", "SELL"}:
         return False
-    if previous.get("price") in (None, "") or current.get("price") in (None, ""):
+    if current.get("price") in (None, "") or not _is_derived_price(current):
         return False
-    if _normalise_value(previous.get("price")) == _normalise_value(current.get("price")):
+    if (
+        previous.get("price") not in (None, "")
+        and _normalise_value(previous.get("price")) == _normalise_value(current.get("price"))
+    ):
         return False
     changed = _changed_fields(previous, current)
     return changed == ["price"]
@@ -273,8 +283,8 @@ def _conflict_summary(conflicts, replays=()) -> dict:
             previous_action = _action_class(previous_payload.get("action"))
             current_action = _action_class(current_payload.get("action"))
             action_pairs[f"{previous_action}->{current_action}"] += 1
-            previous_provenance = "derived" if _is_derived_price(previous_payload) else "explicit"
-            current_provenance = "derived" if _is_derived_price(current_payload) else "explicit"
+            previous_provenance = _price_provenance(previous_payload)
+            current_provenance = _price_provenance(current_payload)
             price_provenance_pairs[f"{previous_provenance}->{current_provenance}"] += 1
             if (
                 _marker_class(previous_payload.get("compatibility_used")) == "legacy_mixed_form_row"
