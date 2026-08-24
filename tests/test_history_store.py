@@ -6,6 +6,8 @@ from history_store import (
     ensure_history_columns,
     ledger_conflict_alert_sent,
     mark_ledger_conflict_alert_sent,
+    mark_schema_drift_alert_sent,
+    schema_drift_alert_sent,
     upsert_history_snapshot,
 )
 
@@ -99,6 +101,18 @@ class HistoryStoreTests(unittest.TestCase):
         mark_ledger_conflict_alert_sent(sheet, "2026-08-21", "digest-a", "2026-08-21T05:40:00+08:00")
         self.assertTrue(ledger_conflict_alert_sent(sheet, "2026-08-22", "digest-a"))
         self.assertFalse(ledger_conflict_alert_sent(sheet, "2026-08-22", "digest-b"))
+
+    def test_schema_drift_digest_is_deduplicated_across_dates(self):
+        sheet = FakeHistorySheet([
+            ["Date", "Schema_Drift_Alert_Marker"],
+            ["2026-08-23", "{}"],
+            ["2026-08-24", "{}"],
+        ])
+        mark_schema_drift_alert_sent(sheet, "2026-08-23", "shape-a", "2026-08-23T05:40:00+08:00")
+        self.assertTrue(schema_drift_alert_sent(sheet, "shape-a"))
+        self.assertFalse(schema_drift_alert_sent(sheet, "shape-b"))
+        mark_schema_drift_alert_sent(sheet, "2026-08-24", "shape-b", "2026-08-24T05:40:00+08:00")
+        self.assertTrue(schema_drift_alert_sent(sheet, "shape-b"))
 
 
 if __name__ == "__main__":

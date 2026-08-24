@@ -158,3 +158,61 @@ def mark_ledger_conflict_alert_sent(history_sheet, snapshot_date, digest, sent_a
         f"{column_to_a1(marker_column)}{row_number}",
         [[json.dumps(markers, ensure_ascii=False, separators=(",", ":"))]],
     )
+
+
+def _alert_digest_sent(history_sheet, digest, marker_name):
+    """Check a bounded digest marker across recent History rows."""
+    if history_sheet is None or not digest:
+        return False
+    header_map = build_header_map(history_sheet.row_values(1))
+    marker_column = header_map.get(marker_name)
+    if not marker_column:
+        return False
+    for row in reversed(history_sheet.get_all_values()[-60:]):
+        raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
+        if not raw_marker:
+            continue
+        try:
+            markers = json.loads(raw_marker)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(markers, dict) and digest in markers:
+            return True
+    return False
+
+
+def _mark_alert_digest(history_sheet, snapshot_date, digest, sent_at, marker_name):
+    """Persist a bounded alert digest without touching other History fields."""
+    if history_sheet is None or not digest:
+        return
+    header_map = build_header_map(history_sheet.row_values(1))
+    marker_column = header_map.get(marker_name)
+    if not marker_column:
+        return
+    row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
+    if row_number is None:
+        return
+    row = history_sheet.row_values(row_number)
+    raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
+    try:
+        markers = json.loads(raw_marker) if raw_marker else {}
+    except json.JSONDecodeError:
+        markers = {}
+    if not isinstance(markers, dict):
+        markers = {}
+    markers[digest] = sent_at
+    markers = dict(list(markers.items())[-20:])
+    history_sheet.update(
+        f"{column_to_a1(marker_column)}{row_number}",
+        [[json.dumps(markers, ensure_ascii=False, separators=(",", ":"))]],
+    )
+
+
+def schema_drift_alert_sent(history_sheet, digest):
+    """Return whether a schema-shape digest has already been notified."""
+    return _alert_digest_sent(history_sheet, digest, "Schema_Drift_Alert_Marker")
+
+
+def mark_schema_drift_alert_sent(history_sheet, snapshot_date, digest, sent_at):
+    """Record a schema-shape digest after a successful Telegram send."""
+    _mark_alert_digest(history_sheet, snapshot_date, digest, sent_at, "Schema_Drift_Alert_Marker")

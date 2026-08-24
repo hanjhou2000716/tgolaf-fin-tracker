@@ -27,8 +27,10 @@ from transaction_schema import (
     TransactionSchemaError,
     RejectedTransaction,
     adapt_known_legacy_rows,
+    analyze_schema,
     detect_schema,
     parse_transaction_rows,
+    schema_drift_digest,
 )
 from transaction_command import apply_reconciliation_events, build_ingestion_contract, build_ingestion_status, inventory_rows_from_transactions
 from settlement_pricing import enrich_missing_trade_prices
@@ -47,6 +49,8 @@ from history_store import (
     find_row_by_key,
     ledger_conflict_alert_sent,
     mark_ledger_conflict_alert_sent,
+    mark_schema_drift_alert_sent,
+    schema_drift_alert_sent,
     upsert_history_snapshot,
 )
 from runtime_extensions import build_runtime_extensions
@@ -64,10 +68,13 @@ FORM_SCHEMA_LEGACY_COMPAT = os.getenv("FORM_SCHEMA_LEGACY_COMPAT", "false").stri
 WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/private/"
 
 
-HISTORY_EXTRA_COLUMNS = ["TW_Stock_Value", "US_Stock_Value", "Cash_Value", "Fund_Value", "NVDA_QQQM_Weight", "NVDA_SPYG_Weight", "NVDA_VOO_Weight", "Settlement_Notification_Sent_At", "Ledger_Conflict_Alert_Marker"]
+HISTORY_EXTRA_COLUMNS = ["TW_Stock_Value", "US_Stock_Value", "Cash_Value", "Fund_Value", "NVDA_QQQM_Weight", "NVDA_SPYG_Weight", "NVDA_VOO_Weight", "Settlement_Notification_Sent_At", "Ledger_Conflict_Alert_Marker", "Schema_Drift_Alert_Marker"]
 ETF_NVDA_WEIGHT_FALLBACKS = {"QQQM": 0.095, "SPYG": 0.075, "VOO": 0.070}
 MARKET_DATA = MarketDataService()
 TRANSIENT_SHEETS_STATUS = frozenset({429, 500, 502, 503, 504})
+# Populated by calculate_current_assets for the private output assembly.  It
+# avoids changing the long-standing four-value compatibility return contract.
+LAST_SCHEMA_DIAGNOSTICS = []
 
 
 def open_spreadsheets_with_retry(client, *, attempts=4, sleep=time.sleep):
@@ -257,6 +264,7 @@ def calculate_current_assets():
     transaction_audits, accepted_transactions, seen_transaction_ids = [], [], set()
     transaction_ingestion = []
     schema_versions = []
+    schema_diagnostics = []
     ingestion_rejections = []
     for ws in sheet.worksheets():
         title_clean = ws.title.strip().lower()
@@ -267,8 +275,15 @@ def calculate_current_assets():
             if len(rows) > 1:
                 schema_version = detect_schema(rows[0])
                 schema_versions.append(schema_version)
+                schema_diagnostic = analyze_schema(
+                    rows[0], schema=schema_version, row_count=len(rows) - 1
+                )
+                schema_diagnostic["sheet"] = ws.title
+                schema_diagnostics.append(schema_diagnostic)
                 if FORM_SCHEMA_STRICT:
                     try:
+                        if not schema_diagnostic["safe"]:
+                            raise TransactionSchemaError(schema_diagnostic["reason"] or "schema_drift")
                         parsed = parse_transaction_rows(
                             rows[0],
                             rows[1:],
@@ -329,7 +344,7 @@ def calculate_current_assets():
                                 RejectedTransaction(
                                     f"{ws.title}:header",
                                     "schema_drift",
-                                    f"{schema_version}: {error}",
+                                    f"{schema_version}: {schema_diagnostic['reason'] or 'schema validation failed'}",
                                 )
                             )
                         transaction_audits.append({
@@ -339,19 +354,42 @@ def calculate_current_assets():
                             "rejected": [{"source_row_id": f"{ws.title}:header", "reason": reason, "detail": str(error)}],
                         })
                 else:
-                    data_rows.extend(rows[1:])
+                    # The non-strict migration switch never permits an
+                    # unknown or ambiguous header to reach the legacy
+                    # reducer.  Safe, known legacy rows may still use the
+                    # temporary raw-row compatibility path.
+                    if schema_diagnostic["safe"]:
+                        data_rows.extend(rows[1:])
+                    else:
+                        ingestion_rejections.append(
+                            RejectedTransaction(
+                                f"{ws.title}:header",
+                                "schema_drift",
+                                f"{schema_version}: {schema_diagnostic['reason'] or 'schema validation failed'}",
+                            )
+                        )
                 
-    if transaction_audits:
+    schema_digest = schema_drift_digest(schema_diagnostics)
+    schema_affected_rows = sum(
+        int(item.get("rowCount") or 0)
+        for item in schema_diagnostics
+        if not item.get("safe", True)
+    )
+    schema_drift_detected = bool(schema_digest)
+    if transaction_audits or schema_diagnostics:
         write_json(".private-build/transaction_audit.json", {
             "strict": FORM_SCHEMA_STRICT,
             "sheets": transaction_audits,
+            "schemaDiagnostics": schema_diagnostics,
             "transactionIngestion": build_ingestion_contract(
                 transaction_ingestion,
                 schema=schema_versions[-1] if schema_versions else "UNKNOWN",
                 ingestion_health={
                     "status": "DEGRADED" if ingestion_rejections else "OK",
-                    "reasonCode": "SCHEMA_DRIFT" if ingestion_rejections else None,
-                    "message": "Google Form schema drift; affected rows quarantined" if ingestion_rejections else None,
+                    "reasonCode": "SCHEMA_DRIFT" if schema_drift_detected else "TRANSACTION_REJECTED" if ingestion_rejections else None,
+                    "message": "Google Form schema drift; affected rows quarantined" if schema_drift_detected else "Some transaction rows were quarantined" if ingestion_rejections else None,
+                    "schemaDigest": schema_digest or None,
+                    "schemaAffectedRows": schema_affected_rows,
                 },
             ),
         })
@@ -369,14 +407,14 @@ def calculate_current_assets():
 
     lkg_snapshot = None
     lkg_inventory = None
-    schema_drift_detected = any(item.reason == "schema_drift" for item in ingestion_rejections)
     if schema_drift_detected:
         lkg_snapshot = load_private_snapshot()
         if lkg_snapshot:
             lkg_inventory = _inventory_from_lkg(lkg_snapshot.get("payload", {}))
-        if lkg_inventory is not None:
+        if lkg_inventory is not None and not data_rows:
             # A header-level drift invalidates the whole new batch.  Do not
-            # combine partial rows with the previous canonical state.
+            # combine an empty/invalid batch with the previous canonical
+            # state.  Valid sheets are still allowed to continue below.
             data_rows = []
     inventory = lkg_inventory or _empty_inventory()
     symbol_overrides = {'6208': '006208', '403A': '00403A', '886': '00886', '895': '00895', '878': '00878', '685L': '00685L'}
@@ -489,16 +527,21 @@ def calculate_current_assets():
                 "status": "DEGRADED" if ingestion_rejections else "OK",
                 "reasonCode": (
                     "IMMUTABLE_LEDGER_CONFLICT" if sync_conflicts
-                    else "SCHEMA_DRIFT" if ingestion_rejections
+                    else "SCHEMA_DRIFT" if schema_drift_detected
+                    else "TRANSACTION_REJECTED" if ingestion_rejections
                     else None
                 ),
                 "message": (
                     f"Supabase immutable ledger conflict quarantined ({len(sync_conflicts)})"
                     if sync_conflicts
                     else "Google Form schema drift; affected rows quarantined"
+                    if schema_drift_detected
+                    else "Some transaction rows were quarantined"
                     if ingestion_rejections
                     else None
                 ),
+                "schemaDigest": schema_digest or None,
+                "schemaAffectedRows": schema_affected_rows,
                 "lkgUsed": bool(lkg_inventory),
                 "portfolioDataAsOf": lkg_snapshot.get("generated_at") if lkg_inventory and lkg_snapshot else None,
                 "lastSuccessfulIngestionAt": None if lkg_inventory else datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -507,6 +550,8 @@ def calculate_current_assets():
         "reconciliationEvents": reconciliation_events,
         "ledgerAudit": ledger_audit,
     })
+    global LAST_SCHEMA_DIAGNOSTICS
+    LAST_SCHEMA_DIAGNOSTICS = schema_diagnostics
     return inventory, history_sheet, accepted_transactions, ledger_sync_result
 
 # ==========================================
@@ -1563,6 +1608,9 @@ def main():
         "peak_006208": round(peak_006208, 2),
         "asset_006208": round(price_006208, 2) if price_006208 else 249.1,
         "lastUpdated": tw_now.strftime("%Y/%m/%d %H:%M:%S"),
+        # Private-only header diagnostics.  This contains schema shape and
+        # counts, never row values, holdings, or monetary amounts.
+        "schemaDiagnostics": LAST_SCHEMA_DIAGNOSTICS,
         "portfolio": {
             "totalAsset": round(total_asset, 2),
             "netAsset": round(net_asset, 2),
@@ -1664,7 +1712,11 @@ def main():
     conflict_already_alerted = ledger_conflict_alert_sent(
         history_sheet, tw_now.strftime("%Y-%m-%d"), conflict_digest
     ) if conflict_digest else False
-    if ingestion_health.get("status") == "DEGRADED" and not (sync_conflicts and conflict_already_alerted):
+    schema_digest = str(ingestion_health.get("schemaDigest") or "")
+    schema_already_alerted = schema_drift_alert_sent(history_sheet, schema_digest) if schema_digest else False
+    conflict_alert_due = bool(sync_conflicts and not conflict_already_alerted)
+    schema_alert_due = bool(schema_digest and not schema_already_alerted and not conflict_alert_due)
+    if ingestion_health.get("status") == "DEGRADED" and (conflict_alert_due or schema_alert_due or not (sync_conflicts or schema_digest)):
         reason = ingestion_health.get("message") or ingestion_health.get("reasonCode") or "部分資料已隔離"
         tg_text += f"\n⚠️ Growth 資料輸入異常\n原因：{reason}\n有效資料仍已部署，異常資料已隔離。"
 
@@ -1705,6 +1757,10 @@ def main():
             if conflict_digest and not conflict_already_alerted:
                 mark_ledger_conflict_alert_sent(
                     history_sheet, snapshot_date, conflict_digest, tw_now.isoformat()
+                )
+            if schema_digest and schema_alert_due:
+                mark_schema_drift_alert_sent(
+                    history_sheet, snapshot_date, schema_digest, tw_now.isoformat()
                 )
             print(f"Telegram notification sent; window={settlement_window}, forced={FORCE_TELEGRAM}")
         except requests.RequestException as error:
