@@ -54,9 +54,21 @@ _FINGERPRINT_VERSION = "2"
 
 
 def _is_derived_price(payload: dict) -> bool:
-    """Return whether price was supplied by settlement quote enrichment."""
-    marker = str(payload.get("compatibility_used") or "").strip().lower()
-    return marker.startswith("settlement_quote_estimate:")
+    """Return whether price was supplied by settlement quote enrichment.
+
+    Legacy mixed-form BUY/SELL rows are emitted without a成交價 and enriched
+    later, while retaining their compatibility marker. A price-bearing row
+    with that marker is therefore derived by construction; explicit price
+    rows use a different parser path and do not receive this marker.
+    """
+    marker = _marker_class(payload.get("compatibility_used"))
+    if marker == "settlement_quote_estimate":
+        return True
+    return (
+        marker == "legacy_mixed_form_row"
+        and _canonical_action(payload.get("action")) in {"BUY", "SELL"}
+        and payload.get("price") not in (None, "")
+    )
 
 
 def _marker_class(value) -> str:
@@ -71,6 +83,16 @@ def _marker_class(value) -> str:
     if marker in _LEGACY_MARKERS:
         return marker
     return "other"
+
+
+def _canonical_action(value) -> str:
+    """Map current and legacy action labels to one comparison value."""
+    text = str(value or "").strip().upper()
+    if text in {"BUY", "買入"} or "買入" in text:
+        return "BUY"
+    if text in {"SELL", "賣出"} or "賣出" in text:
+        return "SELL"
+    return text
 
 
 def _normalise_value(value):
@@ -157,11 +179,11 @@ def _legacy_mixed_derived_price_replay(previous: dict, current: dict) -> bool:
     price-only change on an otherwise identical trade is eligible here; all
     other core-field changes continue through the strict conflict path.
     """
-    if previous.get("compatibility_used") != "legacy_mixed_form_row":
+    if _marker_class(previous.get("compatibility_used")) != "legacy_mixed_form_row":
         return False
-    if current.get("compatibility_used") != "legacy_mixed_form_row":
+    if _marker_class(current.get("compatibility_used")) != "legacy_mixed_form_row":
         return False
-    if str(previous.get("action") or "") not in {"BUY", "SELL", "買入", "賣出"}:
+    if _canonical_action(previous.get("action")) not in {"BUY", "SELL"}:
         return False
     if previous.get("price") in (None, "") or current.get("price") in (None, ""):
         return False
