@@ -95,6 +95,25 @@ def _canonical_action(value) -> str:
     return text
 
 
+def _action_class(value) -> str:
+    """Return a non-sensitive action category for conflict forensics."""
+    canonical = _canonical_action(value)
+    if canonical in {"BUY", "SELL"}:
+        return canonical
+    text = str(value or "").strip().upper()
+    if "SET_BALANCE" in text or any(token in text for token in ("取代", "覆蓋", "更新")):
+        return "SET_BALANCE"
+    if "DEPOSIT" in text or "存入" in text:
+        return "DEPOSIT"
+    if "WITHDRAWAL" in text or "提領" in text:
+        return "WITHDRAWAL"
+    if "BORROW" in text or "借款" in text:
+        return "BORROW"
+    if "REPAY" in text or "還款" in text:
+        return "REPAY"
+    return canonical or "UNKNOWN"
+
+
 def _normalise_value(value):
     """Canonicalise payload values without changing their financial meaning."""
     if value in (None, ""):
@@ -238,10 +257,32 @@ def _conflict_summary(conflicts, replays=()) -> dict:
     marker_pairs = Counter()
     metadata_only = 0
     source_row_drifts = 0
+    action_pairs = Counter()
+    price_provenance_pairs = Counter()
+    price_only_conflicts = 0
+    legacy_price_only_candidates = 0
+    legacy_price_only_non_trade = 0
     for item in conflicts:
         changed = tuple(sorted(str(field) for field in (item.get("changed_fields") or [])))
         if not changed:
             metadata_only += 1
+        if changed == ("price",):
+            price_only_conflicts += 1
+            previous_payload = item.get("existing_payload") or {}
+            current_payload = item.get("current_payload") or {}
+            previous_action = _action_class(previous_payload.get("action"))
+            current_action = _action_class(current_payload.get("action"))
+            action_pairs[f"{previous_action}->{current_action}"] += 1
+            previous_provenance = "derived" if _is_derived_price(previous_payload) else "explicit"
+            current_provenance = "derived" if _is_derived_price(current_payload) else "explicit"
+            price_provenance_pairs[f"{previous_provenance}->{current_provenance}"] += 1
+            if (
+                _marker_class(previous_payload.get("compatibility_used")) == "legacy_mixed_form_row"
+                and _marker_class(current_payload.get("compatibility_used")) == "legacy_mixed_form_row"
+            ):
+                legacy_price_only_candidates += 1
+                if previous_action not in {"BUY", "SELL"} or current_action not in {"BUY", "SELL"}:
+                    legacy_price_only_non_trade += 1
         for field in changed:
             field_counts[field] += 1
         if item.get("source_row_id_changed"):
@@ -263,6 +304,11 @@ def _conflict_summary(conflicts, replays=()) -> dict:
         "sourceFingerprintReplayCount": replay_classes.get("REPLAY_SOURCE_FINGERPRINT", 0),
         "derivedPriceReplayCount": replay_classes.get("REPLAY_DERIVED_PRICE", 0),
         "sourceRowIdDriftCount": source_row_drifts,
+        "priceOnlyConflictCount": price_only_conflicts,
+        "legacyPriceOnlyCandidateCount": legacy_price_only_candidates,
+        "legacyPriceOnlyNonTradeCount": legacy_price_only_non_trade,
+        "conflictActionPairs": dict(sorted(action_pairs.items())),
+        "priceProvenancePairs": dict(sorted(price_provenance_pairs.items())),
         "changedFieldCounts": dict(sorted(field_counts.items())),
         "compatibilityMarkerPairs": dict(sorted(marker_pairs.items())),
     }
@@ -673,6 +719,14 @@ def upload_private_transactions(transactions, *, session=None) -> str:
             f"metadata_only={conflict_summary['metadataOnlyConflictCount']}, "
             f"source_row_drift={conflict_summary['sourceRowIdDriftCount']}, "
             f"fields={fields}, markers={markers}"
+        )
+        print(
+            "Supabase conflict provenance: "
+            f"price_only={conflict_summary['priceOnlyConflictCount']}, "
+            f"legacy_price_candidates={conflict_summary['legacyPriceOnlyCandidateCount']}, "
+            f"legacy_price_non_trade={conflict_summary['legacyPriceOnlyNonTradeCount']}, "
+            f"actions={json.dumps(conflict_summary['conflictActionPairs'], ensure_ascii=False, sort_keys=True)}, "
+            f"price_provenance={json.dumps(conflict_summary['priceProvenancePairs'], ensure_ascii=False, sort_keys=True)}"
         )
     if replays:
         print(f"Supabase ledger replays accepted: {len(replays)}")
