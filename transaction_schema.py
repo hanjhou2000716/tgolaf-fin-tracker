@@ -1,6 +1,6 @@
 """Strict Google Form transaction contract and approval gate."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
@@ -640,16 +640,20 @@ def _parse_v2_transaction_rows(
     normalized_list = [_normalize_header(value) for value in headers]
 
     def first_index(*aliases: str) -> int | None:
-        keys = {_normalize_header(alias) for alias in aliases}
-        for index, key in enumerate(normalized_list):
-            if key in keys:
-                return index
+        # Prefer the explicit legacy header when a mixed sheet also contains
+        # the new ``交易類型`` question.  A first-column-wins lookup would
+        # mistake the simple question for the legacy action column.
+        for alias in aliases:
+            key = _normalize_header(alias)
+            for index, header_key in enumerate(normalized_list):
+                if header_key == key:
+                    return index
         return None
 
-    legacy_asset_index = first_index("資產類別", "asset_type")
-    legacy_symbol_index = first_index("資產代號", "asset_type", "symbol")
-    legacy_action_index = first_index("交易類型", "action")
-    legacy_quantity_index = first_index("數量/股數/金額 (直接填正數即可)", "數量", "quantity")
+    legacy_asset_index = first_index("asset_type", "資產類別")
+    legacy_symbol_index = first_index("symbol", "資產代號", "asset_type")
+    legacy_action_index = first_index("action", "交易類型")
+    legacy_quantity_index = first_index("quantity", "數量/股數/金額 (直接填正數即可)", "數量")
     legacy_currency_index = first_index("currency", "幣別")
     legacy_unit_index = first_index("unit", "單位")
 
@@ -890,6 +894,20 @@ def parse_transaction_rows(
     existing_ids: set[str] | None = None,
 ) -> TransactionParseResult:
     normalized_headers = {_normalize_header(value): index for index, value in enumerate(headers)}
+    # A Google Form response sheet can retain the previous branch columns
+    # after the form is simplified.  When the new three-question headers and
+    # legacy/V2 headers coexist, parse each row through the branch it actually
+    # populated.  Sending the whole sheet to the simple parser makes every
+    # historical row look malformed because its three new cells are empty.
+    from simple_transaction import is_simple_form_headers, parse_simple_transaction_rows
+    simple_shape = is_simple_form_headers(headers)
+    if simple_shape and _has_mixed_form_columns(headers):
+        return _parse_mixed_form_rows(
+            headers,
+            rows,
+            source_sheet=source_sheet,
+            existing_ids=existing_ids,
+        )
     compact_index = next(
         (normalized_headers.get(_normalize_header(alias)) for alias in COMPACT_DESCRIPTION_ALIASES
          if normalized_headers.get(_normalize_header(alias)) is not None),
@@ -907,9 +925,7 @@ def parse_transaction_rows(
     # The current public form is a single page with three user-entered
     # questions.  Its explicit 交易單位／交易數量 headers distinguish it from
     # the older Form V2 branch, which uses generic 單位／數量 headers.
-    from simple_transaction import is_simple_form_headers, parse_simple_transaction_rows
-
-    if is_simple_form_headers(headers):
+    if simple_shape:
         return parse_simple_transaction_rows(
             headers,
             rows,
@@ -988,6 +1004,116 @@ def parse_transaction_rows(
             seen.add(transaction_id)
         except (ValueError, InvalidOperation) as error:
             rejected.append(RejectedTransaction(source_row_id, "invalid_transaction", str(error)))
+    return TransactionParseResult(tuple(accepted), tuple(pending), tuple(rejected), tuple(accepted_rows))
+
+
+def _has_mixed_form_columns(headers: Sequence[str]) -> bool:
+    """Return true when current three-question and historical branch columns coexist."""
+    simple_headers = {
+        _normalize_header(alias)
+        for aliases in SIMPLE_SCHEMA_ALIASES.values()
+        for alias in aliases
+    }
+    legacy_branch_headers = {
+        "asset_type", "symbol", "action", "market", "資產類別", "資產代號",
+        "市場", "價格", "成交價格", "price", "金額", "amount", "幣別",
+        "currency", "交易日期", "日期", "目標餘額", "target_balance", "數量",
+        "股數", "單位", "unit", "備註", "note", "approved", "核准",
+    }
+    normalized = {_normalize_header(value) for value in headers}
+    return bool(normalized - simple_headers) and bool(normalized & {
+        _normalize_header(value) for value in legacy_branch_headers
+    })
+
+
+def _rebase_mixed_result(
+    result: TransactionParseResult,
+    *,
+    source_sheet: str,
+    row_number: int,
+    seen: set[str],
+) -> TransactionParseResult:
+    """Restore the real source row ID after parsing a one-row branch slice."""
+    source_row_id = f"{source_sheet}:{row_number}"
+    transaction_id = str(uuid5(NAMESPACE_URL, source_row_id))
+    accepted: list[Transaction] = []
+    pending: list[Transaction] = []
+    rejected = list(result.rejected)
+    if transaction_id in seen and (result.accepted or result.pending):
+        rejected.append(RejectedTransaction(source_row_id, "duplicate_transaction_id", "duplicate_transaction_id"))
+        return TransactionParseResult((), (), tuple(rejected), result.accepted_rows)
+    for item in result.accepted:
+        accepted.append(replace(item, transaction_id=transaction_id, source_row_id=source_row_id))
+    for item in result.pending:
+        pending.append(replace(item, transaction_id=transaction_id, source_row_id=source_row_id))
+    if accepted or pending:
+        seen.add(transaction_id)
+    rejected = [replace(item, source_row_id=source_row_id) for item in rejected]
+    return TransactionParseResult(tuple(accepted), tuple(pending), tuple(rejected), result.accepted_rows)
+
+
+def _parse_mixed_form_rows(
+    headers: Sequence[str],
+    rows: Sequence[Sequence[str]],
+    *,
+    source_sheet: str,
+    existing_ids: set[str] | None = None,
+) -> TransactionParseResult:
+    """Parse a mixed response sheet without guessing across branch columns."""
+    from simple_transaction import parse_simple_transaction_rows
+
+    normalized_headers = [_normalize_header(value) for value in headers]
+
+    def indexes_for(field: str) -> tuple[int, ...]:
+        aliases = SIMPLE_SCHEMA_ALIASES[field]
+        normalized = {_normalize_header(alias) for alias in aliases}
+        return tuple(index for index, header in enumerate(normalized_headers) if header in normalized)
+
+    type_indexes = indexes_for("transaction_type")
+    unit_indexes = indexes_for("unit")
+    quantity_indexes = indexes_for("quantity")
+    seen = set(existing_ids or set())
+    accepted: list[Transaction] = []
+    pending: list[Transaction] = []
+    rejected: list[RejectedTransaction] = []
+    accepted_rows: list[tuple[str, ...]] = []
+    for row_number, raw_row in enumerate(rows, start=2):
+        row = tuple(str(value) for value in raw_row)
+        type_values = [
+            str(row[index]).strip()
+            for index in type_indexes
+            if index < len(row) and str(row[index]).strip()
+        ]
+        unit_values = [
+            str(row[index]).strip()
+            for index in unit_indexes
+            if index < len(row) and str(row[index]).strip()
+        ]
+        quantity_values = [
+            str(row[index]).strip()
+            for index in quantity_indexes
+            if index < len(row) and str(row[index]).strip()
+        ]
+        # A row with any of the explicit new-question cells belongs to the
+        # simple branch; old rows leave those cells empty and use the V2/legacy
+        # adapter below.  This keeps invalid new rows rejected rather than
+        # accidentally interpreted as an old transaction.
+        use_simple = bool(type_values) and bool(unit_values or quantity_values)
+        if use_simple:
+            result = parse_simple_transaction_rows(
+                headers, [row], source_sheet=source_sheet, existing_ids=set()
+            )
+        else:
+            result = _parse_v2_transaction_rows(
+                headers, [row], source_sheet=source_sheet, existing_ids=set()
+            )
+        rebased = _rebase_mixed_result(
+            result, source_sheet=source_sheet, row_number=row_number, seen=seen
+        )
+        accepted.extend(rebased.accepted)
+        pending.extend(rebased.pending)
+        rejected.extend(rebased.rejected)
+        accepted_rows.extend(rebased.accepted_rows)
     return TransactionParseResult(tuple(accepted), tuple(pending), tuple(rejected), tuple(accepted_rows))
 
 

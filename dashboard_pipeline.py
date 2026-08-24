@@ -7,6 +7,7 @@ import math
 import re
 import time
 import copy
+from collections import Counter
 import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
@@ -352,8 +353,13 @@ def calculate_current_assets():
                             rows[0], rows[1:], source_sheet=ws.title,
                             existing_ids=seen_transaction_ids,
                         )
-                        if recovery_mode and (parsed.rejected or parsed.pending):
-                            raise TransactionSchemaError("recovery_candidate_has_quarantined_rows")
+                        # Mixed response sheets are recovered row-by-row.  A
+                        # malformed historical row is quarantined, but must
+                        # not discard valid rows that can still rebuild the
+                        # portfolio.  An entirely unusable sheet remains
+                        # blocked below so it can never become a zero result.
+                        if recovery_mode and not parsed.accepted and (parsed.rejected or parsed.pending):
+                            raise TransactionSchemaError("recovery_candidate_has_no_accepted_rows")
                         priced = enrich_missing_trade_prices(
                             parsed.accepted,
                             _settlement_quote_for_transaction,
@@ -364,6 +370,8 @@ def calculate_current_assets():
                             if item.transaction_id in accepted_ids
                         )
                         pending = tuple(parsed.pending) + tuple(priced.pending)
+                        if recovery_mode and not priced.accepted and pending:
+                            raise TransactionSchemaError("recovery_candidate_has_no_valued_rows")
                         seen_transaction_ids.update(item.transaction_id for item in priced.accepted)
                         seen_transaction_ids.update(item.transaction_id for item in pending)
                         accepted_transactions.extend(priced.accepted)
@@ -401,6 +409,7 @@ def calculate_current_assets():
                                 "acceptedRows": len(priced.accepted),
                                 "pendingRows": len(pending),
                                 "rejectedRows": len(parsed.rejected),
+                                "rejectedReasonCounts": dict(Counter(item.reason for item in parsed.rejected)),
                             })
                     except TransactionSchemaError as error:
                         if not FORM_SCHEMA_LEGACY_COMPAT:

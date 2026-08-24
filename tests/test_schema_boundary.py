@@ -5,6 +5,7 @@ from transaction_schema import (
     FORM_V2_SCHEMA,
     LEGACY_SCHEMA,
     UNKNOWN_SCHEMA,
+    Action,
     adapt_known_legacy_rows,
     analyze_schema,
     detect_schema,
@@ -90,6 +91,28 @@ class SchemaBoundaryTests(unittest.TestCase):
         result = analyze_schema(headers, rows=rows)
         self.assertFalse(result["duplicateResolved"])
         self.assertFalse(result["safe"])
+
+    def test_mixed_current_and_legacy_rows_are_parsed_by_their_populated_branch(self):
+        headers = [
+            "Timestamp", "Email Address", "交易類型", "交易單位", "交易數量",
+            "asset_type", "symbol", "action", "quantity", "market", "unit",
+            "currency", "target_balance", "transaction_date",
+        ]
+        rows = [
+            [
+                "2026-08-24T05:40:00+08:00", "owner@example.com", "006208 買入", "股", "100",
+                "", "", "", "", "", "", "", "", "",
+            ],
+            [
+                "2026-08-23T14:45:00+08:00", "", "", "", "",
+                "台股", "006208", "買入", "100", "", "股", "TWD", "", "",
+            ],
+        ]
+        result = parse_transaction_rows(headers, rows, source_sheet="表單回覆 3")
+        self.assertEqual(result.rejected, ())
+        self.assertEqual(len(result.accepted), 2)
+        self.assertEqual([item.source_row_id for item in result.accepted], ["表單回覆 3:2", "表單回覆 3:3"])
+        self.assertEqual([item.action for item in result.accepted], [Action.BUY, Action.BUY])
 
 
 if __name__ == "__main__":
