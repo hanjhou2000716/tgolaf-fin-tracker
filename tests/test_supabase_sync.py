@@ -57,6 +57,85 @@ def sample_transaction(quantity="1"):
 
 
 class SupabaseSyncTests(unittest.TestCase):
+    @staticmethod
+    def valid_snapshot(*, total_asset=1):
+        return {
+            "generatedAt": "2026-08-24T12:00:00+00:00",
+            "status": "ok",
+            "portfolio": {
+                "totalAsset": total_asset,
+                "inventory": {
+                    "台股": {"006208": 1}, "美股": {}, "基金": {},
+                    "現金_TWD": {"TWD": 0}, "現金_USD": {"USD": 0},
+                    "質押負債": {"Current_Debt": 0, "History": []},
+                    "質押利率": {"Rate": 3.3, "History": []}, "擔保品": {},
+                },
+            },
+        }
+
+    def test_zero_or_degraded_snapshot_is_not_uploaded(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "data.private.json"
+                payload = self.valid_snapshot(total_asset=0)
+                payload["status"] = "blocked"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                session = FakeSession()
+                self.assertEqual(upload_private_snapshot(str(path), session=session), "blocked")
+                self.assertEqual(session.calls, [])
+
+    def test_zero_snapshot_is_not_a_recoverable_lkg(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+        }
+        session = FakeSession(existing=[{
+            "generated_at": "2026-08-24T12:00:00+00:00",
+            "payload": {**self.valid_snapshot(total_asset=0), "status": "blocked"},
+        }])
+        with patch.dict(os.environ, env, clear=True):
+            self.assertIsNone(load_private_snapshot(session=session))
+
+    def test_snapshot_with_only_debt_or_pledge_rate_is_not_a_recoverable_lkg(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+        }
+        payload = self.valid_snapshot(total_asset=None)
+        payload["portfolio"].pop("totalAsset")
+        for bucket in ("台股", "美股", "基金", "現金_TWD", "現金_USD", "擔保品"):
+            payload["portfolio"]["inventory"][bucket] = {}
+        payload["portfolio"]["inventory"]["質押利率"]["Rate"] = 3.3
+        payload["portfolio"]["inventory"]["質押負債"]["Current_Debt"] = 1870000
+        session = FakeSession(existing=[{
+            "generated_at": "2026-08-24T12:00:00+00:00",
+            "payload": payload,
+        }])
+        with patch.dict(os.environ, env, clear=True):
+            self.assertIsNone(load_private_snapshot(session=session))
+
+    def test_snapshot_without_ok_status_is_not_a_recoverable_lkg(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+        }
+        payload = self.valid_snapshot()
+        payload.pop("status")
+        session = FakeSession(existing=[{
+            "generated_at": "2026-08-24T12:00:00+00:00",
+            "payload": payload,
+        }])
+        with patch.dict(os.environ, env, clear=True):
+            self.assertIsNone(load_private_snapshot(session=session))
     def test_production_conflict_fixture_is_quarantined(self):
         fixture = json.loads((Path(__file__).parent / "fixtures" / "production-immutable-conflict-20260820.json").read_text(encoding="utf-8"))
         env = {
@@ -81,12 +160,20 @@ class SupabaseSyncTests(unittest.TestCase):
         }
         session = FakeSession(existing=[{
             "generated_at": "2026-08-20T05:40:00+00:00",
-            "payload": {"inventory": {"台股": {"006208": 1}}},
+            "payload": {
+                "status": "ok",
+                "portfolio": {"totalAsset": 1, "inventory": {
+                    "台股": {"006208": 1}, "美股": {}, "基金": {},
+                    "現金_TWD": {"TWD": 0}, "現金_USD": {"USD": 0},
+                    "質押負債": {"Current_Debt": 0, "History": []},
+                    "質押利率": {"Rate": 3.3, "History": []}, "擔保品": {},
+                }},
+            },
         }])
         with patch.dict(os.environ, env, clear=True):
             result = load_private_snapshot(session=session)
         self.assertEqual(result["generated_at"], "2026-08-20T05:40:00+00:00")
-        self.assertEqual(result["payload"]["inventory"]["台股"]["006208"], 1)
+        self.assertEqual(result["payload"]["portfolio"]["inventory"]["台股"]["006208"], 1)
         self.assertIn("portfolio_snapshots", session.calls[0][0][0])
 
     def test_missing_config_skips_without_private_upload(self):
@@ -115,7 +202,19 @@ class SupabaseSyncTests(unittest.TestCase):
         with patch.dict(os.environ, env, clear=True):
             with tempfile.TemporaryDirectory() as directory:
                 path = Path(directory) / "data.private.json"
-                path.write_text(json.dumps({"generatedAt": "2026-08-04T12:00:00+08:00", "portfolio": {"netAsset": 1}}), encoding="utf-8")
+                path.write_text(json.dumps({
+                    "generatedAt": "2026-08-04T12:00:00+08:00",
+                    "status": "ok",
+                    "portfolio": {
+                        "totalAsset": 1,
+                        "inventory": {
+                            "台股": {"006208": 1}, "美股": {}, "基金": {},
+                            "現金_TWD": {"TWD": 0}, "現金_USD": {"USD": 0},
+                            "質押負債": {"Current_Debt": 0, "History": []},
+                            "質押利率": {"Rate": 3.3, "History": []}, "擔保品": {},
+                        },
+                    },
+                }), encoding="utf-8")
                 self.assertEqual(upload_private_snapshot(str(path), session=fake_session), "uploaded")
         url, kwargs = fake_session.calls[0]
         self.assertIn("on_conflict=user_id", url[0])

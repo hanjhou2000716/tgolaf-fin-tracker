@@ -84,6 +84,16 @@ class SimpleTransactionFormTests(unittest.TestCase):
         self.assertEqual(duplicate.accepted, ())
         self.assertEqual(duplicate.rejected[0].detail, "duplicate_transaction_id")
 
+    def test_mixed_duplicate_quantity_headers_use_non_empty_candidate(self):
+        headers = ["Timestamp", "Email Address", "交易類型", "交易單位", "交易數量", "交易數量"]
+        rows = [
+            row("006208 買入", "股", "100") + [""],
+            row("QQQM 賣出", "股", "") + ["3"],
+        ]
+        result = parse_transaction_rows(headers, rows, source_sheet="Simple Form")
+        self.assertEqual(result.rejected, ())
+        self.assertEqual([item.quantity for item in result.accepted], [Decimal("100"), Decimal("3")])
+
 
 if __name__ == "__main__":
     unittest.main()

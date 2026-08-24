@@ -58,6 +58,17 @@ class SchemaBoundaryTests(unittest.TestCase):
         self.assertIn("quantity", duplicate["duplicateFields"])
         self.assertTrue(schema_drift_digest([missing]))
 
+    def test_mixed_duplicate_headers_are_safe_when_rows_are_disjoint(self):
+        headers = ["Timestamp", "Email Address", "交易類型", "交易單位", "交易數量", "交易數量"]
+        rows = [
+            ["2026-08-24T05:40:00+08:00", "owner@example.com", "006208 買入", "股", "100", ""],
+            ["2026-08-24T05:41:00+08:00", "owner@example.com", "QQQM 賣出", "股", "", "3"],
+        ]
+        result = analyze_schema(headers, rows=rows)
+        self.assertTrue(result["safe"])
+        self.assertTrue(result["duplicateResolved"])
+        self.assertEqual(schema_drift_digest([result]), "")
+
     def test_unknown_accounting_header_is_not_silently_accepted(self):
         result = analyze_schema([
             "Timestamp", "Email Address", "交易類型", "交易單位", "交易數量", "新交易金額欄位",

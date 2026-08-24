@@ -86,13 +86,15 @@ _SYMBOL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{1,14}$")
 
 
 def _mapping(headers) -> dict[str, int]:
-    normalized = {_normalize_header(value): index for index, value in enumerate(headers)}
-    result: dict[str, int] = {}
+    normalized = {}
+    for index, value in enumerate(headers):
+        normalized.setdefault(_normalize_header(value), []).append(index)
+    result: dict[str, tuple[int, ...]] = {}
     for field, aliases in SIMPLE_HEADER_ALIASES.items():
         for alias in aliases:
-            index = normalized.get(_normalize_header(alias))
-            if index is not None:
-                result[field] = index
+            indexes = normalized.get(_normalize_header(alias))
+            if indexes:
+                result[field] = tuple(indexes)
                 break
     return result
 
@@ -104,8 +106,13 @@ def is_simple_form_headers(headers) -> bool:
 
 
 def _value(row, mapping: dict[str, int], field: str) -> str:
-    index = mapping.get(field)
-    return str(row[index]).strip() if index is not None and index < len(row) else ""
+    indexes = mapping.get(field, ())
+    if isinstance(indexes, int):
+        indexes = (indexes,)
+    for index in indexes:
+        if index < len(row) and str(row[index]).strip():
+            return str(row[index]).strip()
+    return ""
 
 
 def _number(value: str, *, allow_zero: bool) -> Decimal:

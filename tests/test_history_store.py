@@ -114,6 +114,14 @@ class HistoryStoreTests(unittest.TestCase):
         mark_schema_drift_alert_sent(sheet, "2026-08-24", "shape-b", "2026-08-24T05:40:00+08:00")
         self.assertTrue(schema_drift_alert_sent(sheet, "shape-b"))
 
+    def test_alert_digest_can_be_marked_without_todays_snapshot(self):
+        sheet = FakeHistorySheet([
+            ["Date", "Schema_Drift_Alert_Marker"],
+            ["2026-08-23", "{}"],
+        ])
+        mark_schema_drift_alert_sent(sheet, "2026-08-24", "blocked-a", "2026-08-24T05:40:00+08:00")
+        self.assertTrue(schema_drift_alert_sent(sheet, "blocked-a"))
+
 
 if __name__ == "__main__":
     unittest.main()
