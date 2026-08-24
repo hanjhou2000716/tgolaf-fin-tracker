@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
+import hashlib
+import json
 import re
 from typing import Sequence
 from uuid import UUID, NAMESPACE_URL, uuid5
@@ -137,9 +139,167 @@ LEGACY_SCHEMA = "LEGACY"
 LEGACY_COMPACT_SCHEMA = "LEGACY_COMPACT"
 UNKNOWN_SCHEMA = "UNKNOWN"
 
+# Headers emitted by Google Forms are transport metadata, not accounting
+# fields.  Keep this list deliberately small: unknown headers which look like
+# transaction data remain fail-closed, while harmless response metadata can be
+# added without breaking ingestion.
+NON_TRANSACTION_HEADER_HINTS = (
+    "responseid",
+    "rownumber",
+    "序號",
+    "編號",
+    "回覆編號",
+    "回覆時間",
+    "提交者姓名",
+    "name",
+    "notes",
+    "備註",
+    "comment",
+)
+
+SIMPLE_SCHEMA_ALIASES = {
+    "timestamp": ("Timestamp", "提交時間"),
+    "email": ("Email Address", "Email", "提交者 Email"),
+    "transaction_type": ("交易類型", "交易類型（標的＋動作）", "simple_transaction_type"),
+    "unit": ("交易單位", "transaction_unit"),
+    "quantity": ("交易數量", "transaction_quantity"),
+}
+
 
 def _has_any_normalized(normalized: set[str], aliases: Sequence[str]) -> bool:
     return any(_normalize_header(alias) in normalized for alias in aliases)
+
+
+def _schema_header_candidates(schema: str | None = None) -> dict[str, tuple[str, ...]]:
+    """Return schema-specific aliases without importing simple_transaction."""
+    if schema == CURRENT_FORM_SCHEMA:
+        aliases = dict(SIMPLE_SCHEMA_ALIASES)
+        # Keep optional legacy metadata recognized as harmless extras, while
+        # giving the current Form's labels their own canonical names.
+        aliases.update({field: values for field, values in HEADER_ALIASES.items() if field not in aliases})
+        return aliases
+    if schema == FORM_V2_SCHEMA:
+        return dict(V2_HEADERS)
+    aliases = dict(HEADER_ALIASES)
+    aliases["description"] = COMPACT_DESCRIPTION_ALIASES
+    return aliases
+
+
+def _schema_field_for_header(header: str, schema: str | None = None) -> str | None:
+    normalized = _normalize_header(header)
+    for field, aliases in _schema_header_candidates(schema).items():
+        if normalized in {_normalize_header(alias) for alias in aliases}:
+            return field
+    return None
+
+
+def _schema_required_fields(schema: str, headers: Sequence[str]) -> tuple[str, ...]:
+    # A partially edited three-question Form is identified as CURRENT by
+    # detect_schema when all five fields exist; otherwise UNKNOWN remains
+    # fail-closed and reports the legacy required-field set.
+    if schema == CURRENT_FORM_SCHEMA:
+        return ("timestamp", "email", "transaction_type", "unit", "quantity")
+    if schema == FORM_V2_SCHEMA:
+        return ("timestamp", "email", "transaction_type", "quantity", "unit")
+    if schema == LEGACY_COMPACT_SCHEMA:
+        return ("timestamp", "email", "description")
+    return REQUIRED_FIELDS
+
+
+def analyze_schema(headers: Sequence[str], *, schema: str | None = None, row_count: int = 0) -> dict:
+    """Create a private, non-financial schema diagnostic.
+
+    Header order is intentionally excluded from the fingerprint.  A reordered
+    Google response sheet is therefore safe, while missing/ambiguous fields
+    and unknown accounting-looking headers remain fail-closed.
+    """
+    header_values = [str(value or "").strip() for value in headers]
+    detected = schema or detect_schema(header_values)
+    required = _schema_required_fields(detected, header_values)
+    fields: dict[str, list[int]] = {}
+    empty_headers = 0
+    unknown_headers: list[str] = []
+    ignored_headers: list[str] = []
+    for index, header in enumerate(header_values):
+        if not header:
+            empty_headers += 1
+            continue
+        field = _schema_field_for_header(header, detected)
+        if field:
+            fields.setdefault(field, []).append(index)
+            continue
+        normalized = _normalize_header(header)
+        if any(hint in normalized for hint in NON_TRANSACTION_HEADER_HINTS):
+            ignored_headers.append(header)
+        else:
+            unknown_headers.append(header)
+    missing = [field for field in required if field not in fields]
+    duplicate_fields = {
+        field: indexes for field, indexes in fields.items() if len(indexes) > 1
+    }
+    duplicate_required = {field: indexes for field, indexes in duplicate_fields.items() if field in required}
+    accounting_unknown = [
+        header for header in unknown_headers
+        if any(token in _normalize_header(header) for token in (
+            "交易", "資產", "標的", "代號", "數量", "單位", "幣別", "價格", "金額",
+            "action", "symbol", "quantity", "unit", "currency", "price", "amount",
+        ))
+    ]
+    safe = not missing and not duplicate_required and not accounting_unknown and detected != UNKNOWN_SCHEMA
+    canonical_mapping = {
+        field: indexes[0] for field, indexes in sorted(fields.items()) if indexes
+    }
+    fingerprint_payload = {
+        "schema": detected,
+        "required": list(required),
+        "mapping": sorted(canonical_mapping),
+        "missing": sorted(missing),
+        "duplicate": {key: len(value) for key, value in sorted(duplicate_fields.items())},
+        "unknown": sorted(_normalize_header(value) for value in accounting_unknown),
+        "ignored": sorted(_normalize_header(value) for value in ignored_headers),
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(fingerprint_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:24]
+    return {
+        "schema": detected,
+        "rowCount": max(0, int(row_count or 0)),
+        "fingerprint": fingerprint,
+        "requiredFields": list(required),
+        "canonicalMapping": canonical_mapping,
+        "missingFields": sorted(missing),
+        "duplicateFields": {key: len(value) for key, value in sorted(duplicate_fields.items())},
+        "unknownHeaders": sorted(accounting_unknown),
+        "ignoredExtraHeaders": sorted(ignored_headers),
+        "safe": safe,
+        "reason": None if safe else (
+            "missing_required_fields" if missing else
+            "duplicate_required_fields" if duplicate_required else
+            "unknown_accounting_headers" if accounting_unknown else
+            "unknown_schema"
+        ),
+    }
+
+
+def schema_drift_digest(diagnostics: Sequence[dict]) -> str:
+    """Digest only schema shape, never row values or financial payloads."""
+    unsafe = [
+        {
+            "sheet": str(item.get("sheet") or ""),
+            "schema": item.get("schema"),
+            "fingerprint": item.get("fingerprint"),
+            "reason": item.get("reason"),
+            "missing": item.get("missingFields", []),
+            "duplicate": item.get("duplicateFields", {}),
+            "unknown": item.get("unknownHeaders", []),
+        }
+        for item in diagnostics
+        if not item.get("safe", True)
+    ]
+    if not unsafe:
+        return ""
+    encoded = json.dumps(sorted(unsafe, key=lambda item: (item["sheet"], item["fingerprint"])), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
 
 
 def detect_schema(headers: Sequence[str]) -> str:
