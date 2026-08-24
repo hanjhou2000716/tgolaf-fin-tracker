@@ -6,7 +6,9 @@ from transaction_schema import (
     LEGACY_SCHEMA,
     UNKNOWN_SCHEMA,
     adapt_known_legacy_rows,
+    analyze_schema,
     detect_schema,
+    schema_drift_digest,
 )
 
 
@@ -28,6 +30,40 @@ class SchemaBoundaryTests(unittest.TestCase):
     def test_unknown_schema_never_gets_legacy_adapter(self):
         headers = ["Timestamp", "Email Address", "第 7 欄", "第 10 欄", "自由描述"]
         self.assertEqual(detect_schema(headers), UNKNOWN_SCHEMA)
+
+    def test_reordered_current_headers_are_safe_and_same_shape(self):
+        first = analyze_schema(["Timestamp", "Email Address", "交易類型", "交易單位", "交易數量"])
+        reordered = analyze_schema(["交易數量", "Email Address", "交易單位", "交易類型", "Timestamp"])
+        self.assertTrue(first["safe"])
+        self.assertTrue(reordered["safe"])
+        self.assertEqual(first["fingerprint"], reordered["fingerprint"])
+        self.assertEqual(schema_drift_digest([first, reordered]), "")
+
+    def test_known_alias_and_harmless_google_extra_are_safe(self):
+        result = analyze_schema([
+            "提交時間", "Email", "交易類型（標的＋動作）", "交易單位", "交易數量", "Response ID",
+        ])
+        self.assertTrue(result["safe"])
+        self.assertEqual(result["missingFields"], [])
+        self.assertEqual(result["ignoredExtraHeaders"], ["Response ID"])
+
+    def test_missing_or_duplicate_required_header_is_quarantined(self):
+        missing = analyze_schema(["Timestamp", "Email Address", "交易類型", "交易數量"])
+        duplicate = analyze_schema([
+            "Timestamp", "Email Address", "交易類型", "交易單位", "交易數量", "交易數量",
+        ])
+        self.assertFalse(missing["safe"])
+        self.assertIn("unit", missing["missingFields"])
+        self.assertFalse(duplicate["safe"])
+        self.assertIn("quantity", duplicate["duplicateFields"])
+        self.assertTrue(schema_drift_digest([missing]))
+
+    def test_unknown_accounting_header_is_not_silently_accepted(self):
+        result = analyze_schema([
+            "Timestamp", "Email Address", "交易類型", "交易單位", "交易數量", "新交易金額欄位",
+        ])
+        self.assertFalse(result["safe"])
+        self.assertEqual(result["reason"], "unknown_accounting_headers")
 
 
 if __name__ == "__main__":
