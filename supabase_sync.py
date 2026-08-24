@@ -52,6 +52,55 @@ _LEGACY_MARKERS = frozenset({
 })
 _FINGERPRINT_VERSION = "2"
 
+_REQUIRED_INVENTORY_BUCKETS = frozenset({
+    "台股", "美股", "基金", "現金_TWD", "現金_USD", "質押負債", "質押利率", "擔保品",
+})
+
+
+def _inventory_has_value(inventory: dict) -> bool:
+    """Return whether a snapshot contains any positive portfolio state.
+
+    A private snapshot with an empty inventory is not a recoverable LKG.  This
+    deliberately ignores history arrays and metadata so a stale/empty payload
+    cannot be mistaken for a valid portfolio merely because it has a schema.
+    """
+    # Debt and pledge-rate metadata are not assets.  Treating either as a
+    # positive value would make a zero-portfolio snapshot look recoverable.
+    asset_buckets = {"台股", "美股", "基金", "現金_TWD", "現金_USD", "擔保品"}
+    for bucket in asset_buckets:
+        values = inventory.get(bucket, {})
+        candidates = list(values.values()) if isinstance(values, dict) else [values]
+        for value in candidates:
+            try:
+                if float(value) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
+
+
+def _valid_private_snapshot_payload(payload: dict) -> bool:
+    """Validate the minimum safety contract for LKG and snapshot writes."""
+    if not isinstance(payload, dict):
+        return False
+    status = str(payload.get("status") or "").strip().lower()
+    if status != "ok":
+        return False
+    inventory = payload.get("portfolio", {}).get("inventory") if isinstance(payload.get("portfolio"), dict) else None
+    if inventory is None:
+        inventory = payload.get("inventory")
+    if not isinstance(inventory, dict) or not _REQUIRED_INVENTORY_BUCKETS.issubset(inventory):
+        return False
+    portfolio = payload.get("portfolio") if isinstance(payload.get("portfolio"), dict) else {}
+    total_asset = portfolio.get("totalAsset")
+    if total_asset is not None:
+        try:
+            if float(total_asset) <= 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return _inventory_has_value(inventory)
+
 
 def _is_derived_price(payload: dict) -> bool:
     """Return whether price was supplied by settlement quote enrichment.
@@ -462,6 +511,12 @@ def upload_private_snapshot(path: str, *, session=None) -> str:
     generated_at = snapshot.get("generatedAt")
     if not generated_at:
         raise ValueError("Private snapshot is missing generatedAt")
+    if not _valid_private_snapshot_payload(snapshot):
+        # Never replace a known-good row with an empty/degraded result.  This
+        # is intentionally non-fatal so the public Demo can still deploy and
+        # the caller can emit a deduplicated operational warning.
+        print("Supabase private snapshot write blocked; invalid or zero portfolio")
+        return "blocked"
     body = {"user_id": config["user_id"], "generated_at": generated_at, "payload": snapshot}
     headers = {
         "apikey": config["service_role_key"],
@@ -503,7 +558,10 @@ def load_private_snapshot(*, session=None) -> dict | None:
             "user_id": f"eq.{config['user_id']}",
             "select": "generated_at,payload",
             "order": "generated_at.desc",
-            "limit": "1",
+            # Normally the table is one row per user.  Read a small history
+            # window as a recovery fallback so an invalid/zero latest row
+            # cannot hide an older validated LKG if legacy rows exist.
+            "limit": "25",
         },
         timeout=20,
     )
@@ -511,16 +569,19 @@ def load_private_snapshot(*, session=None) -> dict | None:
         return None
     response.raise_for_status()
     rows = response.json()
-    if not rows:
+    if not isinstance(rows, list):
         return None
-    row = rows[0] if isinstance(rows[0], dict) else {}
-    payload = row.get("payload")
-    if not isinstance(payload, dict):
-        return None
-    return {
-        "generated_at": row.get("generated_at") or payload.get("generatedAt"),
-        "payload": payload,
-    }
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        payload = row.get("payload")
+        if not isinstance(payload, dict) or not _valid_private_snapshot_payload(payload):
+            continue
+        return {
+            "generated_at": row.get("generated_at") or payload.get("generatedAt"),
+            "payload": payload,
+        }
+    return None
 
 
 def upload_private_transactions(transactions, *, session=None) -> str:

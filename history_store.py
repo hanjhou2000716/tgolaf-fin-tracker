@@ -143,6 +143,12 @@ def mark_ledger_conflict_alert_sent(history_sheet, snapshot_date, digest, sent_a
         return
     row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
     if row_number is None:
+        # A blocked refresh intentionally does not create today's History
+        # snapshot.  Keep the digest durable by attaching it to the latest
+        # existing data row instead of losing deduplication across runs.
+        rows = history_sheet.get_all_values()
+        row_number = len(rows) if len(rows) > 1 else None
+    if row_number is None:
         return
     row = history_sheet.row_values(row_number)
     raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
@@ -190,6 +196,9 @@ def _mark_alert_digest(history_sheet, snapshot_date, digest, sent_at, marker_nam
     if not marker_column:
         return
     row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
+    if row_number is None:
+        rows = history_sheet.get_all_values()
+        row_number = len(rows) if len(rows) > 1 else None
     if row_number is None:
         return
     row = history_sheet.row_values(row_number)

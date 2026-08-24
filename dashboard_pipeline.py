@@ -75,6 +75,28 @@ TRANSIENT_SHEETS_STATUS = frozenset({429, 500, 502, 503, 504})
 # Populated by calculate_current_assets for the private output assembly.  It
 # avoids changing the long-standing four-value compatibility return contract.
 LAST_SCHEMA_DIAGNOSTICS = []
+LAST_REFRESH_CONTROL = {
+    "state": "READY",
+    "reasonCode": None,
+    "schemaDigest": None,
+    "lkgFound": False,
+    "lkgValid": False,
+    "lkgGeneratedAt": None,
+}
+
+
+def _refresh_block_digest(control: dict) -> str:
+    """Create a non-financial digest for one refresh-block condition."""
+    shape = {
+        "state": control.get("state"),
+        "reasonCode": control.get("reasonCode"),
+        "schemaDigest": control.get("schemaDigest"),
+        "lkgFound": bool(control.get("lkgFound")),
+        "lkgValid": bool(control.get("lkgValid")),
+    }
+    return hashlib.sha256(
+        json.dumps(shape, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:24]
 
 
 def open_spreadsheets_with_retry(client, *, attempts=4, sleep=time.sleep):
@@ -225,6 +247,11 @@ def _serialize_inventory(inventory):
 def _inventory_from_lkg(payload):
     """Validate and restore a previously serialized canonical inventory."""
     raw = payload.get("inventory") if isinstance(payload, dict) else None
+    if raw is None and isinstance(payload, dict) and isinstance(payload.get("portfolio"), dict):
+        # Current private snapshots keep canonical state under portfolio;
+        # older snapshots stored it at the payload root.  Support both so a
+        # schema-drift run can actually recover the last valid inventory.
+        raw = payload["portfolio"].get("inventory")
     if not isinstance(raw, dict):
         return None
     required = {"台股", "美股", "基金", "現金_TWD", "現金_USD", "質押負債", "質押利率", "擔保品"}
@@ -245,7 +272,28 @@ def _inventory_from_lkg(payload):
     return restored
 
 
+def _inventory_has_positive_assets(inventory) -> bool:
+    """Return whether an inventory has a positive asset bucket.
+
+    Pledge principal and rate history are liabilities/metadata, not evidence
+    that a portfolio was successfully loaded.
+    """
+    if not isinstance(inventory, dict):
+        return False
+    for bucket in ("台股", "美股", "基金", "現金_TWD", "現金_USD", "擔保品"):
+        values = inventory.get(bucket, {})
+        candidates = values.values() if isinstance(values, dict) else (values,)
+        for value in candidates:
+            try:
+                if float(value) > 0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
+
+
 def calculate_current_assets():
+    global LAST_SCHEMA_DIAGNOSTICS, LAST_REFRESH_CONTROL
     creds_dict = json.loads(GCP_CREDENTIALS_JSON)
     scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
@@ -276,7 +324,7 @@ def calculate_current_assets():
                 schema_version = detect_schema(rows[0])
                 schema_versions.append(schema_version)
                 schema_diagnostic = analyze_schema(
-                    rows[0], schema=schema_version, row_count=len(rows) - 1
+                    rows[0], schema=schema_version, row_count=len(rows) - 1, rows=rows[1:]
                 )
                 schema_diagnostic["sheet"] = ws.title
                 schema_diagnostics.append(schema_diagnostic)
@@ -407,15 +455,36 @@ def calculate_current_assets():
 
     lkg_snapshot = None
     lkg_inventory = None
+    refresh_control = {
+        "state": "READY",
+        "reasonCode": None,
+        "schemaDigest": schema_digest or None,
+        "lkgFound": False,
+        "lkgValid": False,
+        "lkgGeneratedAt": None,
+    }
     if schema_drift_detected:
-        lkg_snapshot = load_private_snapshot()
+        # A drifted response sheet is never merged with a partial/empty batch.
+        # Read only a validated LKG; otherwise the refresh is blocked and the
+        # caller must not publish an empty inventory.
+        try:
+            lkg_snapshot = load_private_snapshot()
+        except Exception as error:
+            # A private snapshot read failure is itself a blocked refresh;
+            # never fall through to a publishable empty inventory.
+            print(f"Private LKG read unavailable; refresh blocked ({type(error).__name__})")
+            lkg_snapshot = None
+        refresh_control["lkgFound"] = bool(lkg_snapshot)
         if lkg_snapshot:
             lkg_inventory = _inventory_from_lkg(lkg_snapshot.get("payload", {}))
-        if lkg_inventory is not None and not data_rows:
-            # A header-level drift invalidates the whole new batch.  Do not
-            # combine an empty/invalid batch with the previous canonical
-            # state.  Valid sheets are still allowed to continue below.
-            data_rows = []
+            refresh_control["lkgGeneratedAt"] = lkg_snapshot.get("generated_at")
+        refresh_control["lkgValid"] = lkg_inventory is not None
+        refresh_control["state"] = "BLOCKED_SCHEMA_DRIFT"
+        refresh_control["reasonCode"] = "SCHEMA_DRIFT" if lkg_inventory is not None else "BLOCKED_SNAPSHOT_UNAVAILABLE"
+        # Do not apply rows from a sheet whose header contract is unsafe.  The
+        # prior valid snapshot remains the sole source for any read-only
+        # calculations during this blocked run.
+        data_rows = []
     inventory = lkg_inventory or _empty_inventory()
     symbol_overrides = {'6208': '006208', '403A': '00403A', '886': '00886', '895': '00895', '878': '00878', '685L': '00685L'}
     known_symbols = ['6208', '006208', '403A', '00403A', '886', '00886', '895', '00895', '878', '00878', '3455', '8033', '2330', '3665', '685L', '00685L', 'QQQM', 'NVDA', 'SPYG', 'TSM', 'VOO', 'VTI', 'TSLA', 'AAPL', 'QQQ', 'FUND', 'TWD', 'USD', 'CURRENT_DEBT', 'RATE']
@@ -550,8 +619,8 @@ def calculate_current_assets():
         "reconciliationEvents": reconciliation_events,
         "ledgerAudit": ledger_audit,
     })
-    global LAST_SCHEMA_DIAGNOSTICS
     LAST_SCHEMA_DIAGNOSTICS = schema_diagnostics
+    LAST_REFRESH_CONTROL = refresh_control
     return inventory, history_sheet, accepted_transactions, ledger_sync_result
 
 # ==========================================
@@ -608,6 +677,7 @@ def main():
     display_date = tw_now.strftime("%m/%d")
         
     inventory, history_sheet, accepted_transactions, ledger_sync_result = calculate_current_assets()
+    refresh_control = copy.deepcopy(LAST_REFRESH_CONTROL)
     sync_conflicts = tuple(getattr(ledger_sync_result, "conflicts", ()))
     sync_replays = tuple(getattr(ledger_sync_result, "replays", ()))
     derived_price_replays = tuple(getattr(ledger_sync_result, "derived_price_replays", ()))
@@ -632,9 +702,66 @@ def main():
         except (OSError, ValueError, TypeError):
             pass
     ingestion_health = transaction_ingestion.get("ingestionHealth", {}) if isinstance(transaction_ingestion, dict) else {}
+    if refresh_control.get("state") != "READY":
+        ingestion_health = {
+            **ingestion_health,
+            "status": "BLOCKED",
+            "reasonCode": refresh_control.get("reasonCode") or refresh_control.get("state"),
+            "message": "資料更新已阻止，保留上一份正常資產快照。",
+            "refreshState": refresh_control.get("state"),
+            "lkgFound": bool(refresh_control.get("lkgFound")),
+            "lkgValid": bool(refresh_control.get("lkgValid")),
+            "lkgGeneratedAt": refresh_control.get("lkgGeneratedAt"),
+        }
+        if isinstance(transaction_ingestion, dict):
+            transaction_ingestion = {
+                **transaction_ingestion,
+                "ingestionHealth": ingestion_health,
+            }
     validate_inventory(inventory)
     validate_history_sheet(history_sheet)
     history_records = history_sheet.get_all_records()
+    if refresh_control.get("state") == "READY" and not _inventory_has_positive_assets(inventory):
+        previous_total_asset = 0.0
+        for history_row in reversed(history_records):
+            try:
+                candidate = float(str(history_row.get("Total_Asset", "")).replace(",", ""))
+            except (TypeError, ValueError):
+                continue
+            if candidate > 0:
+                previous_total_asset = candidate
+                break
+        if previous_total_asset > 0:
+            try:
+                zero_lkg = load_private_snapshot()
+            except Exception as error:
+                print(f"Private zero-result LKG read unavailable; refresh blocked ({type(error).__name__})")
+                zero_lkg = None
+            zero_inventory = _inventory_from_lkg(zero_lkg.get("payload", {})) if zero_lkg else None
+            refresh_control.update({
+                "state": "BLOCKED_ZERO_RESULT",
+                "reasonCode": "BLOCKED_ZERO_RESULT",
+                "lkgFound": bool(zero_lkg),
+                "lkgValid": zero_inventory is not None,
+                "lkgGeneratedAt": zero_lkg.get("generated_at") if zero_lkg else None,
+            })
+            if zero_inventory is not None:
+                inventory = zero_inventory
+            ingestion_health = {
+                **ingestion_health,
+                "status": "BLOCKED",
+                "reasonCode": "BLOCKED_ZERO_RESULT",
+                "message": "資料更新已阻止，保留上一份正常資產快照。",
+                "refreshState": "BLOCKED_ZERO_RESULT",
+                "lkgFound": bool(zero_lkg),
+                "lkgValid": zero_inventory is not None,
+                "lkgGeneratedAt": zero_lkg.get("generated_at") if zero_lkg else None,
+            }
+            if isinstance(transaction_ingestion, dict):
+                transaction_ingestion = {
+                    **transaction_ingestion,
+                    "ingestionHealth": ingestion_health,
+                }
     etf_nvda_weights = {symbol: get_etf_nvda_weight(symbol, history_records) for symbol in ETF_NVDA_WEIGHT_FALLBACKS}
         
     fx_quote = get_usd_twd_quote()
@@ -709,6 +836,39 @@ def main():
     total_debt = debt + accumulated_interest
     total_asset = tw_stock_value + us_stock_value_twd + total_cash_twd + fund_value
     net_asset = total_asset - total_debt
+
+    # A zero result after a previously non-zero history is never a valid
+    # settlement.  Keep the run green for the public Demo, but block private
+    # snapshot/history/Telegram updates so an outage cannot look like -100%.
+    previous_total_asset = 0.0
+    for history_row in reversed(history_records):
+        try:
+            candidate = float(str(history_row.get("Total_Asset", "")).replace(",", ""))
+        except (TypeError, ValueError):
+            continue
+        if candidate > 0:
+            previous_total_asset = candidate
+            break
+    if refresh_control.get("state") == "READY" and total_asset <= 0 and previous_total_asset > 0:
+        refresh_control.update({
+            "state": "BLOCKED_ZERO_RESULT",
+            "reasonCode": "BLOCKED_ZERO_RESULT",
+            "lkgFound": False,
+            "lkgValid": False,
+        })
+        ingestion_health = {
+            **ingestion_health,
+            "status": "BLOCKED",
+            "reasonCode": "BLOCKED_ZERO_RESULT",
+            "message": "資料更新已阻止，計算結果為零且上一份快照仍有資產。",
+            "refreshState": "BLOCKED_ZERO_RESULT",
+        }
+        if isinstance(transaction_ingestion, dict):
+            transaction_ingestion = {
+                **transaction_ingestion,
+                "ingestionHealth": ingestion_health,
+            }
+    refresh_blocked = refresh_control.get("state") != "READY"
     
     invested_assets = tw_stock_value + us_stock_value_twd + fund_value
     effective_leverage = ((invested_assets + leveraged_etf_value) / net_asset) if net_asset > 0 else 0
@@ -882,8 +1042,8 @@ def main():
             marker, color = "🟰", "price-flat"
         return f'<span class="daily-inline {color}">{marker} {change["percent"]:+.2f}% · ${change["amount"]:+,.0f}</span>'
 
-    snapshot_result = "skipped"
-    if total_asset > 0:
+    snapshot_result = "blocked" if refresh_blocked else "skipped"
+    if total_asset > 0 and not refresh_blocked:
         ensure_history_columns(history_sheet, HISTORY_EXTRA_COLUMNS)
         snapshot_values = {
             "Date": tw_now.strftime("%Y-%m-%d"),
@@ -1658,13 +1818,14 @@ def main():
         },
     }
 
-    data_status = "ok" if total_asset > 0 and net_asset > 0 else "degraded"
+    data_status = "blocked" if refresh_blocked else "ok" if total_asset > 0 and net_asset > 0 else "degraded"
     status_payload = {
         "status": data_status,
         "generatedAt": tw_now.isoformat(),
         "snapshotResult": snapshot_result,
         "portfolioValueAvailable": total_asset > 0,
         "ingestionHealth": ingestion_health,
+        "refreshControl": refresh_control,
         "pipelineGeneratedAt": tw_now.isoformat(),
         "portfolioDataAsOf": ingestion_health.get("portfolioDataAsOf") or tw_now.isoformat(),
         "freshness": {
@@ -1696,18 +1857,35 @@ def main():
     # payload. Supabase Auth + RLS will replace this local handoff in P0-SEC-02.
     write_json('.private-build/data.private.json', data_for_web)
     write_json('.private-build/status.private.json', status_payload)
-    upload_private_snapshot('.private-build/data.private.json')
+    if refresh_blocked:
+        snapshot_result = "blocked"
+        print(
+            "Private refresh blocked; preserving the last valid snapshot: "
+            f"state={refresh_control.get('state')}, reason={refresh_control.get('reasonCode')}"
+        )
+    else:
+        snapshot_result = upload_private_snapshot('.private-build/data.private.json')
+    data_for_web["snapshotResult"] = snapshot_result
+    status_payload["snapshotResult"] = snapshot_result
+    write_json('.private-build/data.private.json', data_for_web)
+    write_json('.private-build/status.private.json', status_payload)
     write_public_site('public-site', tw_now.isoformat())
     # =================================
 
     # --- 判斷每日損益，動態生成推播文字 ---
-    if daily_diff >= 0:
-        msg_body = f"🚀 厲害的阿洲，今天賺了 {int(daily_diff):,} 元 (+{daily_pct:.1f}%)"
+    if refresh_blocked:
+        tg_text = (
+            "⚠️ Growth 資料更新已阻止\n"
+            "已保留上一份正常資產快照。\n"
+            f"原因：{refresh_control.get('reasonCode') or '資料來源驗證失敗'}"
+        )
     else:
-        # daily_pct 本身就是負數，所以直接顯示即可
-        msg_body = f"💸 可憐的阿洲，今天賠了 {abs(int(daily_diff)):,} 元 ({daily_pct:.1f}%)"
-
-    tg_text = f"✅ {display_date} 結算完畢！\n{msg_body}"
+        if daily_diff >= 0:
+            msg_body = f"🚀 厲害的阿洲，今天賺了 {int(daily_diff):,} 元 (+{daily_pct:.1f}%)"
+        else:
+            # daily_pct 本身就是負數，所以直接顯示即可
+            msg_body = f"💸 可憐的阿洲，今天賠了 {abs(int(daily_diff)):,} 元 ({daily_pct:.1f}%)"
+        tg_text = f"✅ {display_date} 結算完畢！\n{msg_body}"
     conflict_digest = _ledger_conflict_digest(sync_conflicts) if sync_conflicts else ""
     conflict_already_alerted = ledger_conflict_alert_sent(
         history_sheet, tw_now.strftime("%Y-%m-%d"), conflict_digest
@@ -1716,7 +1894,7 @@ def main():
     schema_already_alerted = schema_drift_alert_sent(history_sheet, schema_digest) if schema_digest else False
     conflict_alert_due = bool(sync_conflicts and not conflict_already_alerted)
     schema_alert_due = bool(schema_digest and not schema_already_alerted and not conflict_alert_due)
-    if ingestion_health.get("status") == "DEGRADED" and (conflict_alert_due or schema_alert_due or not (sync_conflicts or schema_digest)):
+    if not refresh_blocked and ingestion_health.get("status") == "DEGRADED" and (conflict_alert_due or schema_alert_due or not (sync_conflicts or schema_digest)):
         reason = ingestion_health.get("message") or ingestion_health.get("reasonCode") or "部分資料已隔離"
         tg_text += f"\n⚠️ Growth 資料輸入異常\n原因：{reason}\n有效資料仍已部署，異常資料已隔離。"
 
@@ -1739,11 +1917,16 @@ def main():
         settlement_window = "tw"
     else:
         settlement_window = None
-    notification_already_sent = (
-        settlement_notification_sent(history_sheet, snapshot_date, settlement_window)
-        if settlement_window and not FORCE_TELEGRAM
-        else False
-    )
+    refresh_digest = _refresh_block_digest(refresh_control) if refresh_blocked else ""
+    if refresh_blocked:
+        ensure_history_columns(history_sheet, ["Schema_Drift_Alert_Marker"])
+    refresh_already_alerted = schema_drift_alert_sent(history_sheet, refresh_digest) if refresh_digest else False
+    if refresh_blocked:
+        notification_already_sent = refresh_already_alerted and not FORCE_TELEGRAM
+    elif settlement_window and not FORCE_TELEGRAM:
+        notification_already_sent = settlement_notification_sent(history_sheet, snapshot_date, settlement_window)
+    else:
+        notification_already_sent = False
     if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID and settlement_window and not notification_already_sent:
         try:
             response = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
@@ -1753,15 +1936,20 @@ def main():
                 "reply_markup": keyboard,
             }, timeout=10)
             response.raise_for_status()
-            mark_settlement_notification_sent(history_sheet, snapshot_date, settlement_window, tw_now.isoformat())
-            if conflict_digest and not conflict_already_alerted:
-                mark_ledger_conflict_alert_sent(
-                    history_sheet, snapshot_date, conflict_digest, tw_now.isoformat()
-                )
-            if schema_digest and schema_alert_due:
+            if refresh_blocked:
                 mark_schema_drift_alert_sent(
-                    history_sheet, snapshot_date, schema_digest, tw_now.isoformat()
+                    history_sheet, snapshot_date, refresh_digest, tw_now.isoformat()
                 )
+            else:
+                mark_settlement_notification_sent(history_sheet, snapshot_date, settlement_window, tw_now.isoformat())
+                if conflict_digest and not conflict_already_alerted:
+                    mark_ledger_conflict_alert_sent(
+                        history_sheet, snapshot_date, conflict_digest, tw_now.isoformat()
+                    )
+                if schema_digest and schema_alert_due:
+                    mark_schema_drift_alert_sent(
+                        history_sheet, snapshot_date, schema_digest, tw_now.isoformat()
+                    )
             print(f"Telegram notification sent; window={settlement_window}, forced={FORCE_TELEGRAM}")
         except requests.RequestException as error:
             print(f"Telegram notification failed: {error}")

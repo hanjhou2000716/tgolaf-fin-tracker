@@ -206,7 +206,35 @@ def _schema_required_fields(schema: str, headers: Sequence[str]) -> tuple[str, .
     return REQUIRED_FIELDS
 
 
-def analyze_schema(headers: Sequence[str], *, schema: str | None = None, row_count: int = 0) -> dict:
+def _duplicate_headers_are_row_disjoint(fields: dict[str, list[int]], required: Sequence[str], rows: Sequence[Sequence[str]]) -> bool:
+    """Accept a known mixed response sheet only when duplicate columns are unambiguous.
+
+    Google Forms keeps old questions in a response sheet after a form is
+    edited.  A duplicated required header is safe when each row populates at
+    most one candidate for that field; a row that fills two candidates remains
+    quarantined because there is no deterministic accounting source.
+    """
+    duplicate_required = [field for field in required if len(fields.get(field, [])) > 1]
+    if not duplicate_required or not rows:
+        return False
+    for row in rows:
+        for field in duplicate_required:
+            populated = [
+                index for index in fields[field]
+                if index < len(row) and str(row[index]).strip()
+            ]
+            if len(populated) > 1:
+                return False
+    return True
+
+
+def analyze_schema(
+    headers: Sequence[str],
+    *,
+    schema: str | None = None,
+    row_count: int = 0,
+    rows: Sequence[Sequence[str]] | None = None,
+) -> dict:
     """Create a private, non-financial schema diagnostic.
 
     Header order is intentionally excluded from the fingerprint.  A reordered
@@ -245,7 +273,8 @@ def analyze_schema(headers: Sequence[str], *, schema: str | None = None, row_cou
             "action", "symbol", "quantity", "unit", "currency", "price", "amount",
         ))
     ]
-    safe = not missing and not duplicate_required and not accounting_unknown and detected != UNKNOWN_SCHEMA
+    duplicate_resolved = _duplicate_headers_are_row_disjoint(fields, required, rows or ())
+    safe = not missing and (not duplicate_required or duplicate_resolved) and not accounting_unknown and detected != UNKNOWN_SCHEMA
     canonical_mapping = {
         field: indexes[0] for field, indexes in sorted(fields.items()) if indexes
     }
@@ -269,6 +298,7 @@ def analyze_schema(headers: Sequence[str], *, schema: str | None = None, row_cou
         "canonicalMapping": canonical_mapping,
         "missingFields": sorted(missing),
         "duplicateFields": {key: len(value) for key, value in sorted(duplicate_fields.items())},
+        "duplicateResolved": duplicate_resolved,
         "unknownHeaders": sorted(accounting_unknown),
         "ignoredExtraHeaders": sorted(ignored_headers),
         "safe": safe,
