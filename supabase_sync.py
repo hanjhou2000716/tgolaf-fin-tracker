@@ -621,12 +621,17 @@ def upload_private_transactions(transactions, *, session=None) -> str:
         headers=headers,
         params={
             "user_id": f"eq.{config['user_id']}",
-            "select": "transaction_id,payload",
+            "select": "transaction_id,source_row_id,payload",
         },
         timeout=20,
     )
     response.raise_for_status()
     existing = {str(row["transaction_id"]): row.get("payload", {}) for row in response.json()}
+    existing_source_rows = {
+        str(row.get("source_row_id")): row.get("payload", {})
+        for row in response.json()
+        if row.get("source_row_id")
+    }
     existing_by_fingerprint = {}
     existing_by_derived_core = {}
     existing_by_legacy_derived_core = {}
@@ -829,6 +834,92 @@ def upload_private_transactions(transactions, *, session=None) -> str:
             json=rows,
             timeout=20,
         )
+        if getattr(insert_response, "status_code", 200) == 409:
+            # PostgREST can reject a mixed batch when one row collides with a
+            # remote unique/immutable constraint.  A batch-level 409 must not
+            # discard otherwise valid rows (nor abort the dashboard build).
+            # Retry one row at a time and quarantine only the row that still
+            # cannot be appended.  No existing ledger payload is overwritten.
+            print("Supabase batch append returned HTTP 409; retrying rows individually")
+            uploaded_count = 0
+
+            def resolve_remote_row(row):
+                row_payload = row["payload"]
+                tx_id = str(row["transaction_id"])
+                source_id = str(row["source_row_id"])
+                lookup = existing.get(tx_id) or existing_source_rows.get(source_id)
+                if lookup is None:
+                    # A 409 without a readable matching row is still safely
+                    # quarantined.  Keep the full payload private for audit,
+                    # but never pretend it was accepted.
+                    return None
+                if lookup == row_payload or transaction_fingerprint(lookup) == row_payload.get("source_fingerprint"):
+                    return _replay_record(row_payload, tx_id)
+                if _derived_price_replay(lookup, row_payload) or _legacy_mixed_derived_price_replay(lookup, row_payload):
+                    replay = _replay_record(row_payload, tx_id)
+                    replay.update({
+                        "classification": "REPLAY_DERIVED_PRICE",
+                        "reason": "remote_duplicate_settlement_quote",
+                        "ignored_derived_fields": ["price"],
+                    })
+                    return replay
+                return _conflict_record(row_payload, lookup, matched_id=tx_id)
+
+            for row in rows:
+                single_response = http.post(
+                    f"{config['url']}/rest/v1/portfolio_transactions",
+                    headers=insert_headers,
+                    json=[row],
+                    timeout=20,
+                )
+                status_code = getattr(single_response, "status_code", 200)
+                if status_code != 409:
+                    single_response.raise_for_status()
+                    uploaded_count += 1
+                    continue
+                resolved = resolve_remote_row(row)
+                if resolved is None:
+                    conflicts.append({
+                        "transaction_id": str(row["transaction_id"]),
+                        "source_row_id": str(row["source_row_id"]),
+                        "reason": "immutable_ledger_insert_conflict",
+                        "detail": "Supabase 拒絕追加該列；既有資料未覆寫，該列已隔離。",
+                        "classification": "CONFLICT",
+                        "matched_existing_transaction_id": str(row["transaction_id"]),
+                        "changed_fields": [],
+                        "metadata_changed_fields": [],
+                        "source_row_id_changed": False,
+                        "compatibility_marker_previous": "unknown",
+                        "compatibility_marker_current": _marker_class(row["payload"].get("compatibility_used")),
+                        "existing_payload": {},
+                        "current_payload": row_payload,
+                    })
+                    conflict_report.append(conflicts[-1])
+                elif resolved.get("classification") == "CONFLICT":
+                    conflicts.append(resolved)
+                    conflict_report.append(resolved)
+                else:
+                    replays.append(resolved)
+                    if resolved.get("classification") == "REPLAY_DERIVED_PRICE":
+                        derived_price_replays.append(resolved)
+            conflict_summary = _conflict_summary(conflict_report, replays)
+            if conflicts:
+                print(f"Supabase immutable ledger conflicts quarantined: {len(conflicts)}")
+            if replays:
+                print(f"Supabase ledger replays accepted: {len(replays)}")
+            if derived_price_replays:
+                print(f"Supabase derived price replays accepted: {len(derived_price_replays)}")
+            status = "degraded" if conflicts else "uploaded"
+            return TransactionSyncResult(
+                status,
+                conflicts=conflicts,
+                replays=replays,
+                derived_price_replays=derived_price_replays,
+                conflict_report=conflict_report,
+                conflict_summary=conflict_summary,
+                uploaded=uploaded_count,
+                unchanged=len(replays),
+            )
         insert_response.raise_for_status()
         print(f"Supabase transactions appended: {len(missing)}")
         status = "degraded" if conflicts else "uploaded"
