@@ -67,6 +67,7 @@ GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
 FORCE_TELEGRAM = os.getenv("FORCE_TELEGRAM", "false").strip().lower() in {"1", "true", "yes", "on"}
 FORM_SCHEMA_STRICT = os.getenv("FORM_SCHEMA_STRICT", "true").strip().lower() in {"1", "true", "yes", "on"}
 FORM_SCHEMA_LEGACY_COMPAT = os.getenv("FORM_SCHEMA_LEGACY_COMPAT", "false").strip().lower() in {"1", "true", "yes", "on"}
+FORM_MISSING_EMAIL_COMPAT = os.getenv("FORM_MISSING_EMAIL_COMPAT", "false").strip().lower() in {"1", "true", "yes", "on"}
 WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/private/"
 
 
@@ -352,6 +353,11 @@ def calculate_current_assets():
                         parsed = parse_transaction_rows(
                             rows[0], rows[1:], source_sheet=ws.title,
                             existing_ids=seen_transaction_ids,
+                            allow_missing_email_compat=(
+                                FORM_MISSING_EMAIL_COMPAT
+                                and schema_version == "CURRENT"
+                                and "email" not in schema_diagnostic.get("canonicalMapping", {})
+                            ),
                         )
                         # Mixed response sheets are recovered row-by-row.  A
                         # malformed historical row is quarantined, but must

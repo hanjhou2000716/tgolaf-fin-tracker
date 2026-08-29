@@ -24,7 +24,7 @@ from transaction_schema import (
 
 
 SIMPLE_HEADER_ALIASES = {
-    "timestamp": ("Timestamp", "提交時間"),
+    "timestamp": ("Timestamp", "提交時間", "時間戳記"),
     "email": ("Email Address", "Email", "提交者 Email"),
     "transaction_type": ("交易類型", "交易類型（標的＋動作）", "simple_transaction_type"),
     "unit": ("交易單位", "transaction_unit"),
@@ -100,9 +100,23 @@ def _mapping(headers) -> dict[str, int]:
 
 
 def is_simple_form_headers(headers) -> bool:
-    """Return true only for the new explicit three-question header shape."""
+    """Return true for the explicit three-question response shape.
+
+    Email Address is transport metadata and may be absent on an older Form;
+    a separate, explicitly enabled recovery flag controls whether such rows
+    may be accepted.
+    """
     mapping = _mapping(headers)
-    return all(field in mapping for field in ("timestamp", "email", "transaction_type", "unit", "quantity"))
+    required = ("timestamp", "transaction_type", "unit", "quantity")
+    if not all(field in mapping for field in required):
+        return False
+    normalized = {_normalize_header(value) for value in headers}
+    # Explicit question labels identify the current branch even when the
+    # response sheet still retains older V2 columns beside it.
+    if _normalize_header("交易單位") in normalized and _normalize_header("交易數量") in normalized:
+        return True
+    v2_markers = ("市場", "資產代號", "價格", "幣別", "交易日期", "金額", "market", "symbol", "price", "currency")
+    return not any(_normalize_header(marker) in normalized for marker in v2_markers)
 
 
 def _value(row, mapping: dict[str, int], field: str) -> str:
@@ -190,6 +204,7 @@ def parse_simple_transaction_rows(
     *,
     source_sheet: str,
     existing_ids: set[str] | None = None,
+    allow_missing_email_compat: bool = False,
 ) -> TransactionParseResult:
     """Parse one-page form responses into canonical transactions."""
     mapping = _mapping(headers)
@@ -209,6 +224,10 @@ def parse_simple_transaction_rows(
                 raise ValueError("duplicate_transaction_id")
             submitted_at = _value(row, mapping, "timestamp")
             email = _value(row, mapping, "email")
+            compatibility_used = None
+            if not email and allow_missing_email_compat:
+                email = "form-compatibility@local.invalid"
+                compatibility_used = "current_simple_form_missing_email"
             if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
                 raise ValueError("submitter_email is invalid")
             transaction_date = _parse_date(submitted_at)
@@ -244,6 +263,7 @@ def parse_simple_transaction_rows(
                 quantity=quantity,
                 unit=transaction_unit,
                 currency=currency,
+                compatibility_used=compatibility_used,
             )
             seen.add(transaction_id)
             if not approved:

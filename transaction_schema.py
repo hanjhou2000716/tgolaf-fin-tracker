@@ -158,7 +158,7 @@ NON_TRANSACTION_HEADER_HINTS = (
 )
 
 SIMPLE_SCHEMA_ALIASES = {
-    "timestamp": ("Timestamp", "提交時間"),
+    "timestamp": ("Timestamp", "提交時間", "時間戳記"),
     "email": ("Email Address", "Email", "提交者 Email"),
     "transaction_type": ("交易類型", "交易類型（標的＋動作）", "simple_transaction_type"),
     "unit": ("交易單位", "transaction_unit"),
@@ -892,6 +892,7 @@ def parse_transaction_rows(
     *,
     source_sheet: str,
     existing_ids: set[str] | None = None,
+    allow_missing_email_compat: bool = False,
 ) -> TransactionParseResult:
     normalized_headers = {_normalize_header(value): index for index, value in enumerate(headers)}
     # A Google Form response sheet can retain the previous branch columns
@@ -907,6 +908,7 @@ def parse_transaction_rows(
             rows,
             source_sheet=source_sheet,
             existing_ids=existing_ids,
+            allow_missing_email_compat=allow_missing_email_compat,
         )
     compact_index = next(
         (normalized_headers.get(_normalize_header(alias)) for alias in COMPACT_DESCRIPTION_ALIASES
@@ -931,6 +933,7 @@ def parse_transaction_rows(
             rows,
             source_sheet=source_sheet,
             existing_ids=existing_ids,
+            allow_missing_email_compat=allow_missing_email_compat,
         )
     # Form V2 uses a compact, user-facing set of questions and therefore does
     # not expose internal UUID/approval columns.  It is checked after the
@@ -1058,6 +1061,7 @@ def _parse_mixed_form_rows(
     *,
     source_sheet: str,
     existing_ids: set[str] | None = None,
+    allow_missing_email_compat: bool = False,
 ) -> TransactionParseResult:
     """Parse a mixed response sheet without guessing across branch columns."""
     from simple_transaction import parse_simple_transaction_rows
@@ -1101,7 +1105,8 @@ def _parse_mixed_form_rows(
         use_simple = bool(type_values) and bool(unit_values or quantity_values)
         if use_simple:
             result = parse_simple_transaction_rows(
-                headers, [row], source_sheet=source_sheet, existing_ids=set()
+                headers, [row], source_sheet=source_sheet, existing_ids=set(),
+                allow_missing_email_compat=allow_missing_email_compat,
             )
         else:
             result = _parse_v2_transaction_rows(

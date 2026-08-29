@@ -94,6 +94,38 @@ class SimpleTransactionFormTests(unittest.TestCase):
         self.assertEqual(result.rejected, ())
         self.assertEqual([item.quantity for item in result.accepted], [Decimal("100"), Decimal("3")])
 
+    def test_missing_email_requires_explicit_compatibility_recovery(self):
+        headers = ["Timestamp", "交易類型", "交易單位", "交易數量"]
+        values = ["2026-08-29T20:55:24+08:00", "006208 買入", "股", "300"]
+        rejected = parse_transaction_rows(headers, [values], source_sheet="表單回覆 3")
+        self.assertEqual(rejected.accepted, ())
+        self.assertIn("submitter_email", rejected.rejected[0].detail)
+        recovered = parse_transaction_rows(
+            headers, [values], source_sheet="表單回覆 3",
+            allow_missing_email_compat=True,
+        )
+        self.assertEqual(recovered.rejected, ())
+        self.assertEqual(recovered.accepted[0].action, Action.BUY)
+        self.assertEqual(recovered.accepted[0].symbol, "006208")
+        self.assertEqual(recovered.accepted[0].quantity, Decimal("300"))
+        self.assertEqual(recovered.accepted[0].unit, "SHARE")
+        self.assertEqual(recovered.accepted[0].compatibility_used, "current_simple_form_missing_email")
+
+    def test_missing_email_compatibility_recovers_cash_replacement(self):
+        headers = ["Timestamp", "交易類型", "交易單位", "交易數量"]
+        values = ["2026-08-29T20:56:56+08:00", "現金 取代", "台幣", "78000"]
+        result = parse_transaction_rows(
+            headers, [values], source_sheet="表單回覆 3",
+            allow_missing_email_compat=True,
+        )
+        self.assertEqual(result.rejected, ())
+        transaction = result.accepted[0]
+        self.assertEqual(transaction.action, Action.SET_BALANCE)
+        self.assertEqual(transaction.asset_type, "現金_TWD")
+        self.assertEqual(transaction.symbol, "TWD")
+        self.assertEqual(transaction.quantity, Decimal("78000"))
+        self.assertEqual(transaction.unit, "TWD")
+
 
 if __name__ == "__main__":
     unittest.main()

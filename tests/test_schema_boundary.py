@@ -1,4 +1,5 @@
 import unittest
+from decimal import Decimal
 
 from transaction_schema import (
     CURRENT_FORM_SCHEMA,
@@ -17,6 +18,10 @@ from transaction_schema import (
 class SchemaBoundaryTests(unittest.TestCase):
     def test_current_three_question_form_is_explicit(self):
         headers = ["Timestamp", "Email Address", "交易類型", "交易單位", "交易數量"]
+        self.assertEqual(detect_schema(headers), CURRENT_FORM_SCHEMA)
+
+    def test_current_three_question_form_without_email_transport_is_still_current(self):
+        headers = ["Timestamp", "交易類型", "交易單位", "交易數量"]
         self.assertEqual(detect_schema(headers), CURRENT_FORM_SCHEMA)
 
     def test_form_v2_is_not_treated_as_unknown_legacy(self):
@@ -113,6 +118,29 @@ class SchemaBoundaryTests(unittest.TestCase):
         self.assertEqual(len(result.accepted), 2)
         self.assertEqual([item.source_row_id for item in result.accepted], ["表單回覆 3:2", "表單回覆 3:3"])
         self.assertEqual([item.action for item in result.accepted], [Action.BUY, Action.BUY])
+
+    def test_production_three_question_rows_without_email_recover_by_explicit_flag(self):
+        headers = [
+            "時間戳記", "資產類別", "資產代號", "交易類型", "數量/股數/金額 (直接填正數即可)",
+            "市場", "approved", "第 7 欄", "unit", "currency", "目標餘額", "交易日期", "幣別",
+            "交易類型", "備註", "資產代號", "單位", "幣別", "備註", "數量", "價格", "金額",
+            "幣別", "交易日期", "備註", "金額", "幣別", "交易日期", "備註", "交易單位", "交易數量", "第 10 欄",
+        ]
+        buy = [""] * len(headers)
+        buy[0] = "2026/8/29 下午 8:55:24"
+        buy[13], buy[29], buy[30] = "006208 買入", "股", "300"
+        cash = [""] * len(headers)
+        cash[0] = "2026/8/29 下午 8:56:56"
+        cash[13], cash[29], cash[30] = "現金 取代", "台幣", "78000"
+        result = parse_transaction_rows(
+            headers, [buy, cash], source_sheet="表單回覆 3",
+            allow_missing_email_compat=True,
+        )
+        self.assertEqual(result.rejected, ())
+        self.assertEqual([(item.action, item.symbol, item.quantity, item.unit) for item in result.accepted], [
+            (Action.BUY, "006208", Decimal("300"), "SHARE"),
+            (Action.SET_BALANCE, "TWD", Decimal("78000"), "TWD"),
+        ])
 
 
 if __name__ == "__main__":

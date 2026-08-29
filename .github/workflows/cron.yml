@@ -10,6 +10,11 @@ on:
         required: false
         default: false
         type: boolean
+      recover_missing_email:
+        description: "One-time recovery for existing current-form rows created before email collection"
+        required: false
+        default: false
+        type: boolean
   # GitHub cron is UTC. These are Taiwan time 05:40 (Tue-Sat) and
   # 14:45 (Mon-Fri), kept as a fallback when the external Cornjob misses.
   schedule:
@@ -65,6 +70,7 @@ jobs:
           SUPABASE_PRIVATE_SYNC_REQUIRED: ${{ secrets.SUPABASE_PRIVATE_SYNC_REQUIRED || 'false' }}
           FORM_SCHEMA_STRICT: ${{ secrets.FORM_SCHEMA_STRICT || 'true' }}
           FORM_SCHEMA_LEGACY_COMPAT: ${{ secrets.FORM_SCHEMA_LEGACY_COMPAT || 'true' }}
+          FORM_MISSING_EMAIL_COMPAT: ${{ inputs.recover_missing_email || false }}
         run: python main.py
 
       - name: Upload private schema recovery summary
