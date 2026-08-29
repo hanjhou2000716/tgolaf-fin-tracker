@@ -1046,9 +1046,11 @@ def _rebase_mixed_result(
         rejected.append(RejectedTransaction(source_row_id, "duplicate_transaction_id", "duplicate_transaction_id"))
         return TransactionParseResult((), (), tuple(rejected), result.accepted_rows)
     for item in result.accepted:
-        accepted.append(replace(item, transaction_id=transaction_id, source_row_id=source_row_id))
+        preserved_id = item.transaction_id if item.compatibility_used == "current_simple_form_missing_email" else transaction_id
+        accepted.append(replace(item, transaction_id=preserved_id, source_row_id=source_row_id))
     for item in result.pending:
-        pending.append(replace(item, transaction_id=transaction_id, source_row_id=source_row_id))
+        preserved_id = item.transaction_id if item.compatibility_used == "current_simple_form_missing_email" else transaction_id
+        pending.append(replace(item, transaction_id=preserved_id, source_row_id=source_row_id))
     if accepted or pending:
         seen.add(transaction_id)
     rejected = [replace(item, source_row_id=source_row_id) for item in rejected]

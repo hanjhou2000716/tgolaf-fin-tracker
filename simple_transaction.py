@@ -220,8 +220,6 @@ def parse_simple_transaction_rows(
         source_row_id = f"{source_sheet}:{row_number}"
         transaction_id = str(uuid5(NAMESPACE_URL, source_row_id))
         try:
-            if transaction_id in seen:
-                raise ValueError("duplicate_transaction_id")
             submitted_at = _value(row, mapping, "timestamp")
             email = _value(row, mapping, "email")
             compatibility_used = None
@@ -230,6 +228,12 @@ def parse_simple_transaction_rows(
                 compatibility_used = "current_simple_form_missing_email"
             if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
                 raise ValueError("submitter_email is invalid")
+            effective_id = (
+                str(uuid5(NAMESPACE_URL, f"current-simple-compat:{source_row_id}"))
+                if compatibility_used else transaction_id
+            )
+            if transaction_id in seen or effective_id in seen:
+                raise ValueError("duplicate_transaction_id")
             transaction_date = _parse_date(submitted_at)
             subject, action = _parse_type(_value(row, mapping, "transaction_type"))
             raw_unit = _normalize_header(_value(row, mapping, "unit"))
@@ -247,6 +251,12 @@ def parse_simple_transaction_rows(
                 transaction_unit = unit
             else:
                 transaction_unit = "SHARE"
+            if compatibility_used:
+                # Older recovery attempts may already have used the plain
+                # source-row UUID with a malformed payload.  Keep the old
+                # immutable row untouched, while giving this explicitly
+                # marked canonical recovery event a deterministic namespace.
+                transaction_id = effective_id
             approved = True
             if mapping.get("approved") is not None and _value(row, mapping, "approved"):
                 approved = _parse_bool(_value(row, mapping, "approved"))
