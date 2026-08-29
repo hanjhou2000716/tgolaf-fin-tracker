@@ -1,0 +1,81 @@
+"""Private, non-financial diagnostics for immutable ledger conflicts."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+
+from supabase_sync import _action_class, _marker_class, _price_provenance, transaction_fingerprint
+
+
+def _conflict_payload_fingerprint(payload):
+    """Return a stable, one-way fingerprint for private conflict dedupe."""
+    if not isinstance(payload, dict) or not payload:
+        return "missing"
+    try:
+        return transaction_fingerprint(payload)
+    except Exception:
+        encoded = json.dumps(
+            {key: payload.get(key) for key in ("transaction_id", "action", "symbol", "quantity", "unit", "currency", "price")},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
+
+
+def ledger_conflict_digest(conflicts):
+    """Create a stable, non-sensitive digest for a conflict set."""
+    values = [
+        {
+            "transaction": hashlib.sha256(
+                str(item.get("matched_existing_transaction_id") or item.get("transaction_id") or "").encode("utf-8")
+            ).hexdigest()[:16],
+            "changed": sorted(str(field) for field in (item.get("changed_fields") or [])),
+            "before_fingerprint": _conflict_payload_fingerprint(item.get("existing_payload") or {}),
+            "after_fingerprint": _conflict_payload_fingerprint(item.get("current_payload") or {}),
+            "marker_pair": (
+                _marker_class((item.get("existing_payload") or {}).get("compatibility_used")),
+                _marker_class((item.get("current_payload") or {}).get("compatibility_used")),
+            ),
+        }
+        for item in conflicts
+    ]
+    encoded = json.dumps(
+        sorted(values, key=lambda value: (value["transaction"], value["changed"])),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
+
+
+def ledger_conflict_summary_artifact(conflicts, summary):
+    """Build non-financial private evidence for immutable conflicts."""
+    entries = []
+    for item in conflicts:
+        previous = item.get("existing_payload") or {}
+        current = item.get("current_payload") or {}
+        source_row = str(item.get("source_row_id") or "")
+        entries.append({
+            "transactionHash": hashlib.sha256(
+                str(item.get("matched_existing_transaction_id") or item.get("transaction_id") or "").encode("utf-8")
+            ).hexdigest()[:16],
+            "sourceRowHash": hashlib.sha256(source_row.encode("utf-8")).hexdigest()[:16] if source_row else None,
+            "changedFields": sorted(str(field) for field in (item.get("changed_fields") or [])),
+            "compatibilityMarkerPrevious": _marker_class(previous.get("compatibility_used")),
+            "compatibilityMarkerCurrent": _marker_class(current.get("compatibility_used")),
+            "actionPair": f"{_action_class(previous.get('action'))}->{_action_class(current.get('action'))}",
+            "priceProvenancePair": f"{_price_provenance(previous)}->{_price_provenance(current)}",
+            "sourceRowIdChanged": bool(item.get("source_row_id_changed")),
+        })
+    return {
+        "status": "CONFLICTS_PRESENT" if conflicts else "NO_CONFLICTS",
+        "conflictCount": len(conflicts),
+        "coreConflictCount": int(summary.get("coreConflictCount", len(conflicts))),
+        "changedFieldCounts": dict(summary.get("changedFieldCounts") or {}),
+        "compatibilityMarkerPairs": dict(summary.get("compatibilityMarkerPairs") or {}),
+        "priceOnlyConflictCount": int(summary.get("priceOnlyConflictCount", 0)),
+        "derivedPriceReplayCount": int(summary.get("derivedPriceReplayCount", 0)),
+        "conflicts": entries,
+    }

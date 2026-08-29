@@ -23,7 +23,13 @@ from risk import (
 from validation import validate_history_sheet, validate_inventory, validate_quote
 from asset_tree import asset_tree_metadata_summary, build_asset_tree
 from public_site import write_public_site
-from supabase_sync import load_goal_state, load_private_snapshot, save_goal_state, upload_private_snapshot, upload_private_transactions
+from supabase_sync import (
+    load_goal_state,
+    load_private_snapshot,
+    save_goal_state,
+    upload_private_snapshot,
+    upload_private_transactions,
+)
 from transaction_schema import (
     TransactionSchemaError,
     RejectedTransaction,
@@ -56,6 +62,7 @@ from history_store import (
 )
 from runtime_extensions import build_runtime_extensions
 from refresh_recovery import inventory_has_positive_assets, validate_recovery_candidate
+from ledger_conflict_diagnostics import ledger_conflict_digest, ledger_conflict_summary_artifact
 
 # ==========================================
 # 1. 環境變數與金鑰設定
@@ -175,25 +182,6 @@ def mark_settlement_notification_sent(history_sheet, snapshot_date, window_key, 
         f"{marker_a1}{row_number}",
         [[json.dumps(markers, ensure_ascii=False, separators=(",", ":"))]],
     )
-
-
-def _ledger_conflict_digest(conflicts):
-    """Create a repeatable, non-sensitive marker for a conflict set."""
-    values = [
-        {
-            "transaction_id": item.get("transaction_id"),
-            "matched": item.get("matched_existing_transaction_id"),
-            "changed": sorted(item.get("changed_fields") or []),
-            # Include before/after values in the digest so a later genuine
-            # change to the same transaction is not suppressed by an older
-            # alert marker. Only the digest is persisted to Sheets.
-            "before": item.get("existing_payload") or {},
-            "after": item.get("current_payload") or {},
-        }
-        for item in conflicts
-    ]
-    encoded = json.dumps(sorted(values, key=lambda value: (value["transaction_id"], value["matched"])), sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:24]
 
 
 def get_etf_nvda_weight(symbol, history_records):
@@ -637,6 +625,13 @@ def calculate_current_assets():
     # This file is private Actions evidence only. It is never copied into the
     # public-site directory and may contain old/new financial payloads.
     write_json(".private-build/ledger_conflicts.json", ledger_audit)
+    # Sanitized, non-financial evidence is uploaded as a separate Actions
+    # artifact so repeated conflicts can be investigated without exposing
+    # transaction amounts or complete payloads.
+    write_json(
+        ".private-build/ledger-conflict-summary.json",
+        ledger_conflict_summary_artifact(sync_conflicts, conflict_summary),
+    )
     if sync_conflicts:
         conflict_rejections = tuple(
             RejectedTransaction(
@@ -2005,7 +2000,7 @@ def main():
             # daily_pct 本身就是負數，所以直接顯示即可
             msg_body = f"💸 可憐的阿洲，今天賠了 {abs(int(daily_diff)):,} 元 ({daily_pct:.1f}%)"
         tg_text = f"✅ {display_date} 結算完畢！\n{msg_body}"
-    conflict_digest = _ledger_conflict_digest(sync_conflicts) if sync_conflicts else ""
+    conflict_digest = ledger_conflict_digest(sync_conflicts) if sync_conflicts else ""
     conflict_already_alerted = ledger_conflict_alert_sent(
         history_sheet, tw_now.strftime("%Y-%m-%d"), conflict_digest
     ) if conflict_digest else False

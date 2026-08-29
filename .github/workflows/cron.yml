@@ -83,6 +83,15 @@ jobs:
           path: .private-build/schema-recovery-summary.json
           if-no-files-found: error
 
+      - name: Upload private ledger conflict summary
+        # Non-financial conflict evidence only. Full immutable payloads stay
+        # in the private build directory and are never uploaded or published.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ledger-conflict-summary
+          path: .private-build/ledger-conflict-summary.json
+          if-no-files-found: error
+
       - name: Verify generated public Demo is sanitized
         run: |
           test -s public-site/index.html
