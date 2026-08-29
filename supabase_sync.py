@@ -892,7 +892,7 @@ def upload_private_transactions(transactions, *, session=None) -> str:
                         "compatibility_marker_previous": "unknown",
                         "compatibility_marker_current": _marker_class(row["payload"].get("compatibility_used")),
                         "existing_payload": {},
-                        "current_payload": row_payload,
+                        "current_payload": row["payload"],
                     })
                     conflict_report.append(conflicts[-1])
                 elif resolved.get("classification") == "CONFLICT":
