@@ -257,6 +257,7 @@ def parse_simple_transaction_rows(
                 # immutable row untouched, while giving this explicitly
                 # marked canonical recovery event a deterministic namespace.
                 transaction_id = effective_id
+                source_row_id = f"{source_row_id}#current-simple-compat"
             approved = True
             if mapping.get("approved") is not None and _value(row, mapping, "approved"):
                 approved = _parse_bool(_value(row, mapping, "approved"))
