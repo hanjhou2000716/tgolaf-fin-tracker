@@ -57,6 +57,26 @@ class LedgerConflictDiagnosticsTests(unittest.TestCase):
         changed = {**conflict, "current_payload": {**after, "quantity": "101"}, "changed_fields": ["price", "quantity"]}
         self.assertNotEqual(ledger_conflict_digest([conflict]), ledger_conflict_digest([changed]))
 
+    def test_legacy_serialization_variants_keep_same_digest(self):
+        before = _payload(price="100", marker="legacy_mixed_form_row")
+        after = {
+            **before,
+            "action": "買入",
+            "unit": " share ",
+            "currency": "twd",
+            "transaction_date": "2026/08/29",
+            "compatibility_used": " LEGACY_MIXED_FORM_ROW ",
+        }
+        conflict = {
+            "transaction_id": before["transaction_id"],
+            "matched_existing_transaction_id": before["transaction_id"],
+            "source_row_id": before["source_row_id"],
+            "changed_fields": ["action", "transaction_date", "unit", "currency"],
+            "existing_payload": before,
+            "current_payload": after,
+        }
+        self.assertEqual(ledger_conflict_digest([conflict]), ledger_conflict_digest([{**conflict, "current_payload": before}]))
+
 
 if __name__ == "__main__":
     unittest.main()
