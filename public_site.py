@@ -318,6 +318,18 @@ def write_public_site(directory: str, generated_at: str) -> None:
     function_url = os.getenv("SUPABASE_FUNCTION_URL", "").strip()
     config = json.dumps({"url": supabase_url, "functionUrl": function_url}, ensure_ascii=True)
     private_html = TELEGRAM_PRIVATE_HTML_TEMPLATE.replace("__SUPABASE_CONFIG__", config)
+    treemap_metadata_script = r"""
+  const formatShares = (value) => { const n=Number(value); return Number.isFinite(n)&&n>0 ? n.toLocaleString('zh-TW',{maximumFractionDigits:6}) : ''; };
+  const assetTreeLeaves = (node, output=new Map()) => { if(!node)return output; if(node.kind==='leaf' || !(node.children||[]).length){ output.set(String(node.label||''),node); return output; } (node.children||[]).forEach((child)=>assetTreeLeaves(child,output)); return output; };
+  const enhanceTreemapMetadata = (body) => {
+    const root=body?.data?.portfolio?.assetTree; if(!root)return;
+    const leaves=assetTreeLeaves(root); const rootValue=Number(root.value||0);
+    if(!document.getElementById('treemap-share-metadata-style')){ const style=document.createElement('style'); style.id='treemap-share-metadata-style'; style.textContent='.tree-node .shares,.tree-node .collateral{display:block;margin-top:3px;color:#e1eee8;font-size:11px;font-weight:700;line-height:1.15;white-space:nowrap}.tree-node .collateral{color:#f3c58e;font-size:10px}.tree-node.is-tiny .collateral{display:none}.tree-node.is-micro .value,.tree-node.is-micro .shares,.tree-node.is-micro .collateral{display:none}'; document.head.appendChild(style); }
+    const decorate=()=>document.querySelectorAll('#tree .tree-node.leaf').forEach((element)=>{ if(element.dataset.shareEnhanced==='1')return; const label=element.querySelector('.name')?.textContent?.trim()||''; const node=leaves.get(label); if(!node)return; const shares=formatShares(node.shares); if(!shares)return; const pledged=formatShares(node.pledgedShares); const lines=[`持有 ${shares} 股`]; if(pledged)lines.push(`擔保品 ${pledged} 股`); appendText(element,'shares',lines[0]); if(lines[1])appendText(element,'collateral',lines[1]); const percent=rootValue>0?(Number(node.value||0)*100/rootValue).toFixed(1):'0.0'; const detail=`<strong>${esc(node.label)}</strong> · ${money(node.value)} · ${percent}%（佔總資產）<br>${lines.map((line)=>esc(line)).join('<br>')}`; element.setAttribute('aria-label',`${node.label} ${money(node.value)}，佔總資產 ${percent}% ，${lines.join('，')}`); element.title=`${node.label} · ${money(node.value)} · ${percent}% · ${lines.join(' · ')}`; const show=()=>showTooltip('treeDetail',detail,element); element.addEventListener('pointerenter',show); element.addEventListener('focus',show); element.dataset.shareEnhanced='1'; });
+    decorate(); const tree=document.getElementById('tree'); if(tree&&!tree.dataset.shareObserver){ const observer=new MutationObserver(()=>decorate()); observer.observe(tree,{childList:true,subtree:true}); tree.dataset.shareObserver='1'; }
+  };
+"""
+    private_html = private_html.replace("  const load=async()=>{", treemap_metadata_script + "\n  const load=async()=>{")
     private_html = private_html.replace(
         "  const load=async()=>{",
         "  const renderIngestion=(body)=>{const data=body.data||{};const p=data.portfolio||{};const contract=p.transactionIngestion??data.transactionIngestion??{};const items=Array.isArray(contract)?contract:(Array.isArray(contract.recent)?contract.recent:[]);const target=document.getElementById('transactionIngestion');if(!target)return;target.innerHTML=items.length?items.slice(-3).reverse().map((item)=>{const status=String(item.status||'UNKNOWN');const klass=status.toLowerCase();const detail=item.reason||item.detail||item.compatibilityUsed||item.transactionDate||'';return `<div class=\\\"ingestion-row\\\"><span class=\\\"ingestion-status ${klass}\\\">${esc(status)}</span><div><strong>${esc(item.command||item.symbol||'交易')}</strong><small>${esc(item.currency||'')} ${esc(item.targetBalance||item.amount||'')} ${esc(detail)}</small></div><span>${esc(item.sourceRowId||'')}</span></div>`;}).join(''):'<div class=\\\"subtle\\\">目前沒有交易狀態紀錄。</div>';};\n  const load=async()=>{",
@@ -330,6 +342,6 @@ def write_public_site(directory: str, generated_at: str) -> None:
         "const detail=item.reason||item.detail||item.compatibilityUsed||item.transactionDate||'';",
         "const detail=[item.compatibilityUsed?`相容模式：${item.compatibilityUsed===true?'已啟用':item.compatibilityUsed}`:'',item.reason||item.detail||'',item.transactionDate||''].filter(Boolean).join(' · ');",
     )
-    private_html = private_html.replace("render(await res.json());", "const body=await res.json(); render(body); renderIngestion(body);")
+    private_html = private_html.replace("render(await res.json());", "const body=await res.json(); render(body); renderIngestion(body); enhanceTreemapMetadata(body);")
     with open(os.path.join(private_directory, "index.html"), "w", encoding="utf-8") as file:
         file.write(private_html)

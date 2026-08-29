@@ -1,9 +1,27 @@
 """Pure portfolio hierarchy helpers used by the Growth treemap."""
 
+import math
 
-def _leaf(label, value, category):
+
+def _quantity(value):
+    """Return a positive finite quantity, preserving fractional shares."""
+    try:
+        quantity = float(value)
+    except (TypeError, ValueError):
+        return None
+    return quantity if math.isfinite(quantity) and quantity > 0 else None
+
+
+def _leaf(label, value, category, *, shares=None, pledged_shares=None):
     value = max(0.0, float(value or 0))
-    return {"label": str(label), "value": round(value, 2), "kind": "leaf", "category": category}
+    leaf = {"label": str(label), "value": round(value, 2), "kind": "leaf", "category": category}
+    quantity = _quantity(shares)
+    if quantity is not None:
+        leaf["shares"] = int(quantity) if quantity.is_integer() else quantity
+    pledged = _quantity(pledged_shares)
+    if pledged is not None:
+        leaf["pledgedShares"] = int(pledged) if pledged.is_integer() else pledged
+    return leaf
 
 
 def _group(label, children, category=None):
@@ -18,7 +36,16 @@ def _group(label, children, category=None):
     }
 
 
-def build_asset_tree(tw_positions, us_positions, cash_value, fund_positions):
+def build_asset_tree(
+    tw_positions,
+    us_positions,
+    cash_value,
+    fund_positions,
+    *,
+    tw_shares=None,
+    us_shares=None,
+    pledged_shares=None,
+):
     """Build a gross-asset hierarchy; liabilities are intentionally excluded.
 
     Values are expected to be converted to TWD before calling this function.
@@ -28,6 +55,9 @@ def build_asset_tree(tw_positions, us_positions, cash_value, fund_positions):
     """
     tw_positions = {str(key): float(value or 0) for key, value in (tw_positions or {}).items()}
     us_positions = {str(key): float(value or 0) for key, value in (us_positions or {}).items()}
+    tw_shares = {str(key): value for key, value in (tw_shares or {}).items() if key != "History"}
+    us_shares = {str(key): value for key, value in (us_shares or {}).items() if key != "History"}
+    pledged_shares = {str(key): value for key, value in (pledged_shares or {}).items() if key != "History"}
     fund_positions = {str(key): float(value or 0) for key, value in (fund_positions or {}).items() if key != "History"}
 
     tw_market_etfs = {"006208"}
@@ -51,7 +81,15 @@ def build_asset_tree(tw_positions, us_positions, cash_value, fund_positions):
             group = "台股槓桿型"
         else:
             group = "其它台股"
-        tw_groups[group].append(_leaf(symbol, value, group))
+        tw_groups[group].append(
+            _leaf(
+                symbol,
+                value,
+                group,
+                shares=tw_shares.get(symbol),
+                pledged_shares=pledged_shares.get(symbol),
+            )
+        )
 
     us_groups = {
         "美股市值型": [],
@@ -65,7 +103,7 @@ def build_asset_tree(tw_positions, us_positions, cash_value, fund_positions):
             group = "台積電 ADR"
         else:
             group = "其它美股"
-        us_groups[group].append(_leaf(symbol, value, group))
+        us_groups[group].append(_leaf(symbol, value, group, shares=us_shares.get(symbol)))
 
     tw_children = [_group(label, children, "現貨台股") for label, children in tw_groups.items() if children]
     us_children = [_group(label, children, "現貨美股") for label, children in us_groups.items() if children]
