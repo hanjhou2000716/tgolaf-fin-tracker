@@ -110,6 +110,13 @@ class SimpleTransactionFormTests(unittest.TestCase):
         self.assertEqual(recovered.accepted[0].quantity, Decimal("300"))
         self.assertEqual(recovered.accepted[0].unit, "SHARE")
         self.assertEqual(recovered.accepted[0].compatibility_used, "current_simple_form_missing_email")
+        replay = parse_transaction_rows(
+            headers, [values], source_sheet="表單回覆 3",
+            existing_ids={recovered.accepted[0].transaction_id},
+            allow_missing_email_compat=True,
+        )
+        self.assertEqual(replay.accepted, ())
+        self.assertEqual(replay.rejected[0].detail, "duplicate_transaction_id")
 
     def test_missing_email_compatibility_recovers_cash_replacement(self):
         headers = ["Timestamp", "交易類型", "交易單位", "交易數量"]
