@@ -4,6 +4,7 @@ import json
 import hashlib
 import math
 import os
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -198,9 +199,23 @@ def _canonical_event(payload: dict, *, include_submitted_at=True, include_price=
     keys = _FINGERPRINT_KEYS if include_submitted_at else _CORE_KEYS
     if not include_price:
         keys = tuple(key for key in keys if key != "price")
-    event = {key: _normalise_value(payload.get(key)) for key in keys}
+    event = {key: _canonical_field_value(key, payload.get(key)) for key in keys}
     event["price_mode"] = "derived" if _is_derived_price(payload) else "explicit"
     return event
+
+
+def _canonical_field_value(key, value):
+    """Canonicalise equivalent legacy representations for comparisons only."""
+    if key == "action":
+        return _action_class(value)
+    if key in {"unit", "currency"}:
+        return str(value or "").strip().upper() or None
+    if key == "transaction_date":
+        text = str(value or "").strip()
+        match = re.match(r"^(\d{4})[/-](\d{1,2})[/-](\d{1,2})", text)
+        if match:
+            return f"{int(match.group(1)):04d}-{int(match.group(2)):02d}-{int(match.group(3)):02d}"
+    return _normalise_value(value)
 
 
 def transaction_fingerprint(payload: dict) -> str:
@@ -387,16 +402,19 @@ def _same_legacy_reconciliation(previous: dict, current: dict) -> bool:
     # The compatibility marker is the allow-list boundary; ordinary UUID
     # conflicts must still fail closed.
     legacy_markers = _LEGACY_MARKERS
-    if previous.get("compatibility_used") not in legacy_markers:
+    previous_marker = _marker_class(previous.get("compatibility_used"))
+    current_marker = _marker_class(current.get("compatibility_used"))
+    if previous_marker not in legacy_markers:
         return False
-    if current.get("compatibility_used") not in legacy_markers | {None}:
+    if current_marker not in legacy_markers | {"none"}:
         return False
     stable_keys = (
         "source_row_id", "action", "symbol", "currency", "asset_type", "unit",
         "quantity", "price", "reversal_of", "transaction_date",
     )
     for key in stable_keys:
-        before, after = previous.get(key), current.get(key)
+        before = _canonical_field_value(key, previous.get(key))
+        after = _canonical_field_value(key, current.get(key))
         if key in {"quantity", "price"}:
             try:
                 from decimal import Decimal
