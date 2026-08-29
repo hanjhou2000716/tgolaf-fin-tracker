@@ -1,6 +1,6 @@
 import unittest
 
-from asset_tree import build_asset_tree
+from asset_tree import asset_tree_metadata_summary, build_asset_tree
 
 
 class AssetTreeTests(unittest.TestCase):
@@ -43,6 +43,7 @@ class AssetTreeTests(unittest.TestCase):
         tw = next(child for child in tree["children"] if child["label"] == "現貨台股")
         etf = next(group for group in tw["children"] if group["label"] == "台股市值型")
         etf_leaf = etf["children"][0]
+        self.assertEqual(etf_leaf["assetClass"], "stock")
         self.assertEqual(etf_leaf["shares"], 48000)
         self.assertEqual(etf_leaf["pledgedShares"], 17500)
         tsmc = next(group for group in tw["children"] if group["label"] == "台積電")
@@ -52,6 +53,7 @@ class AssetTreeTests(unittest.TestCase):
         us_leaf = us["children"][0]["children"][0]
         self.assertEqual(us_leaf["shares"], 12.345)
         self.assertNotIn("shares", next(child for child in tree["children"] if child["label"] == "現金與基金")["children"][0])
+        self.assertNotIn("assetClass", next(child for child in tree["children"] if child["label"] == "現金與基金")["children"][0])
 
     def test_invalid_or_non_positive_metadata_is_omitted(self):
         tree = build_asset_tree(
@@ -60,8 +62,22 @@ class AssetTreeTests(unittest.TestCase):
             pledged_shares={"006208": -1},
         )
         leaf = tree["children"][0]["children"][0]["children"][0]
+        self.assertEqual(leaf["assetClass"], "stock")
         self.assertNotIn("shares", leaf)
         self.assertNotIn("pledgedShares", leaf)
+
+    def test_metadata_summary_reports_missing_share_metadata_without_financial_values(self):
+        tree = build_asset_tree(
+            {"006208": 500, "2330": 200}, {}, 0, {},
+            tw_shares={"006208": 100}, pledged_shares={"006208": 50},
+        )
+        summary = asset_tree_metadata_summary(tree)
+        self.assertEqual(summary["stockLeafCount"], 2)
+        self.assertEqual(summary["stockLeavesWithShares"], 1)
+        self.assertEqual(summary["stockLeavesMissingShares"], 1)
+        self.assertEqual(summary["stockLeavesWithCollateral"], 1)
+        self.assertFalse(summary["complete"])
+        self.assertNotIn("value", summary)
 
 
 if __name__ == "__main__":
