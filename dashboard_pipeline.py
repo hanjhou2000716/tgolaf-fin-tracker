@@ -1032,6 +1032,9 @@ def main():
         us_position_values,
         total_cash_twd,
         inventory["基金"],
+        tw_shares=inventory["台股"],
+        us_shares=inventory["美股"],
+        pledged_shares=inventory["擔保品"],
     )
     # The legacy HTML renderer is retained as a private-build compatibility
     # artifact only. It must never receive the real asset tree; authenticated
@@ -1740,6 +1743,22 @@ def main():
                         child.textContent = text;
                         element.appendChild(child);
                     }};
+                    const formatShares = (value) => {{
+                        const number = Number(value);
+                        return Number.isFinite(number) && number > 0 ? number.toLocaleString('zh-TW', {{ maximumFractionDigits: 6 }}) : '';
+                    }};
+                    const shareStyle = document.createElement('style');
+                    shareStyle.textContent = '.asset-treemap-shares,.asset-treemap-collateral{{display:block;margin-top:3px;color:#d8ebe2;font-size:11px;font-weight:700;line-height:1.15;white-space:nowrap}}.asset-treemap-collateral{{color:#f3c58e;font-size:10px}}.asset-treemap-node.is-tiny .asset-treemap-collateral{{display:none}}.asset-treemap-node.is-micro .asset-treemap-value,.asset-treemap-node.is-micro .asset-treemap-shares,.asset-treemap-node.is-micro .asset-treemap-collateral{{display:none}}';
+                    document.head.appendChild(shareStyle);
+                    const shareLines = (node) => {{
+                        if (node.kind !== 'leaf') return [];
+                        const shares = formatShares(node.shares);
+                        if (!shares) return [];
+                        const lines = [`持有 ${{shares}} 股`];
+                        const pledged = formatShares(node.pledgedShares);
+                        if (pledged) lines.push(`擔保品 ${{pledged}} 股`);
+                        return lines;
+                    }};
                     const renderTreemapNode = (item, parent) => {{
                         const node = item.node;
                         const children = visibleChildren(node);
@@ -1755,10 +1774,16 @@ def main():
                         element.style.backgroundColor = nodeColor(node);
                         element.setAttribute('role', children.length ? 'button' : 'img');
                         element.setAttribute('tabindex', '0');
-                        element.setAttribute('aria-label', node.label + ' ' + formatMoney(node.value) + '，占總資產 ' + percentOfRoot(node) + '%');
+                        const lines = shareLines(node);
+                        element.setAttribute('aria-label', node.label + ' ' + formatMoney(node.value) + '，占總資產 ' + percentOfRoot(node) + '%' + (lines.length ? '，' + lines.join('，') : ''));
+                        element.title = node.children && node.children.length ? node.label + ' · 點擊查看下一層' : node.label + ' · ' + formatMoney(node.value) + ' · ' + percentOfRoot(node) + '%' + (lines.length ? ' · ' + lines.join(' · ') : '');
                         appendText(element, 'asset-treemap-title', node.label);
                         appendText(element, 'asset-treemap-value', formatMoney(node.value));
                         appendText(element, 'asset-treemap-percent', percentOfRoot(node) + '%');
+                        if (lines.length) {{
+                            appendText(element, 'asset-treemap-shares', lines[0]);
+                            if (lines[1]) appendText(element, 'asset-treemap-collateral', lines[1]);
+                        }}
                         if (children.length) {{
                             const openNode = () => {{ assetTreePath.push(node); renderTreemap(); }};
                             element.addEventListener('click', openNode);
