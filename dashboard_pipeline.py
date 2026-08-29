@@ -21,7 +21,7 @@ from risk import (
     composite_guardrails,
 )
 from validation import validate_history_sheet, validate_inventory, validate_quote
-from asset_tree import build_asset_tree
+from asset_tree import asset_tree_metadata_summary, build_asset_tree
 from public_site import write_public_site
 from supabase_sync import load_goal_state, load_private_snapshot, save_goal_state, upload_private_snapshot, upload_private_transactions
 from transaction_schema import (
@@ -1036,6 +1036,13 @@ def main():
         us_shares=inventory["美股"],
         pledged_shares=inventory["擔保品"],
     )
+    asset_tree_metadata = asset_tree_metadata_summary(asset_tree)
+    try:
+        recovery_summary = json.load(open(".private-build/schema-recovery-summary.json", encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        recovery_summary = {}
+    recovery_summary["assetTreeMetadata"] = asset_tree_metadata
+    write_json(".private-build/schema-recovery-summary.json", recovery_summary)
     # The legacy HTML renderer is retained as a private-build compatibility
     # artifact only. It must never receive the real asset tree; authenticated
     # clients will obtain private data through the Supabase API in P0-SEC-02.
@@ -1885,6 +1892,7 @@ def main():
             "assetBlocks": asset_blocks,
             "marketMix": market_mix,
             "assetTree": asset_tree,
+            "assetTreeMetadata": asset_tree_metadata,
             "liabilities": liabilities_payload,
             "allocation": allocation_items,
             "risk": risk_summary,

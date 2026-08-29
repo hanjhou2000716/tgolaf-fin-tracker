@@ -12,9 +12,11 @@ def _quantity(value):
     return quantity if math.isfinite(quantity) and quantity > 0 else None
 
 
-def _leaf(label, value, category, *, shares=None, pledged_shares=None):
+def _leaf(label, value, category, *, shares=None, pledged_shares=None, asset_class=None):
     value = max(0.0, float(value or 0))
     leaf = {"label": str(label), "value": round(value, 2), "kind": "leaf", "category": category}
+    if asset_class:
+        leaf["assetClass"] = asset_class
     quantity = _quantity(shares)
     if quantity is not None:
         leaf["shares"] = int(quantity) if quantity.is_integer() else quantity
@@ -88,6 +90,7 @@ def build_asset_tree(
                 group,
                 shares=tw_shares.get(symbol),
                 pledged_shares=pledged_shares.get(symbol),
+                asset_class="stock",
             )
         )
 
@@ -103,7 +106,7 @@ def build_asset_tree(
             group = "台積電 ADR"
         else:
             group = "其它美股"
-        us_groups[group].append(_leaf(symbol, value, group, shares=us_shares.get(symbol)))
+        us_groups[group].append(_leaf(symbol, value, group, shares=us_shares.get(symbol), asset_class="stock"))
 
     tw_children = [_group(label, children, "現貨台股") for label, children in tw_groups.items() if children]
     us_children = [_group(label, children, "現貨美股") for label, children in us_groups.items() if children]
@@ -127,3 +130,31 @@ def build_asset_tree(
         "category": "總資產",
         "children": children,
     }
+
+
+def asset_tree_metadata_summary(tree):
+    """Return non-financial completeness counts for stock leaf metadata."""
+    summary = {
+        "stockLeafCount": 0,
+        "stockLeavesWithShares": 0,
+        "stockLeavesMissingShares": 0,
+        "stockLeavesWithCollateral": 0,
+    }
+
+    def visit(node):
+        if not isinstance(node, dict):
+            return
+        if node.get("assetClass") == "stock":
+            summary["stockLeafCount"] += 1
+            if _quantity(node.get("shares")) is None:
+                summary["stockLeavesMissingShares"] += 1
+            else:
+                summary["stockLeavesWithShares"] += 1
+            if _quantity(node.get("pledgedShares")) is not None:
+                summary["stockLeavesWithCollateral"] += 1
+        for child in node.get("children") or []:
+            visit(child)
+
+    visit(tree)
+    summary["complete"] = summary["stockLeavesMissingShares"] == 0
+    return summary
