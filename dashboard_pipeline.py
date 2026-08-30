@@ -80,6 +80,7 @@ FORM_SCHEMA_LEGACY_COMPAT = os.getenv("FORM_SCHEMA_LEGACY_COMPAT", "false").stri
 FORM_MISSING_EMAIL_COMPAT = os.getenv("FORM_MISSING_EMAIL_COMPAT", "false").strip().lower() in {"1", "true", "yes", "on"}
 FORM_V3_URL = os.getenv("FORM_V3_URL", "https://forms.google.com/").strip()
 FORM_V3_CUTOVER_AT = os.getenv("FORM_V3_CUTOVER_AT", "").strip() or None
+CURRENT_TRANSACTION_SPREADSHEET_ID = os.getenv("CURRENT_TRANSACTION_SPREADSHEET_ID", "").strip() or None
 WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/private/"
 
 
@@ -349,11 +350,17 @@ def calculate_current_assets():
     
     available_sheets = open_spreadsheets_with_retry(client)
     sheet = None
-    for s in available_sheets:
-        if "PRStK" in s.title: sheet = s; break
-    if not sheet:
+    if CURRENT_TRANSACTION_SPREADSHEET_ID:
+        # The current response workbook is an explicit cutover boundary. Do
+        # not fall back to title matching when it is configured: similarly
+        # named legacy workbooks must never be ingested as current data.
+        sheet = client.open_by_key(CURRENT_TRANSACTION_SPREADSHEET_ID)
+    else:
         for s in available_sheets:
-            if "Growth" in s.title or "資產" in s.title: sheet = s; break
+            if "PRStK" in s.title: sheet = s; break
+        if not sheet:
+            for s in available_sheets:
+                if "Growth" in s.title or "資產" in s.title: sheet = s; break
     if not sheet: raise ValueError("找不到檔案")
         
     source_roles = SourceRoleConfig.from_environment()
