@@ -81,6 +81,7 @@ FORM_MISSING_EMAIL_COMPAT = os.getenv("FORM_MISSING_EMAIL_COMPAT", "false").stri
 FORM_V3_URL = os.getenv("FORM_V3_URL", "https://forms.google.com/").strip()
 FORM_V3_CUTOVER_AT = os.getenv("FORM_V3_CUTOVER_AT", "").strip() or None
 CURRENT_TRANSACTION_SPREADSHEET_ID = os.getenv("CURRENT_TRANSACTION_SPREADSHEET_ID", "").strip() or None
+LEGACY_TRANSACTION_SPREADSHEET_ID = os.getenv("LEGACY_TRANSACTION_SPREADSHEET_ID", "").strip() or None
 WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/private/"
 
 
@@ -362,6 +363,12 @@ def calculate_current_assets():
             for s in available_sheets:
                 if "Growth" in s.title or "資產" in s.title: sheet = s; break
     if not sheet: raise ValueError("找不到檔案")
+    workbooks = [sheet]
+    if LEGACY_TRANSACTION_SPREADSHEET_ID and LEGACY_TRANSACTION_SPREADSHEET_ID != getattr(sheet, "id", None):
+        # Legacy archive and History remain in the original workbook. Keep
+        # that boundary explicit so a clean V3 response workbook does not
+        # need private-history duplication.
+        workbooks.append(client.open_by_key(LEGACY_TRANSACTION_SPREADSHEET_ID))
         
     source_roles = SourceRoleConfig.from_environment()
     data_rows, history_sheet = [], None
@@ -376,7 +383,7 @@ def calculate_current_assets():
     active_current_rejections = []
     current_schema_versions = []
     current_source_seen = False
-    for ws in sheet.worksheets():
+    for ws in [worksheet for workbook in workbooks for worksheet in workbook.worksheets()]:
         role = source_roles.role_for(ws.title)
         if role == "HISTORY":
             history_sheet = ws
