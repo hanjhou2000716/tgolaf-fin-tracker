@@ -74,6 +74,7 @@ jobs:
           FORM_V3_URL: ${{ vars.FORM_V3_URL || 'https://forms.google.com/' }}
           FORM_V3_CUTOVER_AT: ${{ vars.FORM_V3_CUTOVER_AT || '' }}
           CURRENT_TRANSACTION_SPREADSHEET_ID: ${{ vars.CURRENT_TRANSACTION_SPREADSHEET_ID || '' }}
+          LEGACY_TRANSACTION_SPREADSHEET_ID: ${{ vars.LEGACY_TRANSACTION_SPREADSHEET_ID || '' }}
           CURRENT_TRANSACTION_SOURCE: ${{ vars.CURRENT_TRANSACTION_SOURCE || 'TRANSACTIONS_CURRENT' }}
           LEGACY_TRANSACTION_SOURCES: ${{ vars.LEGACY_TRANSACTION_SOURCES || '表單回覆 3,Form Responses 1,Form Responses 2,Form V2' }}
           HISTORY_SOURCE: ${{ vars.HISTORY_SOURCE || 'History' }}
