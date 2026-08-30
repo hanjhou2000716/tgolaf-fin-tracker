@@ -82,7 +82,7 @@ jobs:
         # This artifact contains only fingerprints, row counts and control
         # states.  It deliberately excludes private snapshots, holdings and
         # monetary values while making recovery decisions auditable.
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: schema-recovery-summary
           path: .private-build/schema-recovery-summary.json
@@ -91,7 +91,7 @@ jobs:
       - name: Upload private ledger conflict summary
         # Non-financial conflict evidence only. Full immutable payloads stay
         # in the private build directory and are never uploaded or published.
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ledger-conflict-summary
           path: .private-build/ledger-conflict-summary.json
@@ -125,7 +125,7 @@ jobs:
         run: touch public-site/.nojekyll
 
       - name: Upload public site artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: public-site
           path: public-site
