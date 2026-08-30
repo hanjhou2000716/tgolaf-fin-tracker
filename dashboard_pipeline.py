@@ -31,6 +31,7 @@ from supabase_sync import (
     upload_private_transactions,
 )
 from transaction_schema import (
+    Action,
     TransactionSchemaError,
     RejectedTransaction,
     adapt_known_legacy_rows,
@@ -63,6 +64,8 @@ from history_store import (
 from runtime_extensions import build_runtime_extensions
 from refresh_recovery import inventory_has_positive_assets, validate_recovery_candidate
 from ledger_conflict_diagnostics import ledger_conflict_digest, ledger_conflict_summary_artifact
+from source_roles import SourceRoleConfig
+from form_v3 import FORM_V3_SCHEMA
 
 # ==========================================
 # 1. 環境變數與金鑰設定
@@ -75,6 +78,8 @@ FORCE_TELEGRAM = os.getenv("FORCE_TELEGRAM", "false").strip().lower() in {"1", "
 FORM_SCHEMA_STRICT = os.getenv("FORM_SCHEMA_STRICT", "true").strip().lower() in {"1", "true", "yes", "on"}
 FORM_SCHEMA_LEGACY_COMPAT = os.getenv("FORM_SCHEMA_LEGACY_COMPAT", "false").strip().lower() in {"1", "true", "yes", "on"}
 FORM_MISSING_EMAIL_COMPAT = os.getenv("FORM_MISSING_EMAIL_COMPAT", "false").strip().lower() in {"1", "true", "yes", "on"}
+FORM_V3_URL = os.getenv("FORM_V3_URL", "https://forms.google.com/").strip()
+FORM_V3_CUTOVER_AT = os.getenv("FORM_V3_CUTOVER_AT", "").strip() or None
 WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/private/"
 
 
@@ -289,6 +294,52 @@ def _inventory_has_positive_assets(inventory) -> bool:
     return False
 
 
+def _apply_current_transactions(inventory, transactions):
+    """Apply canonical V3 events without heuristic cell scanning.
+
+    Archived sheets still use the historical inventory adapter below.  V3
+    events are already typed, so their accounting semantics are applied
+    directly (including cash effects of trades and pledge financing).
+    ``SET_BALANCE`` is intentionally deferred to the reconciliation adapter.
+    """
+    for transaction in sorted(tuple(transactions or ()), key=lambda item: (item.transaction_date, item.source_row_id)):
+        action = transaction.action
+        asset_type = str(transaction.asset_type or "")
+        symbol = str(transaction.symbol or "")
+        quantity = float(transaction.quantity)
+        currency = str(transaction.currency or "TWD").upper()
+        if action == Action.SET_BALANCE:
+            continue
+        if action in {Action.BUY, Action.SELL}:
+            bucket = inventory.setdefault(asset_type, {})
+            bucket[symbol] = float(bucket.get(symbol, 0) or 0) + (quantity if action == Action.BUY else -quantity)
+            if transaction.price is not None:
+                cash_bucket = inventory.setdefault(f"現金_{currency}", {currency: 0.0})
+                cash_bucket[currency] = float(cash_bucket.get(currency, 0) or 0) + (
+                    -quantity * float(transaction.price) if action == Action.BUY else quantity * float(transaction.price)
+                )
+        elif action in {Action.DEPOSIT, Action.WITHDRAWAL}:
+            if asset_type == "擔保品":
+                bucket = inventory.setdefault("擔保品", {})
+                bucket[symbol] = float(bucket.get(symbol, 0) or 0) + (quantity if action == Action.DEPOSIT else -quantity)
+            else:
+                cash_bucket = inventory.setdefault(f"現金_{currency}", {currency: 0.0})
+                cash_bucket[currency] = float(cash_bucket.get(currency, 0) or 0) + (
+                    quantity if action == Action.DEPOSIT else -quantity
+                )
+        elif action in {Action.BORROW, Action.REPAY}:
+            debt_bucket = inventory.setdefault("質押負債", {"Current_Debt": 0.0, "History": []})
+            cash_bucket = inventory.setdefault(f"現金_{currency}", {currency: 0.0})
+            sign = 1 if action == Action.BORROW else -1
+            debt_bucket["Current_Debt"] = float(debt_bucket.get("Current_Debt", 0) or 0) + sign * quantity
+            cash_bucket[currency] = float(cash_bucket.get(currency, 0) or 0) + sign * quantity
+            debt_bucket.setdefault("History", []).append((transaction.transaction_date, debt_bucket["Current_Debt"]))
+        elif action == Action.SET_PLEDGE_RATE:
+            rate_bucket = inventory.setdefault("質押利率", {"Rate": 0.0, "History": []})
+            rate_bucket["Rate"] = quantity
+            rate_bucket.setdefault("History", []).append((transaction.transaction_date, quantity))
+
+
 def calculate_current_assets():
     global LAST_SCHEMA_DIAGNOSTICS, LAST_REFRESH_CONTROL
     creds_dict = json.loads(GCP_CREDENTIALS_JSON)
@@ -305,30 +356,41 @@ def calculate_current_assets():
             if "Growth" in s.title or "資產" in s.title: sheet = s; break
     if not sheet: raise ValueError("找不到檔案")
         
+    source_roles = SourceRoleConfig.from_environment()
     data_rows, history_sheet = [], None
     transaction_audits, accepted_transactions, seen_transaction_ids = [], [], set()
+    current_transactions = []
     transaction_ingestion = []
     schema_versions = []
     schema_diagnostics = []
     schema_recovery_summaries = []
     schema_recovery_ready = True
     ingestion_rejections = []
+    active_current_rejections = []
+    current_schema_versions = []
+    current_source_seen = False
     for ws in sheet.worksheets():
-        title_clean = ws.title.strip().lower()
-        if "history" in title_clean or "歷史" in title_clean or "紀錄" in title_clean:
+        role = source_roles.role_for(ws.title)
+        if role == "HISTORY":
             history_sheet = ws
-        elif "表單" in title_clean or "form" in title_clean or "回覆" in title_clean or "異動" in title_clean:
+        elif role in {"CURRENT", "LEGACY_ARCHIVE"}:
+            current_source_seen = current_source_seen or role == "CURRENT"
             rows = ws.get_all_values()
             if len(rows) > 1:
                 schema_version = detect_schema(rows[0])
                 schema_versions.append(schema_version)
+                if role == "CURRENT":
+                    current_schema_versions.append(schema_version)
                 schema_diagnostic = analyze_schema(
                     rows[0], schema=schema_version, row_count=len(rows) - 1, rows=rows[1:]
                 )
                 schema_diagnostic["sheet"] = ws.title
+                schema_diagnostic["role"] = role
                 schema_diagnostics.append(schema_diagnostic)
                 if FORM_SCHEMA_STRICT:
                     try:
+                        if role == "CURRENT" and schema_version != FORM_V3_SCHEMA:
+                            raise TransactionSchemaError("current_source_must_be_form_v3")
                         recovery_mode = not schema_diagnostic["safe"]
                         if recovery_mode and not FORM_SCHEMA_LEGACY_COMPAT:
                             raise TransactionSchemaError(schema_diagnostic["reason"] or "schema_drift")
@@ -375,6 +437,8 @@ def calculate_current_assets():
                             rejected=parsed.rejected,
                         ))
                         ingestion_rejections.extend(parsed.rejected)
+                        if role == "CURRENT":
+                            active_current_rejections.extend(parsed.rejected)
                         audit_payload = parsed.audit_payload()
                         audit_payload["accepted"] = len(priced.accepted)
                         audit_payload["pending"].extend(
@@ -393,8 +457,11 @@ def calculate_current_assets():
                             }
                             for item in priced.pending
                         )
-                        transaction_audits.append({"sheet": ws.title, **audit_payload})
-                        data_rows.extend(inventory_rows_from_transactions(priced.accepted, accepted_rows))
+                        transaction_audits.append({"sheet": ws.title, "role": role, **audit_payload})
+                        if role == "CURRENT":
+                            current_transactions.extend(priced.accepted)
+                        else:
+                            data_rows.extend(inventory_rows_from_transactions(priced.accepted, accepted_rows))
                         if recovery_mode:
                             schema_recovery_summaries.append({
                                 "sheet": ws.title,
@@ -406,7 +473,7 @@ def calculate_current_assets():
                                 "rejectedReasonCounts": dict(Counter(item.reason for item in parsed.rejected)),
                             })
                     except TransactionSchemaError as error:
-                        if not FORM_SCHEMA_LEGACY_COMPAT:
+                        if role != "CURRENT" and not FORM_SCHEMA_LEGACY_COMPAT:
                             raise
                         if not schema_diagnostic["safe"]:
                             schema_recovery_ready = False
@@ -419,23 +486,34 @@ def calculate_current_assets():
                                 "rejectedRows": int(schema_diagnostic.get("rowCount") or 0),
                                 "reasonCode": "BLOCKED_RECOVERY_INVALID",
                             })
-                        if schema_version == "LEGACY":
+                        # Legacy compatibility retains the explicit branch:
+                        # if schema_version == "LEGACY":
+                        if role == "LEGACY_ARCHIVE" and schema_version == "LEGACY":
                             migrated_rows = adapt_known_legacy_rows(rows[0], rows[1:])
                             data_rows.extend(migrated_rows)
                             reason = "legacy_schema_migration"
                         else:
-                            # UNKNOWN / drifted headers are quarantined.  Do
-                            # not send raw rows into the legacy reducer.
-                            reason = "schema_drift"
-                            ingestion_rejections.append(
-                                RejectedTransaction(
+                            # Current input is never routed to a legacy
+                            # adapter.  Unknown/drifted headers are isolated
+                            # at the sheet boundary instead of guessed.
+                            if role == "CURRENT":
+                                reason = "current_form_v3_required"
+                            else:
+                                # Keep the legacy schema-drift reason explicit
+                                # for audit tooling and backwards-compatible
+                                # diagnostics.
+                                reason = "schema_drift"
+                            rejection = RejectedTransaction(
                                     f"{ws.title}:header",
-                                    "schema_drift",
+                                    "schema_drift" if role != "CURRENT" else "CURRENT_FORM_V3_REQUIRED",
                                     f"{schema_version}: {schema_diagnostic['reason'] or 'schema validation failed'}",
                                 )
-                            )
+                            ingestion_rejections.append(rejection)
+                            if role == "CURRENT":
+                                active_current_rejections.append(rejection)
                         transaction_audits.append({
                             "sheet": ws.title,
+                            "role": role,
                             "accepted": 0,
                             "pending": [],
                             "rejected": [{"source_row_id": f"{ws.title}:header", "reason": reason, "detail": str(error)}],
@@ -445,21 +523,43 @@ def calculate_current_assets():
                     # unknown or ambiguous header to reach the legacy
                     # reducer.  Safe, known legacy rows may still use the
                     # temporary raw-row compatibility path.
-                    if schema_diagnostic["safe"]:
+                    if role == "CURRENT":
+                        # Even with strict diagnostics disabled, the current
+                        # source has one authoritative V3 parser.  Never
+                        # expose raw V3 rows to the legacy reducer.
+                        try:
+                            parsed = parse_transaction_rows(rows[0], rows[1:], source_sheet=ws.title, existing_ids=seen_transaction_ids)
+                            accepted_transactions.extend(parsed.accepted)
+                            transaction_ingestion.extend(build_ingestion_status(accepted=parsed.accepted, pending=parsed.pending, rejected=parsed.rejected))
+                            active_current_rejections.extend(parsed.rejected)
+                            ingestion_rejections.extend(parsed.rejected)
+                            transaction_audits.append({"sheet": ws.title, "role": role, **parsed.audit_payload()})
+                            current_transactions.extend(parsed.accepted)
+                        except (TransactionSchemaError, ValueError) as error:
+                            rejection = RejectedTransaction(f"{ws.title}:header", "CURRENT_FORM_V3_REQUIRED", str(error))
+                            active_current_rejections.append(rejection)
+                            ingestion_rejections.append(rejection)
+                            transaction_audits.append({"sheet": ws.title, "role": role, "accepted": 0, "pending": [], "rejected": [{"source_row_id": rejection.source_row_id, "reason": rejection.reason, "detail": rejection.detail}]})
+                    elif schema_diagnostic["safe"]:
                         data_rows.extend(rows[1:])
                     else:
-                        ingestion_rejections.append(
-                            RejectedTransaction(
-                                f"{ws.title}:header",
-                                "schema_drift",
-                                f"{schema_version}: {schema_diagnostic['reason'] or 'schema validation failed'}",
-                            )
+                        rejection = RejectedTransaction(
+                            f"{ws.title}:header",
+                            "schema_drift",
+                            f"{schema_version}: {schema_diagnostic['reason'] or 'schema validation failed'}",
                         )
+                        ingestion_rejections.append(rejection)
+                        if role == "CURRENT":
+                            active_current_rejections.append(rejection)
                 
-    schema_digest = schema_drift_digest(schema_diagnostics)
+    # Only the explicitly configured CURRENT worksheet contributes to active
+    # ingestion health.  Legacy archive diagnostics stay private audit data
+    # and cannot poison today's Data Health forever.
+    active_schema_diagnostics = [item for item in schema_diagnostics if item.get("role") == "CURRENT"]
+    schema_digest = schema_drift_digest(active_schema_diagnostics)
     schema_affected_rows = sum(
         int(item.get("rowCount") or 0)
-        for item in schema_diagnostics
+        for item in active_schema_diagnostics
         if not item.get("safe", True)
     )
     schema_drift_detected = bool(schema_digest) and not (
@@ -471,6 +571,9 @@ def calculate_current_assets():
     write_json(".private-build/schema-recovery-summary.json", {
         "schemaDigest": schema_digest or None,
         "status": "READY_FROM_FORM" if schema_recovered else "BLOCKED" if schema_digest else "NOT_NEEDED",
+        "sourceRoles": source_roles.as_dict(),
+        "currentSourceSeen": current_source_seen,
+        "cutoverAt": FORM_V3_CUTOVER_AT,
         "sheets": schema_recovery_summaries,
         "affectedRows": schema_affected_rows,
     })
@@ -481,11 +584,11 @@ def calculate_current_assets():
             "schemaDiagnostics": schema_diagnostics,
             "transactionIngestion": build_ingestion_contract(
                 transaction_ingestion,
-                schema=schema_versions[-1] if schema_versions else "UNKNOWN",
+                schema=current_schema_versions[-1] if current_schema_versions else "NO_CURRENT_SOURCE",
                 ingestion_health={
-                    "status": "DEGRADED" if ingestion_rejections else "OK",
-                    "reasonCode": "SCHEMA_DRIFT" if schema_drift_detected else "TRANSACTION_REJECTED" if ingestion_rejections else None,
-                    "message": "Google Form schema drift; affected rows quarantined" if schema_drift_detected else "Some transaction rows were quarantined" if ingestion_rejections else None,
+                    "status": "DEGRADED" if active_current_rejections else "OK",
+                    "reasonCode": "SCHEMA_DRIFT" if schema_drift_detected else "TRANSACTION_REJECTED" if active_current_rejections else None,
+                    "message": "Google Form schema drift; affected rows quarantined" if schema_drift_detected else "Some transaction rows were quarantined" if active_current_rejections else None,
                     "schemaDigest": schema_digest or None,
                     "schemaAffectedRows": schema_affected_rows,
                 },
@@ -605,6 +708,7 @@ def calculate_current_assets():
         if asset_type == "質押負債": inventory["質押負債"]["History"].append((row_date, inventory["質押負債"]["Current_Debt"]))
         elif asset_type == "質押利率": inventory["質押利率"]["History"].append((row_date, inventory["質押利率"]["Rate"]))
 
+    _apply_current_transactions(inventory, current_transactions)
     accepted_transactions, reconciliation_events = apply_reconciliation_events(inventory, accepted_transactions)
     ledger_sync_result = upload_private_transactions(accepted_transactions)
     sync_conflicts = tuple(getattr(ledger_sync_result, "conflicts", ()))
@@ -648,24 +752,11 @@ def calculate_current_assets():
         "sheets": transaction_audits,
         "transactionIngestion": build_ingestion_contract(
             transaction_ingestion,
-            schema=schema_versions[-1] if schema_versions else "UNKNOWN",
+            schema=current_schema_versions[-1] if current_schema_versions else "NO_CURRENT_SOURCE",
             ingestion_health={
-                "status": "DEGRADED" if ingestion_rejections else "OK",
-                "reasonCode": (
-                    "IMMUTABLE_LEDGER_CONFLICT" if sync_conflicts
-                    else "SCHEMA_DRIFT" if schema_drift_detected
-                    else "TRANSACTION_REJECTED" if ingestion_rejections
-                    else None
-                ),
-                "message": (
-                    f"Supabase immutable ledger conflict quarantined ({len(sync_conflicts)})"
-                    if sync_conflicts
-                    else "Google Form schema drift; affected rows quarantined"
-                    if schema_drift_detected
-                    else "Some transaction rows were quarantined"
-                    if ingestion_rejections
-                    else None
-                ),
+                "status": "DEGRADED" if active_current_rejections else "OK",
+                "reasonCode": "SCHEMA_DRIFT" if schema_drift_detected else "TRANSACTION_REJECTED" if active_current_rejections else None,
+                "message": "Google Form schema drift; affected rows quarantined" if schema_drift_detected else "Some transaction rows were quarantined" if active_current_rejections else None,
                 "schemaDigest": schema_digest or None,
                 "schemaAffectedRows": schema_affected_rows,
                 "lkgUsed": bool(lkg_inventory),
@@ -1486,7 +1577,7 @@ def main():
 
         <div class="actions">
             <a href="https://hanjhou2000716.github.io/skynet-monitoring/" class="btn btn-alt">開啟 Risk Monitor</a>
-            <a href="https://forms.gle/9ZEJawwNRGfiXQiV8" class="btn">登錄資產異動</a>
+            <a href="{FORM_V3_URL}" class="btn">登錄資產異動</a>
         </div>
         <footer class="footer">@2026 PRStK Lab &amp; SFC.e. | All right reserved.</footer>
 

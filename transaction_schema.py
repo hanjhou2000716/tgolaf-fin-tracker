@@ -134,6 +134,7 @@ COMPACT_DESCRIPTION_ALIASES = (
 # The response sheet is an input transport, not the domain contract.  These
 # names are the only schema versions accepted at the ingestion boundary.
 CURRENT_FORM_SCHEMA = "CURRENT"
+FORM_V3_SCHEMA = "FORM_V3"
 FORM_V2_SCHEMA = "FORM_V2"
 LEGACY_SCHEMA = "LEGACY"
 LEGACY_COMPACT_SCHEMA = "LEGACY_COMPACT"
@@ -165,6 +166,17 @@ SIMPLE_SCHEMA_ALIASES = {
     "quantity": ("交易數量", "transaction_quantity"),
 }
 
+# Form V3 is identified exclusively by its five business fields.  Timestamp
+# and Email Address remain transport metadata and are intentionally optional
+# for schema identity.
+FORM_V3_SCHEMA_ALIASES = {
+    "subject": ("交易主體", "交易主体", "subject", "transaction_subject"),
+    "symbol": ("交易標的", "交易标的", "標的代號", "symbol", "ticker"),
+    "action": ("交易動作", "交易动作", "action", "transaction_action"),
+    "unit": ("交易單位", "交易单位", "unit", "transaction_unit"),
+    "quantity": ("交易數量", "交易数量", "quantity", "transaction_quantity"),
+}
+
 
 def _has_any_normalized(normalized: set[str], aliases: Sequence[str]) -> bool:
     return any(_normalize_header(alias) in normalized for alias in aliases)
@@ -172,6 +184,10 @@ def _has_any_normalized(normalized: set[str], aliases: Sequence[str]) -> bool:
 
 def _schema_header_candidates(schema: str | None = None) -> dict[str, tuple[str, ...]]:
     """Return schema-specific aliases without importing simple_transaction."""
+    if schema == FORM_V3_SCHEMA:
+        aliases = dict(FORM_V3_SCHEMA_ALIASES)
+        aliases.update({"timestamp": SIMPLE_SCHEMA_ALIASES["timestamp"], "email": SIMPLE_SCHEMA_ALIASES["email"]})
+        return aliases
     if schema == CURRENT_FORM_SCHEMA:
         aliases = dict(SIMPLE_SCHEMA_ALIASES)
         # Keep optional legacy metadata recognized as harmless extras, while
@@ -197,6 +213,8 @@ def _schema_required_fields(schema: str, headers: Sequence[str]) -> tuple[str, .
     # A partially edited three-question Form is identified as CURRENT by
     # detect_schema when all five fields exist; otherwise UNKNOWN remains
     # fail-closed and reports the legacy required-field set.
+    if schema == FORM_V3_SCHEMA:
+        return ("subject", "symbol", "action", "unit", "quantity")
     if schema == CURRENT_FORM_SCHEMA:
         return ("timestamp", "email", "transaction_type", "unit", "quantity")
     if schema == FORM_V2_SCHEMA:
@@ -339,6 +357,11 @@ def detect_schema(headers: Sequence[str]) -> str:
     routed into the historical heuristic inventory reducer.
     """
     normalized = {_normalize_header(value) for value in headers}
+    if all(
+        any(_normalize_header(alias) in normalized for alias in aliases)
+        for aliases in FORM_V3_SCHEMA_ALIASES.values()
+    ):
+        return FORM_V3_SCHEMA
     # Import lazily to avoid simple_transaction -> transaction_schema cycles.
     from simple_transaction import is_simple_form_headers
     if is_simple_form_headers(headers):
@@ -895,6 +918,12 @@ def parse_transaction_rows(
     allow_missing_email_compat: bool = False,
 ) -> TransactionParseResult:
     normalized_headers = {_normalize_header(value): index for index, value in enumerate(headers)}
+    # Form V3 is the only current production parser.  It uses independent
+    # subject/symbol/action/unit/quantity fields and never parses a combined
+    # natural-language transaction type.
+    if detect_schema(headers) == FORM_V3_SCHEMA:
+        from form_v3 import parse_form_v3_rows
+        return parse_form_v3_rows(headers, rows, source_sheet=source_sheet, existing_ids=existing_ids)
     # A Google Form response sheet can retain the previous branch columns
     # after the form is simplified.  When the new three-question headers and
     # legacy/V2 headers coexist, parse each row through the branch it actually

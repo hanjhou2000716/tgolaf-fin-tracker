@@ -71,6 +71,11 @@ jobs:
           FORM_SCHEMA_STRICT: ${{ secrets.FORM_SCHEMA_STRICT || 'true' }}
           FORM_SCHEMA_LEGACY_COMPAT: ${{ secrets.FORM_SCHEMA_LEGACY_COMPAT || 'true' }}
           FORM_MISSING_EMAIL_COMPAT: ${{ inputs.recover_missing_email || false }}
+          FORM_V3_URL: ${{ vars.FORM_V3_URL || 'https://forms.google.com/' }}
+          FORM_V3_CUTOVER_AT: ${{ vars.FORM_V3_CUTOVER_AT || '' }}
+          CURRENT_TRANSACTION_SOURCE: ${{ vars.CURRENT_TRANSACTION_SOURCE || 'TRANSACTIONS_CURRENT' }}
+          LEGACY_TRANSACTION_SOURCES: ${{ vars.LEGACY_TRANSACTION_SOURCES || '表單回覆 3,Form Responses 1,Form Responses 2,Form V2' }}
+          HISTORY_SOURCE: ${{ vars.HISTORY_SOURCE || 'History' }}
         run: python main.py
 
       - name: Upload private schema recovery summary
