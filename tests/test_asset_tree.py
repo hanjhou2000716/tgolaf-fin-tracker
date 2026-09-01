@@ -79,6 +79,51 @@ class AssetTreeTests(unittest.TestCase):
         self.assertFalse(summary["complete"])
         self.assertNotIn("value", summary)
 
+    def test_splits_twd_and_usd_cash_without_changing_cash_subtotal(self):
+        tree = build_asset_tree(
+            {}, {}, 150000, {},
+            cash_twd_value=78000,
+            cash_usd_twd_value=72000,
+            cash_usd_native=2250,
+        )
+        cash_group = tree["children"][0]
+        self.assertEqual(cash_group["label"], "現金與基金")
+        self.assertEqual(cash_group["value"], 150000)
+        self.assertEqual([child["label"] for child in cash_group["children"]], ["台幣現金", "美金現金"])
+        twd, usd = cash_group["children"]
+        self.assertEqual(twd["value"], 78000)
+        self.assertEqual(twd["currency"], "TWD")
+        self.assertEqual(usd["value"], 72000)
+        self.assertEqual(usd["currency"], "USD")
+        self.assertEqual(usd["nativeAmount"], 2250)
+
+    def test_cash_breakdown_omits_zero_balances_and_preserves_funds(self):
+        twd_only = build_asset_tree({}, {}, 150000, {"FUND": 27000}, cash_twd_value=150000, cash_usd_twd_value=0, cash_usd_native=0)
+        cash_group = next(child for child in twd_only["children"] if child["label"] == "現金與基金")
+        self.assertEqual([child["label"] for child in cash_group["children"]], ["台幣現金", "FUND"])
+        self.assertNotIn("nativeAmount", cash_group["children"][0])
+
+        usd_only = build_asset_tree({}, {}, 32000, {}, cash_twd_value=0, cash_usd_twd_value=32000, cash_usd_native=1000)
+        usd_leaf = usd_only["children"][0]["children"][0]
+        self.assertEqual(usd_leaf["label"], "美金現金")
+        self.assertEqual(usd_leaf["value"], 32000)
+        self.assertEqual(usd_leaf["nativeAmount"], 1000)
+
+        fund_only = build_asset_tree({}, {}, 0, {"FUND": 27000}, cash_twd_value=0, cash_usd_twd_value=0, cash_usd_native=0)
+        self.assertEqual(fund_only["children"][0]["children"][0]["label"], "FUND")
+
+    def test_cash_split_preserves_root_and_non_cash_values(self):
+        before = build_asset_tree({"006208": 500000}, {"QQQM": 300000}, 150000, {"FUND": 27000})
+        after = build_asset_tree(
+            {"006208": 500000}, {"QQQM": 300000}, 150000, {"FUND": 27000},
+            cash_twd_value=78000, cash_usd_twd_value=72000, cash_usd_native=2250,
+        )
+        self.assertEqual(after["value"], before["value"])
+        self.assertEqual(
+            [(child["label"], child["value"]) for child in after["children"] if child["label"] != "現金與基金"],
+            [(child["label"], child["value"]) for child in before["children"] if child["label"] != "現金與基金"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
