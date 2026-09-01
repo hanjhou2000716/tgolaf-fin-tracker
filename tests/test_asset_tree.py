@@ -96,6 +96,12 @@ class AssetTreeTests(unittest.TestCase):
         self.assertEqual(usd["value"], 72000)
         self.assertEqual(usd["currency"], "USD")
         self.assertEqual(usd["nativeAmount"], 2250)
+        summary = asset_tree_metadata_summary(tree)
+        self.assertEqual(summary["cashLeafCount"], 2)
+        self.assertEqual(summary["cashTwdLeafCount"], 1)
+        self.assertEqual(summary["cashUsdLeafCount"], 1)
+        self.assertEqual(summary["cashUsdLeavesWithNativeAmount"], 1)
+        self.assertEqual(summary["cashLabels"], ["台幣現金", "美金現金"])
 
     def test_cash_breakdown_omits_zero_balances_and_preserves_funds(self):
         twd_only = build_asset_tree({}, {}, 150000, {"FUND": 27000}, cash_twd_value=150000, cash_usd_twd_value=0, cash_usd_native=0)

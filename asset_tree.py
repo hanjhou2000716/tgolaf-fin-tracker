@@ -181,6 +181,11 @@ def asset_tree_metadata_summary(tree):
         "stockLeavesWithShares": 0,
         "stockLeavesMissingShares": 0,
         "stockLeavesWithCollateral": 0,
+        "cashLeafCount": 0,
+        "cashTwdLeafCount": 0,
+        "cashUsdLeafCount": 0,
+        "cashUsdLeavesWithNativeAmount": 0,
+        "cashLabels": [],
     }
 
     def visit(node):
@@ -194,6 +199,18 @@ def asset_tree_metadata_summary(tree):
                 summary["stockLeavesWithShares"] += 1
             if _quantity(node.get("pledgedShares")) is not None:
                 summary["stockLeavesWithCollateral"] += 1
+        if node.get("assetClass") == "cash":
+            summary["cashLeafCount"] += 1
+            label = str(node.get("label") or "")
+            if label and label not in summary["cashLabels"]:
+                summary["cashLabels"].append(label)
+            currency = str(node.get("currency") or "").upper()
+            if currency == "TWD":
+                summary["cashTwdLeafCount"] += 1
+            elif currency == "USD":
+                summary["cashUsdLeafCount"] += 1
+                if _quantity(node.get("nativeAmount")) is not None:
+                    summary["cashUsdLeavesWithNativeAmount"] += 1
         for child in node.get("children") or []:
             visit(child)
 
