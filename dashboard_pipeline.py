@@ -1141,6 +1141,9 @@ def main():
         tw_shares=inventory["台股"],
         us_shares=inventory["美股"],
         pledged_shares=inventory["擔保品"],
+        cash_twd_value=cash_twd,
+        cash_usd_twd_value=cash_usd * usd_rate,
+        cash_usd_native=cash_usd,
     )
     asset_tree_metadata = asset_tree_metadata_summary(asset_tree)
     try:

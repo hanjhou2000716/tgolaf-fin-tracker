@@ -12,11 +12,30 @@ def _quantity(value):
     return quantity if math.isfinite(quantity) and quantity > 0 else None
 
 
-def _leaf(label, value, category, *, shares=None, pledged_shares=None, asset_class=None):
+def _leaf(
+    label,
+    value,
+    category,
+    *,
+    shares=None,
+    pledged_shares=None,
+    asset_class=None,
+    currency=None,
+    native_amount=None,
+):
     value = max(0.0, float(value or 0))
     leaf = {"label": str(label), "value": round(value, 2), "kind": "leaf", "category": category}
     if asset_class:
         leaf["assetClass"] = asset_class
+    if currency:
+        leaf["currency"] = str(currency)
+    if native_amount is not None:
+        try:
+            native = float(native_amount)
+        except (TypeError, ValueError):
+            native = None
+        if native is not None and math.isfinite(native) and native > 0:
+            leaf["nativeAmount"] = int(native) if native.is_integer() else native
     quantity = _quantity(shares)
     if quantity is not None:
         leaf["shares"] = int(quantity) if quantity.is_integer() else quantity
@@ -47,6 +66,9 @@ def build_asset_tree(
     tw_shares=None,
     us_shares=None,
     pledged_shares=None,
+    cash_twd_value=None,
+    cash_usd_twd_value=None,
+    cash_usd_native=None,
 ):
     """Build a gross-asset hierarchy; liabilities are intentionally excluded.
 
@@ -111,8 +133,28 @@ def build_asset_tree(
     tw_children = [_group(label, children, "現貨台股") for label, children in tw_groups.items() if children]
     us_children = [_group(label, children, "現貨美股") for label, children in us_groups.items() if children]
     cash_children = []
-    if float(cash_value or 0) > 0:
-        cash_children.append(_leaf("現金", cash_value, "現金與基金"))
+    # Keep the historical single-cash contract for callers that do not pass
+    # the optional breakdown values.  The dashboard supplies both values so
+    # TWD and USD cash become separate leaves without changing accounting.
+    if cash_twd_value is None and cash_usd_twd_value is None:
+        if float(cash_value or 0) > 0:
+            cash_children.append(_leaf("現金", cash_value, "現金與基金"))
+    else:
+        cash_twd = float(cash_twd_value or 0)
+        cash_usd_twd = float(cash_usd_twd_value or 0)
+        if cash_twd > 0:
+            cash_children.append(_leaf("台幣現金", cash_twd, "現金與基金", asset_class="cash", currency="TWD"))
+        if cash_usd_twd > 0:
+            cash_children.append(
+                _leaf(
+                    "美金現金",
+                    cash_usd_twd,
+                    "現金與基金",
+                    asset_class="cash",
+                    currency="USD",
+                    native_amount=cash_usd_native,
+                )
+            )
     cash_children.extend(_leaf(label, value, "現金與基金") for label, value in fund_positions.items() if value > 0)
 
     children = []
