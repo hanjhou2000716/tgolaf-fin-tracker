@@ -40,7 +40,7 @@ from transaction_schema import (
     parse_transaction_rows,
     schema_drift_digest,
 )
-from transaction_command import apply_reconciliation_events, build_ingestion_contract, build_ingestion_status, inventory_rows_from_transactions
+from transaction_command import apply_current_transactions, apply_reconciliation_events, build_ingestion_contract, build_ingestion_status, inventory_rows_from_transactions
 from settlement_pricing import enrich_missing_trade_prices
 from performance import performance_breakdown
 from market_data import MarketDataService, Quote
@@ -301,45 +301,10 @@ def _apply_current_transactions(inventory, transactions):
 
     Archived sheets still use the historical inventory adapter below.  V3
     events are already typed, so their accounting semantics are applied
-    directly (including cash effects of trades and pledge financing).
-    ``SET_BALANCE`` is intentionally deferred to the reconciliation adapter.
+    directly in chronological order (including cash effects of trades,
+    balance replacements, and pledge financing).
     """
-    for transaction in sorted(tuple(transactions or ()), key=lambda item: (item.transaction_date, item.source_row_id)):
-        action = transaction.action
-        asset_type = str(transaction.asset_type or "")
-        symbol = str(transaction.symbol or "")
-        quantity = float(transaction.quantity)
-        currency = str(transaction.currency or "TWD").upper()
-        if action == Action.SET_BALANCE:
-            continue
-        if action in {Action.BUY, Action.SELL}:
-            bucket = inventory.setdefault(asset_type, {})
-            bucket[symbol] = float(bucket.get(symbol, 0) or 0) + (quantity if action == Action.BUY else -quantity)
-            if transaction.price is not None:
-                cash_bucket = inventory.setdefault(f"現金_{currency}", {currency: 0.0})
-                cash_bucket[currency] = float(cash_bucket.get(currency, 0) or 0) + (
-                    -quantity * float(transaction.price) if action == Action.BUY else quantity * float(transaction.price)
-                )
-        elif action in {Action.DEPOSIT, Action.WITHDRAWAL}:
-            if asset_type == "擔保品":
-                bucket = inventory.setdefault("擔保品", {})
-                bucket[symbol] = float(bucket.get(symbol, 0) or 0) + (quantity if action == Action.DEPOSIT else -quantity)
-            else:
-                cash_bucket = inventory.setdefault(f"現金_{currency}", {currency: 0.0})
-                cash_bucket[currency] = float(cash_bucket.get(currency, 0) or 0) + (
-                    quantity if action == Action.DEPOSIT else -quantity
-                )
-        elif action in {Action.BORROW, Action.REPAY}:
-            debt_bucket = inventory.setdefault("質押負債", {"Current_Debt": 0.0, "History": []})
-            cash_bucket = inventory.setdefault(f"現金_{currency}", {currency: 0.0})
-            sign = 1 if action == Action.BORROW else -1
-            debt_bucket["Current_Debt"] = float(debt_bucket.get("Current_Debt", 0) or 0) + sign * quantity
-            cash_bucket[currency] = float(cash_bucket.get(currency, 0) or 0) + sign * quantity
-            debt_bucket.setdefault("History", []).append((transaction.transaction_date, debt_bucket["Current_Debt"]))
-        elif action == Action.SET_PLEDGE_RATE:
-            rate_bucket = inventory.setdefault("質押利率", {"Rate": 0.0, "History": []})
-            rate_bucket["Rate"] = quantity
-            rate_bucket.setdefault("History", []).append((transaction.transaction_date, quantity))
+    return apply_current_transactions(inventory, transactions)
 
 
 def calculate_current_assets():
@@ -722,8 +687,19 @@ def calculate_current_assets():
         if asset_type == "質押負債": inventory["質押負債"]["History"].append((row_date, inventory["質押負債"]["Current_Debt"]))
         elif asset_type == "質押利率": inventory["質押利率"]["History"].append((row_date, inventory["質押利率"]["Rate"]))
 
-    _apply_current_transactions(inventory, current_transactions)
+    # Establish legacy cash baselines first, then replay current-form events
+    # chronologically.  If a V3 row sets a balance and a later row withdraws
+    # or buys, applying reconciliation after all flows would erase that later
+    # cash movement (the defect behind the stale TWD tile).
+    current_transaction_ids = {item.transaction_id for item in current_transactions}
+    all_transactions = tuple(accepted_transactions)
+    accepted_transactions = tuple(
+        item for item in all_transactions if item.transaction_id not in current_transaction_ids
+    )
     accepted_transactions, reconciliation_events = apply_reconciliation_events(inventory, accepted_transactions)
+    current_transactions, current_reconciliation_events = _apply_current_transactions(inventory, current_transactions)
+    accepted_transactions = tuple(accepted_transactions) + tuple(current_transactions)
+    reconciliation_events = tuple(reconciliation_events) + tuple(current_reconciliation_events)
     ledger_sync_result = upload_private_transactions(accepted_transactions)
     sync_conflicts = tuple(getattr(ledger_sync_result, "conflicts", ()))
     sync_replays = tuple(getattr(ledger_sync_result, "replays", ()))

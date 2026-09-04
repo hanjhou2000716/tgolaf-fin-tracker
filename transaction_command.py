@@ -225,7 +225,8 @@ def inventory_rows_from_transactions(transactions, accepted_rows):
     """Build the legacy inventory stream without double-applying cash corrections.
 
     ``SET_BALANCE`` is the canonical command for cash reconciliation, so cash
-    rows are applied exactly once by :func:`apply_reconciliation_events`.
+    rows are applied exactly once by the chronological current/legacy
+    reconciliation paths.
     Historical Form rows also used the old "replace" operation for securities,
     pledge debt and funds.  Those rows are snapshot baselines, not cash
     corrections, and must remain in the compatibility inventory stream or the
@@ -275,3 +276,81 @@ def apply_reconciliation_events(inventory: dict[str, dict[str, Any]], transactio
             "eventType": "RECONCILIATION_INCREASE" if delta >= 0 else "RECONCILIATION_DECREASE",
         })
     return tuple(updated), events
+
+
+def apply_current_transactions(inventory: dict[str, dict[str, Any]], transactions):
+    """Apply current-form events in chronological order.
+
+    Current V3 rows can mix a balance replacement with later deposits,
+    withdrawals, or trades in the same response sheet.  Applying every
+    ``SET_BALANCE`` after all cash flows makes the replacement erase those
+    later flows.  This helper is deliberately small and deterministic: it
+    applies each event once in timestamp/source-row order and returns the
+    reconciliation deltas for cash replacements.
+    """
+    updated: list[Transaction] = []
+    events: list[dict[str, Any]] = []
+
+    def cash_bucket(currency: str) -> dict[str, Any]:
+        currency = currency.upper().strip()
+        return inventory.setdefault(f"現金_{currency}", {currency: 0.0})
+
+    for transaction in sorted(tuple(transactions or ()), key=lambda item: (item.transaction_date, item.source_row_id)):
+        action = transaction.action
+        asset_type = str(transaction.asset_type or "")
+        symbol = str(transaction.symbol or "")
+        currency = str(transaction.currency or "TWD").upper().strip()
+        quantity = Decimal(transaction.quantity)
+
+        if action == Action.SET_BALANCE:
+            if _is_cash_set_balance(transaction):
+                bucket = cash_bucket(currency)
+                previous = Decimal(str(bucket.get(currency, 0) or 0))
+                bucket[currency] = float(quantity)
+                adjusted = replace(transaction, reconciliation_delta=quantity - previous)
+                updated.append(adjusted)
+                events.append({
+                    "transactionId": transaction.transaction_id,
+                    "sourceRowId": transaction.source_row_id,
+                    "currency": currency,
+                    "previousBalance": str(previous),
+                    "targetBalance": str(quantity),
+                    "adjustment": str(quantity - previous),
+                    "eventType": "RECONCILIATION_INCREASE" if quantity >= previous else "RECONCILIATION_DECREASE",
+                })
+            else:
+                bucket = inventory.setdefault(asset_type, {})
+                if symbol:
+                    bucket[symbol] = float(quantity)
+                updated.append(transaction)
+            continue
+
+        if action in {Action.BUY, Action.SELL}:
+            bucket = inventory.setdefault(asset_type, {})
+            bucket[symbol] = float(bucket.get(symbol, 0) or 0) + float(quantity if action == Action.BUY else -quantity)
+            if transaction.price is not None:
+                cash = cash_bucket(currency)
+                notional = quantity * Decimal(transaction.price)
+                cash[currency] = float(Decimal(str(cash.get(currency, 0) or 0)) + (notional if action == Action.SELL else -notional))
+        elif action in {Action.DEPOSIT, Action.WITHDRAWAL}:
+            if asset_type == "擔保品":
+                bucket = inventory.setdefault("擔保品", {})
+                bucket[symbol] = float(bucket.get(symbol, 0) or 0) + float(quantity if action == Action.DEPOSIT else -quantity)
+            else:
+                cash = cash_bucket(currency)
+                delta = quantity if action == Action.DEPOSIT else -quantity
+                cash[currency] = float(Decimal(str(cash.get(currency, 0) or 0)) + delta)
+        elif action in {Action.BORROW, Action.REPAY}:
+            debt = inventory.setdefault("質押負債", {"Current_Debt": 0.0, "History": []})
+            cash = cash_bucket(currency)
+            delta = quantity if action == Action.BORROW else -quantity
+            debt["Current_Debt"] = float(Decimal(str(debt.get("Current_Debt", 0) or 0)) + delta)
+            cash[currency] = float(Decimal(str(cash.get(currency, 0) or 0)) + delta)
+            debt.setdefault("History", []).append((transaction.transaction_date, debt["Current_Debt"]))
+        elif action == Action.SET_PLEDGE_RATE:
+            rate = inventory.setdefault("質押利率", {"Rate": 0.0, "History": []})
+            rate["Rate"] = float(quantity)
+            rate.setdefault("History", []).append((transaction.transaction_date, float(quantity)))
+        updated.append(transaction)
+
+    return tuple(updated), tuple(events)
