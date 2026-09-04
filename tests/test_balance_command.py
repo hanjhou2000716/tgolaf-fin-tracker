@@ -5,7 +5,7 @@ from decimal import Decimal
 from attribution import build_pnl_attribution
 from performance import performance_breakdown
 from portfolio_ledger import PortfolioLedger, PortfolioLedgerConflict, PortfolioLedgerError
-from transaction_command import CommandStatus, CommandValidationError, apply_reconciliation_events, build_ingestion_contract, build_ingestion_status, command_from_transaction, parse_set_balance_command
+from transaction_command import CommandStatus, CommandValidationError, apply_current_transactions, apply_reconciliation_events, build_ingestion_contract, build_ingestion_status, command_from_transaction, parse_set_balance_command
 from transaction_schema import Action, Transaction
 from transaction_schema import parse_transaction_rows
 
@@ -15,6 +15,45 @@ def tx(action, *, quantity="0", currency="TWD", symbol="TWD", asset_type="現金
 
 
 class BalanceCommandTests(unittest.TestCase):
+    def test_current_cash_replacement_then_withdrawal_preserves_chronology(self):
+        inventory = {
+            "台股": {}, "美股": {}, "基金": {},
+            "現金_TWD": {"TWD": 0.0}, "現金_USD": {"USD": 0.0},
+            "質押負債": {"Current_Debt": 0.0, "History": []},
+            "質押利率": {"Rate": 3.3, "History": []}, "擔保品": {},
+        }
+        replacement = Transaction(**{**tx(Action.SET_BALANCE, quantity="90000", transaction_id="00000000-0000-0000-0000-000000000051").__dict__, "transaction_date": date(2026, 9, 1), "source_row_id": "form:3"})
+        withdrawal = Transaction(**{**tx(Action.WITHDRAWAL, quantity="24400", transaction_id="00000000-0000-0000-0000-000000000052").__dict__, "transaction_date": date(2026, 9, 3), "source_row_id": "form:6"})
+        updated, events = apply_current_transactions(inventory, [withdrawal, replacement])
+        self.assertEqual(inventory["現金_TWD"]["TWD"], 65600.0)
+        self.assertEqual([item.action for item in updated], [Action.SET_BALANCE, Action.WITHDRAWAL])
+        self.assertEqual(events[0]["targetBalance"], "90000")
+
+    def test_current_buy_after_cash_replacement_debits_cash_once(self):
+        inventory = {
+            "台股": {}, "美股": {}, "基金": {},
+            "現金_TWD": {"TWD": 90000.0}, "現金_USD": {"USD": 0.0},
+            "質押負債": {"Current_Debt": 0.0, "History": []},
+            "質押利率": {"Rate": 3.3, "History": []}, "擔保品": {},
+        }
+        buy = Transaction(**{**tx(Action.BUY, quantity="100", asset_type="台股", symbol="006208", transaction_id="00000000-0000-0000-0000-000000000055").__dict__, "transaction_date": date(2026, 9, 3), "source_row_id": "form:5", "price": Decimal("120")})
+        withdrawal = Transaction(**{**tx(Action.WITHDRAWAL, quantity="24400", transaction_id="00000000-0000-0000-0000-000000000056").__dict__, "transaction_date": date(2026, 9, 3), "source_row_id": "form:6"})
+        apply_current_transactions(inventory, [withdrawal, buy])
+        self.assertEqual(inventory["台股"]["006208"], 100.0)
+        self.assertEqual(inventory["現金_TWD"]["TWD"], 53600.0)
+
+    def test_current_cash_currencies_remain_separate(self):
+        inventory = {
+            "現金_TWD": {"TWD": 0.0}, "現金_USD": {"USD": 0.0},
+            "質押負債": {"Current_Debt": 0.0, "History": []},
+            "質押利率": {"Rate": 3.3, "History": []},
+        }
+        usd = Transaction(**{**tx(Action.SET_BALANCE, quantity="265.72", currency="USD", symbol="USD", transaction_id="00000000-0000-0000-0000-000000000053").__dict__, "transaction_date": date(2026, 9, 1), "source_row_id": "form:3"})
+        twd = Transaction(**{**tx(Action.SET_BALANCE, quantity="90000", transaction_id="00000000-0000-0000-0000-000000000054").__dict__, "transaction_date": date(2026, 9, 1), "source_row_id": "form:4"})
+        apply_current_transactions(inventory, [twd, usd])
+        self.assertEqual(inventory["現金_TWD"]["TWD"], 90000.0)
+        self.assertEqual(inventory["現金_USD"]["USD"], 265.72)
+
     def test_explicit_set_balance_is_applied(self):
         command = parse_set_balance_command({"command": "SET_BALANCE", "source_row_id": "Form:2", "asset_type": "現金_TWD", "symbol": "TWD", "currency": "TWD", "target_balance": "150000", "transaction_date": "2026-08-14"})
         self.assertEqual(command.transaction.action, Action.SET_BALANCE)
