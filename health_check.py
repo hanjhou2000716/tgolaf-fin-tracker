@@ -67,7 +67,7 @@ def send_alert(issues):
         json={
             "chat_id": chat_id,
             "text": message,
-            "reply_markup": {"inline_keyboard": [[{"text": "🌱 開啟Growth儀表板", "web_app": {"url": GROWTH_URL}}]]},
+            "reply_markup": {"inline_keyboard": [[{"text": "🌱 Growth儀表板", "web_app": {"url": GROWTH_URL}}]]},
         },
         timeout=15,
     )
