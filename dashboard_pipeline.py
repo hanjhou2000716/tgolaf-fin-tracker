@@ -2098,7 +2098,7 @@ def main():
 
     keyboard = {
         "inline_keyboard": [
-            [{"text": "🌱 開啟Growth儀表板", "web_app": {"url": WEB_APP_URL}}],
+            [{"text": "🌱 Growth儀表板", "web_app": {"url": WEB_APP_URL}}],
         ]
     }
     
