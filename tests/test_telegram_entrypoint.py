@@ -24,6 +24,10 @@ class TelegramEntrypointTests(unittest.TestCase):
         self.assertIn('tg_text += "\\n" + buy_hold_telegram_line(buy_hold_policy)', source)
         self.assertIn("Telegram Buy&Hold line sent", source)
         self.assertIn("completed-session-close", (ROOT / "buy_hold_policy.py").read_text(encoding="utf-8"))
+        self.assertIn("get_taiex_history", source)
+        self.assertIn("buyhold-market-data-summary.json", source)
+        self.assertNotIn('yf.Ticker("^TWII").history(period="2y"', source)
+        self.assertNotIn('yf.Ticker("^TWII").history(period="200d"', source)
 
     def test_buy_hold_card_sits_between_leverage_and_exposure(self):
         dashboard = (ROOT / "dashboard_pipeline.py").read_text(encoding="utf-8").split('html_content = f"""', 1)[1]
