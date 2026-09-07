@@ -39,6 +39,7 @@ class TelegramEntrypointTests(unittest.TestCase):
         self.assertIn("buyhold-metric--next", dashboard)
         self.assertNotIn("buyhold-info-grid", dashboard)
         self.assertNotIn("buyhold-gate", dashboard)
+        self.assertNotIn("距—", dashboard)
         self.assertIn("buyhold-metric--next.is-green", dashboard)
         self.assertIn("buyhold-metric--next.is-yellow", dashboard)
         self.assertIn("buyhold-metric--next.is-orange", dashboard)
