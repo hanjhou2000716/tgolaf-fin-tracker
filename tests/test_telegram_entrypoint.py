@@ -18,6 +18,18 @@ class TelegramEntrypointTests(unittest.TestCase):
         self.assertNotIn("外部現金流 {performance", source)
         self.assertNotIn("融資現金流 {performance", source)
 
+    def test_buy_hold_policy_is_one_additional_line(self):
+        source = (ROOT / "dashboard_pipeline.py").read_text(encoding="utf-8")
+        self.assertIn("buy_hold_telegram_line", source)
+        self.assertIn('tg_text += "\\n" + buy_hold_telegram_line(buy_hold_policy)', source)
+        self.assertIn("completed-session-close", (ROOT / "buy_hold_policy.py").read_text(encoding="utf-8"))
+
+    def test_buy_hold_card_sits_between_leverage_and_exposure(self):
+        dashboard = (ROOT / "dashboard_pipeline.py").read_text(encoding="utf-8").split('html_content = f"""', 1)[1]
+        self.assertLess(dashboard.index("槓桿 <span"), dashboard.index("{buy_hold_section_html}"))
+        self.assertLess(dashboard.index("{buy_hold_section_html}"), dashboard.index("曝險 <span"))
+        self.assertIn('"buyHold": buy_hold_policy', dashboard)
+
 
 if __name__ == "__main__":
     unittest.main()

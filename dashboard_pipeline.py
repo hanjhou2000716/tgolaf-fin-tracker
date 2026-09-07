@@ -66,6 +66,7 @@ from refresh_recovery import inventory_has_positive_assets, validate_recovery_ca
 from ledger_conflict_diagnostics import ledger_conflict_digest, ledger_conflict_summary_artifact
 from source_roles import SourceRoleConfig
 from form_v3 import FORM_V3_SCHEMA
+from buy_hold_policy import build_buy_hold_policy, buy_hold_telegram_line
 
 # ==========================================
 # 1. 環境變數與金鑰設定
@@ -1140,9 +1141,16 @@ def main():
     }
     liabilities_json = json.dumps(liabilities_payload, ensure_ascii=False)
 
+    # Buy&Hold V1 uses only completed-session TAIEX closes.  Keep the history
+    # fetch isolated from the existing quote fallbacks so a market-data
+    # outage renders an explicit unavailable light instead of reusing a stale
+    # light or failing the daily summary.
     try:
-        taiex_val = float(yf.Ticker("^TWII").history(period="1d")["Close"].iloc[-1])
+        taiex_history = yf.Ticker("^TWII").history(period="2y", interval="1d", auto_adjust=False)
+        taiex_closes = taiex_history["Close"].dropna() if taiex_history is not None and "Close" in taiex_history else []
+        taiex_val = float(taiex_closes.iloc[-1]) if len(taiex_closes) else None
     except Exception:
+        taiex_history = None
         taiex_val = None
     try:
         nasdaq_val = float(yf.Ticker("^IXIC").history(period="1d")["Close"].iloc[-1])
@@ -1154,6 +1162,18 @@ def main():
 
     stress_scenarios = build_stress_scenarios(
         asset_006208_value, net_asset, pledged_value, pledged_006208_value, total_debt
+    )
+
+    buy_hold_policy = build_buy_hold_policy(
+        taiex_history,
+        net_asset=net_asset,
+        total_cash=total_cash_twd,
+        total_debt=total_debt,
+        maintenance_ratio=maintenance_ratio if total_debt > 0 else None,
+        pledged_value_available=bool(total_debt <= 0 or pledged_value > 0),
+        current_00685l_value=position_values_twd.get("00685L", 0),
+        as_of=tw_now,
+        nav_history=history_records,
     )
 
     yesterday_net = next((float(str(row.get('Net_Asset', 0)).replace(',', '')) for row in reversed(history_records) if float(str(row.get('Net_Asset', 0)).replace(',', '')) > 0 and str(row.get('Date', ''))[-5:] != today_str), 0)
@@ -1308,6 +1328,26 @@ def main():
             return f"{'+' if rate>=0 else ''}{rate:.1f}%(實)"
         return "資料累積中"
 
+    # Keep the Buy&Hold card intentionally compact: it is a policy/state
+    # display, not a research report and never an order instruction.
+    bh_light = buy_hold_policy.get("light") or {}
+    bh_next = bh_light.get("nextLight") or {}
+    bh_gate = buy_hold_policy.get("portfolioGate") or {}
+    bh_gate_status = bh_gate.get("status") or "DATA UNAVAILABLE"
+    bh_dd = bh_light.get("dd240")
+    bh_dd_text = f"{float(bh_dd) * 100:.1f}%" if isinstance(bh_dd, (int, float)) and math.isfinite(float(bh_dd)) else "—"
+    bh_next_name = bh_next.get("name") or "—"
+    bh_distance = bh_next.get("distancePct")
+    bh_distance_text = f"{float(bh_distance) * 100:.1f}%" if isinstance(bh_distance, (int, float)) and math.isfinite(float(bh_distance)) else "—"
+    bh_action = (buy_hold_policy.get("recommendation") or {}).get("action") or "Opportunity Buy disabled"
+    bh_light_text = f"{bh_light.get('emoji', '⚪')} {bh_light.get('name', '資料暫不可用')}"
+    buy_hold_section_html = f'''<div class="risk-section buyhold-section" id="buyhold">
+                <div class="sec-title">Buy&amp;Hold 紅綠燈 <span class="sec-note">Market opportunity</span></div>
+                <div class="buyhold-primary"><span>當前燈號</span><strong>{bh_light_text}</strong><small>{bh_light.get("meaning", "Opportunity Buy disabled")}</small></div>
+                <div class="buyhold-info-grid"><div><span>目前回撤</span><b>{bh_dd_text}</b></div><div><span>距{bh_next_name if bh_next_name != "—" else "下一燈"}</span><b>{bh_distance_text}</b></div><div><span>建議動作</span><b>{bh_action}</b></div></div>
+                <div class="buyhold-gate"><span>Portfolio Gate</span><strong>{bh_gate_status}</strong></div>
+            </div>'''
+
     html_content = f"""
     <!DOCTYPE html>
     <html lang="zh-TW">
@@ -1423,8 +1463,9 @@ def main():
             .risk-pair,.exposure-pair {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
             .risk-column,.exposure-row {{ background:#f8faf7; border:1px solid #d8dfd8; border-radius:12px; padding:15px 13px; min-width:0; }} .risk-column strong,.exposure-row strong {{ display:block; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; margin-top:7px; letter-spacing:-.02em; }} .risk-column small,.exposure-row small {{ display:block; margin-top:6px; color:var(--muted); font-size:12px; line-height:1.45; }}
             .risk-card-label {{ display:block; color:var(--muted); font-size:12px; font-weight:700; }} .risk-card-value {{ display:block; margin-top:7px; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; letter-spacing:-.02em; }} .risk-divider {{ border:0; border-top:1px solid #d5ddd5; margin:12px 0 10px; }} .risk-card-detail,.risk-card-subdetail,.risk-card-status {{ display:block; line-height:1.45; }} .risk-card-detail {{ color:var(--ink); font-size:13px; font-weight:700; }} .risk-card-subdetail {{ margin-top:4px; color:var(--muted); font-size:12px; }} .risk-card-status {{ margin-top:8px; font-size:12px; font-weight:700; white-space:normal; }}
+            .buyhold-section {{ border-top-color:var(--navy); }} .buyhold-primary {{ display:flex; align-items:baseline; justify-content:space-between; gap:10px; flex-wrap:wrap; padding:12px 13px; border-radius:12px; background:#f8faf7; border:1px solid #d8dfd8; }} .buyhold-primary span,.buyhold-info-grid span,.buyhold-gate span {{ color:var(--muted); font-size:11px; }} .buyhold-primary strong {{ color:var(--navy); font-size:22px; }} .buyhold-primary small {{ width:100%; color:var(--ink); font-size:12px; }} .buyhold-info-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin-top:9px; }} .buyhold-info-grid > div {{ min-width:0; padding:10px; border:1px solid #d8dfd8; border-radius:10px; background:#f8faf7; }} .buyhold-info-grid b {{ display:block; margin-top:5px; color:var(--navy); font-size:14px; line-height:1.4; word-break:break-word; }} .buyhold-gate {{ display:flex; justify-content:space-between; gap:10px; margin-top:9px; padding:9px 10px; border-radius:10px; background:#eef2ee; }} .buyhold-gate strong {{ color:var(--navy); font-size:12px; }}
             .risk-section .sec-title {{ margin-bottom:11px !important; }}
-            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ gap:7px; }} .change,.sync {{ padding:9px 8px; font-size:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .risk-section {{ padding:13px; }} .risk-column,.exposure-row {{ padding:14px 12px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} .asset-treemap {{ min-height:360px; }} .asset-treemap-node.is-group,.asset-treemap-node.is-leaf {{ padding:7px; }} .asset-treemap-node.is-group > .asset-treemap-title,.asset-treemap-node.is-leaf > .asset-treemap-title {{ font-size:12px; }} .asset-treemap-value {{ font-size:11px; }} .asset-treemap-percent {{ font-size:11px; }} .market-chart-tooltip {{ min-width:150px; max-width:190px; padding:7px 8px; font-size:10px; }} .market-chart-tooltip b {{ font-size:11px; }} }}
+            @media (max-width:540px) {{ body {{ padding:22px 14px 34px; }} .header-wrapper {{ align-items:flex-start; gap:10px; }} .hero, .card {{ padding:17px; }} .hero-top {{ align-items:flex-start; flex-direction:column; gap:10px; }} .hero-status-row {{ gap:7px; }} .change,.sync {{ padding:9px 8px; font-size:10px; }} .metric-grid {{ gap:8px; }} .metric-value {{ font-size:15px; }} .grid-2, .stress-grid, .risk-pair, .exposure-pair {{ gap:8px; }} .risk-section {{ padding:13px; }} .risk-column,.exposure-row {{ padding:14px 12px; }} .buyhold-info-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} .buyhold-info-grid > div:last-child {{ grid-column:1 / -1; }} .buyhold-primary strong {{ font-size:19px; }} .block-grid {{ grid-template-columns:1fr 1fr; gap:8px; }} .box {{ padding:11px; }} .actions {{ grid-template-columns:1fr; }} .chart-hint {{ width:100%; margin-left:0; }} .asset-treemap {{ min-height:360px; }} .asset-treemap-node.is-group,.asset-treemap-node.is-leaf {{ padding:7px; }} .asset-treemap-node.is-group > .asset-treemap-title,.asset-treemap-node.is-leaf > .asset-treemap-title {{ font-size:12px; }} .asset-treemap-value {{ font-size:11px; }} .asset-treemap-percent {{ font-size:11px; }} .market-chart-tooltip {{ min-width:150px; max-width:190px; padding:7px 8px; font-size:10px; }} .market-chart-tooltip b {{ font-size:11px; }} }}
         </style>
     </head>
     <body>
@@ -1503,6 +1544,7 @@ def main():
                     <div class="risk-column"><span class="risk-card-label">質押維持率</span><strong class="risk-card-value {maintenance_status_class}">{maintenance_ratio:.1f}%</strong><hr class="risk-divider"><span class="risk-card-detail">借款: ${debt_principal:,.0f}</span><span class="risk-card-subdetail">(含息負債 ${total_debt:,.0f})</span><span class="risk-card-status {maintenance_status_class}">{ratio_status}</span></div>
                 </div>
             </div>
+            {buy_hold_section_html}
             <div class="risk-section">
                 <div class="sec-title" style="margin-bottom:10px;">曝險 <span class="sec-note">Look-through concentration</span></div>
                 <div class="exposure-pair">
@@ -1958,6 +2000,7 @@ def main():
     }
 
     data_for_web = {
+        "buyHold": buy_hold_policy,
         "taiex": round(taiex_val, 2) if taiex_val is not None else None,
         "nasdaq": round(nasdaq_val, 2) if nasdaq_val is not None else None,
         "ma200": round(ma200_val, 2) if ma200_val is not None else None,
@@ -1981,6 +2024,7 @@ def main():
             "liabilities": liabilities_payload,
             "allocation": allocation_items,
             "risk": risk_summary,
+            "buyHold": buy_hold_policy,
             "usLargest": {
                 "symbol": us_largest_symbol,
                 "value": round(us_largest_value, 2),
@@ -2084,6 +2128,9 @@ def main():
             # daily_pct 本身就是負數，所以直接顯示即可
             msg_body = f"💸 可憐的阿洲，今天賠了 {abs(int(daily_diff)):,} 元 ({daily_pct:.1f}%)"
         tg_text = f"✅ {display_date} 結算完畢！\n{msg_body}"
+        # V1 adds exactly one compact policy line to the existing settlement
+        # notification.  It never includes private portfolio values.
+        tg_text += "\n" + buy_hold_telegram_line(buy_hold_policy)
     conflict_digest = ledger_conflict_digest(sync_conflicts) if sync_conflicts else ""
     conflict_already_alerted = ledger_conflict_alert_sent(
         history_sheet, tw_now.strftime("%Y-%m-%d"), conflict_digest
