@@ -34,6 +34,10 @@ class TelegramEntrypointTests(unittest.TestCase):
         self.assertLess(dashboard.index("槓桿 <span"), dashboard.index("{buy_hold_section_html}"))
         self.assertLess(dashboard.index("{buy_hold_section_html}"), dashboard.index("曝險 <span"))
         self.assertIn('"buyHold": buy_hold_policy', dashboard)
+        self.assertIn("buyhold-metrics-rail", dashboard)
+        self.assertIn("buyhold-metric--drawdown", dashboard)
+        self.assertIn("buyhold-metric--next", dashboard)
+        self.assertNotIn("buyhold-info-grid", dashboard)
 
 
 if __name__ == "__main__":
