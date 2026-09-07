@@ -22,6 +22,7 @@ class TelegramEntrypointTests(unittest.TestCase):
         source = (ROOT / "dashboard_pipeline.py").read_text(encoding="utf-8")
         self.assertIn("buy_hold_telegram_line", source)
         self.assertIn('tg_text += "\\n" + buy_hold_telegram_line(buy_hold_policy)', source)
+        self.assertIn("Telegram Buy&Hold line sent", source)
         self.assertIn("completed-session-close", (ROOT / "buy_hold_policy.py").read_text(encoding="utf-8"))
 
     def test_buy_hold_card_sits_between_leverage_and_exposure(self):

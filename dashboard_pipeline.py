@@ -2195,6 +2195,9 @@ def main():
                     mark_schema_drift_alert_sent(
                         history_sheet, snapshot_date, schema_digest, tw_now.isoformat()
                     )
+            # This line is intentionally non-financial and makes production
+            # verification auditable without logging the settlement payload.
+            print(f"Telegram Buy&Hold line sent: {buy_hold_telegram_line(buy_hold_policy)}")
             print(f"Telegram notification sent; window={settlement_window}, forced={FORCE_TELEGRAM}")
         except requests.RequestException as error:
             print(f"Telegram notification failed: {error}")
