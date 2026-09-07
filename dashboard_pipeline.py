@@ -43,7 +43,7 @@ from transaction_schema import (
 from transaction_command import apply_current_transactions, apply_reconciliation_events, build_ingestion_contract, build_ingestion_status, inventory_rows_from_transactions
 from settlement_pricing import enrich_missing_trade_prices
 from performance import performance_breakdown
-from market_data import MarketDataService, Quote, get_taiex_history
+from market_data import MarketDataService, Quote, get_taiex_history, write_taiex_history_cache
 from metrics import summarize_performance
 from attribution import build_pnl_attribution
 from exposure import build_exposure_matrix
@@ -1173,22 +1173,37 @@ def main():
     buy_hold_policy["marketData"] = {
         key: taiex_market_data.get(key)
         for key in (
-            "status", "source", "quality", "latestSessionDate", "sessionCount",
-            "fetchedAt", "fallbackReason", "sourceComparison",
+            "status", "marketDataStatus", "signalStatus", "source", "quality",
+            "latestSessionDate", "expectedLatestSessionDate", "sessionCount",
+            "rawSessionCount", "completedSessionCount", "completedSessionCutoff",
+            "calendarValidation", "fetchedAt",
+            "fallbackReason", "sourceComparison", "cacheUsed", "cacheValidation",
         )
     }
     if taiex_market_data.get("status") != "READY":
         buy_hold_policy["reason"] = taiex_market_data.get("fallbackReason") or "TAIEX history unavailable"
     write_json(".private-build/buyhold-market-data-summary.json", {
         "status": taiex_market_data.get("status"),
+        "marketDataStatus": taiex_market_data.get("marketDataStatus"),
+        "signalStatus": taiex_market_data.get("signalStatus"),
         "source": taiex_market_data.get("source"),
         "quality": taiex_market_data.get("quality"),
         "latestSessionDate": taiex_market_data.get("latestSessionDate"),
+        "expectedLatestSessionDate": taiex_market_data.get("expectedLatestSessionDate"),
+        "rawSessionCount": taiex_market_data.get("rawSessionCount", 0),
+        "completedSessionCount": taiex_market_data.get("completedSessionCount", 0),
+        "completedSessionCutoff": taiex_market_data.get("completedSessionCutoff"),
+        "calendarValidation": taiex_market_data.get("calendarValidation"),
         "sessionCount": taiex_market_data.get("sessionCount", 0),
         "fetchedAt": taiex_market_data.get("fetchedAt"),
         "fallbackReason": taiex_market_data.get("fallbackReason"),
         "sourceComparison": taiex_market_data.get("sourceComparison"),
+        "cacheUsed": taiex_market_data.get("cacheUsed", False),
+        "cacheValidation": taiex_market_data.get("cacheValidation"),
     })
+    # Keep a private, independently validated history artifact for the next
+    # run.  A source mismatch or a cache replay can never refresh the cache.
+    write_taiex_history_cache(".private-build/taiex-history-cache.json", taiex_market_data, now=tw_now)
 
     yesterday_net = next((float(str(row.get('Net_Asset', 0)).replace(',', '')) for row in reversed(history_records) if float(str(row.get('Net_Asset', 0)).replace(',', '')) > 0 and str(row.get('Date', ''))[-5:] != today_str), 0)
     daily_diff = net_asset - yesterday_net if yesterday_net else 0
@@ -1348,13 +1363,13 @@ def main():
     bh_next = bh_light.get("nextLight") or {}
     bh_dd = bh_light.get("dd240")
     bh_dd_text = f"{float(bh_dd) * 100:.1f}%" if isinstance(bh_dd, (int, float)) and math.isfinite(float(bh_dd)) else "—"
-    bh_next_name = bh_next.get("name") or "—"
+    bh_next_name = str(bh_next.get("name") or "下一燈")
     bh_distance = bh_next.get("distancePct")
     bh_distance_text = f"{float(bh_distance) * 100:.1f}%" if isinstance(bh_distance, (int, float)) and math.isfinite(float(bh_distance)) else "—"
     bh_action = (buy_hold_policy.get("recommendation") or {}).get("action") or "Opportunity Buy disabled"
     bh_light_text = f"{bh_light.get('emoji', '⚪')} {bh_light.get('name', '資料暫不可用')}"
     bh_code = str(bh_light.get("code") or "UNAVAILABLE").upper()
-    bh_next_code = str(bh_next.get("code") or ("RED" if bh_code == "RED" else "UNAVAILABLE")).upper()
+    bh_next_code = str(bh_next.get("code") or ("RED" if bh_code == "RED" else "UNAVAILABLE")).upper() if bh_code != "UNAVAILABLE" else "UNAVAILABLE"
     bh_next_class = {
         "GREEN": "is-green",
         "YELLOW": "is-yellow",
@@ -1363,7 +1378,7 @@ def main():
     }.get(bh_next_code, "is-unavailable")
     bh_meaning = str(bh_light.get("meaning") or "資料暫不可用")
     bh_action_text = "資料不足，暫停買進" if bh_code == "UNAVAILABLE" else f"{bh_meaning} · {bh_action}"
-    bh_next_label = "已達最高機會級別" if bh_code == "RED" else f"距{bh_next_name if bh_next_name != '—' else '下一燈'}"
+    bh_next_label = "已達最高機會級別" if bh_code == "RED" else "距下一燈" if bh_code == "UNAVAILABLE" else f"距{bh_next_name if bh_next_name not in {'', '—'} else '下一燈'}"
     buy_hold_section_html = f'''<div class="risk-section buyhold-section" id="buyhold">
                 <div class="sec-title">Buy&amp;Hold 紅綠燈 <span class="sec-note">Market opportunity</span></div>
                 <div class="buyhold-primary"><div class="buyhold-primary-content"><div class="buyhold-primary-heading"><span>當前燈號</span><strong>{bh_light_text}</strong></div><small>{bh_action_text}</small></div><div class="buyhold-metrics-rail"><div class="buyhold-metric buyhold-metric--drawdown"><span>目前回撤</span><b>{bh_dd_text}</b></div><div class="buyhold-metric buyhold-metric--next {bh_next_class}"><span>{bh_next_label}</span><b>{bh_distance_text}</b></div></div></div>

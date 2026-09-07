@@ -209,6 +209,8 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertIn('class="buyhold-metrics-rail"', private_html)
             self.assertIn('class="buyhold-metric buyhold-metric--drawdown"', private_html)
             self.assertIn('class="buyhold-metric buyhold-metric--next is-unavailable"', private_html)
+            self.assertNotIn("距—", private_html)
+            self.assertIn("bhCode==='UNAVAILABLE'?'距下一燈'", private_html)
             self.assertIn("buyhold-metric--next.is-green", private_html)
             self.assertIn("buyhold-metric--next.is-yellow", private_html)
             self.assertIn("buyhold-metric--next.is-orange", private_html)

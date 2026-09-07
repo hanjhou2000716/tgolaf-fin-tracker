@@ -35,6 +35,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
+      actions: read
       contents: read
     steps:
       - name: Checkout Repository
@@ -55,6 +56,20 @@ jobs:
 
       - name: Run formula and data validation tests
         run: python -m unittest discover -s tests -v
+
+      - name: Download latest validated TAIEX cache
+        # actions/download-artifact only sees artifacts from this run.  Use
+        # the read-only Actions API to fetch the most recent successful cache
+        # before the tracker runs; a missing cache is a safe cold start.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p .taiex-cache
+          for previous_run in $(gh run list --workflow cron.yml --branch main --status success --limit 20 --json databaseId --jq '.[].databaseId'); do
+            if gh run download "$previous_run" --name taiex-history-cache --dir .taiex-cache; then
+              break
+            fi
+          done
 
       - name: Run Tracker Script (Generate private snapshot and public Demo)
         env:
@@ -78,6 +93,7 @@ jobs:
           CURRENT_TRANSACTION_SOURCE: ${{ vars.CURRENT_TRANSACTION_SOURCE || 'TRANSACTIONS_CURRENT' }}
           LEGACY_TRANSACTION_SOURCES: ${{ vars.LEGACY_TRANSACTION_SOURCES || '表單回覆 3,Form Responses 1,Form Responses 2,Form V2' }}
           HISTORY_SOURCE: ${{ vars.HISTORY_SOURCE || 'History' }}
+          TAIEX_HISTORY_CACHE_PATH: .taiex-cache/taiex-history-cache.json
         run: python main.py
 
       - name: Upload private schema recovery summary
@@ -107,6 +123,16 @@ jobs:
           name: buyhold-market-data-summary
           path: .private-build/buyhold-market-data-summary.json
           if-no-files-found: error
+
+      - name: Upload validated TAIEX history cache
+        # Full index sessions are private market data, never part of Pages.
+        # A mismatch or unavailable run produces no cache and cannot poison
+        # the last validated artifact.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: taiex-history-cache
+          path: .private-build/taiex-history-cache.json
+          if-no-files-found: ignore
 
       - name: Verify generated public Demo is sanitized
         run: |

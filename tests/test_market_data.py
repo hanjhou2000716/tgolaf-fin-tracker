@@ -1,22 +1,30 @@
 import unittest
+import json
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from market_data import (
     MarketDataService,
     Quote,
+    build_taiex_history_cache,
     compare_taiex_sources,
     fetch_twse_taiex_history,
     get_taiex_history,
+    load_taiex_history_cache,
     parse_twse_taiex_payload,
     parse_yahoo_taiex_payload,
 )
 
 
 def _rows(end=date(2026, 9, 7), count=250, close=22000):
-    return [
-        {"date": (end - timedelta(days=count - index - 1)).isoformat(), "close": close + index}
-        for index in range(count)
-    ]
+    dates = []
+    cursor = end
+    while len(dates) < count:
+        if cursor.weekday() < 5:
+            dates.append(cursor)
+        cursor -= timedelta(days=1)
+    return [{"date": item.isoformat(), "close": close + index} for index, item in enumerate(reversed(dates))]
 
 
 class _Response:
@@ -130,11 +138,57 @@ class MarketDataContractTests(unittest.TestCase):
 
     def test_source_comparison_rejects_date_or_price_mismatch(self):
         mismatch_date = compare_taiex_sources(_rows(), _rows(end=date(2026, 9, 6)))
-        self.assertEqual(mismatch_date["status"], "SOURCE_MISMATCH")
+        self.assertEqual(mismatch_date["status"], "SECONDARY_LAGGING")
+        self.assertEqual(mismatch_date["comparisonDate"], "2026-09-04")
         shifted = _rows()
         shifted[-1] = {**shifted[-1], "close": shifted[-1]["close"] * 1.01}
         mismatch_price = compare_taiex_sources(_rows(), shifted)
         self.assertEqual(mismatch_price["status"], "SOURCE_MISMATCH")
+
+    def test_twse_newer_yahoo_lag_is_ready_and_diagnostic_only(self):
+        result = get_taiex_history(
+            now=date(2026, 9, 7),
+            twse_fetcher=lambda: _rows(end=date(2026, 9, 7)),
+            yahoo_fetcher=lambda: _rows(end=date(2026, 9, 4)),
+            compare_sources=True,
+        )
+        self.assertEqual(result["status"], "READY")
+        self.assertEqual(result["source"], "TWSE")
+        self.assertEqual(result["sourceComparison"]["status"], "SECONDARY_LAGGING")
+        self.assertEqual(result["latestSessionDate"], "2026-09-07")
+        self.assertGreaterEqual(result["rawSessionCount"], result["completedSessionCount"])
+
+    def test_validated_cache_is_used_only_when_both_sources_fail(self):
+        current = get_taiex_history(now=date(2026, 9, 7), twse_fetcher=lambda: _rows(), compare_sources=False)
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "taiex-history-cache.json"
+            path.write_text(json.dumps(build_taiex_history_cache(current, now=date(2026, 9, 7))), encoding="utf-8")
+            result = get_taiex_history(
+                now=date(2026, 9, 7),
+                twse_fetcher=lambda: (_ for _ in ()).throw(RuntimeError("down")),
+                yahoo_fetcher=lambda: (_ for _ in ()).throw(RuntimeError("down")),
+                cache_path=path,
+            )
+            self.assertEqual(result["status"], "READY")
+            self.assertTrue(result["cacheUsed"])
+            self.assertEqual(result["quality"], "validated_cache")
+            loaded, error = load_taiex_history_cache(path, now=date(2026, 9, 7))
+            self.assertIsNotNone(loaded)
+            self.assertIsNone(error)
+
+    def test_cache_missing_latest_completed_session_is_rejected(self):
+        current = get_taiex_history(now=date(2026, 9, 6), twse_fetcher=lambda: _rows(end=date(2026, 9, 6)), compare_sources=False)
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "taiex-history-cache.json"
+            path.write_text(json.dumps(build_taiex_history_cache(current, now=date(2026, 9, 6))), encoding="utf-8")
+            result = get_taiex_history(
+                now=date(2026, 9, 7),
+                twse_fetcher=lambda: (_ for _ in ()).throw(RuntimeError("down")),
+                yahoo_fetcher=lambda: (_ for _ in ()).throw(RuntimeError("down")),
+                cache_path=path,
+            )
+            self.assertEqual(result["status"], "UNAVAILABLE")
+            self.assertIn("latest expected", result["cacheValidation"])
 
     def test_stale_or_missing_sources_are_unavailable(self):
         stale = get_taiex_history(now=date(2026, 9, 7), twse_fetcher=lambda: _rows(end=date(2026, 8, 1)), yahoo_fetcher=lambda: _rows(end=date(2026, 8, 1)))
