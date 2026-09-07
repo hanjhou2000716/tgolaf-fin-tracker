@@ -197,9 +197,10 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertIn("Buy&amp;Hold 紅綠燈", public_html)
             self.assertIn("⚪ 資料暫不可用", public_html)
             self.assertIn("buyHoldLight", private_html)
-            for element_id in ("buyHoldMeaning", "buyHoldDrawdown", "buyHoldNextDistance", "buyHoldGate"):
+            for element_id in ("buyHoldMeaning", "buyHoldDrawdown", "buyHoldNextLabel", "buyHoldNextDistance"):
                 self.assertIn(f'id="{element_id}"', private_html)
-            self.assertIn("Portfolio Gate", private_html)
+            self.assertNotIn("Portfolio Gate", private_html)
+            self.assertNotIn('id="buyHoldGate"', private_html)
             self.assertIn("資料不足，暫停買進", public_html)
             self.assertIn("bhRec.action", private_html)
             self.assertNotIn('id="buyHoldAction"', private_html)
@@ -207,8 +208,12 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertIn('class="buyhold-primary-content"', private_html)
             self.assertIn('class="buyhold-metrics-rail"', private_html)
             self.assertIn('class="buyhold-metric buyhold-metric--drawdown"', private_html)
-            self.assertIn('class="buyhold-metric buyhold-metric--next"', private_html)
-            primary = private_html[private_html.index('class="buyhold-primary"'):private_html.index('class="buyhold-gate"')]
+            self.assertIn('class="buyhold-metric buyhold-metric--next is-unavailable"', private_html)
+            self.assertIn("buyhold-metric--next.is-green", private_html)
+            self.assertIn("buyhold-metric--next.is-yellow", private_html)
+            self.assertIn("buyhold-metric--next.is-orange", private_html)
+            self.assertIn("buyhold-metric--next.is-red", private_html)
+            primary = private_html[private_html.index('class="buyhold-primary"'):private_html.index('</div></div></div>', private_html.index('class="buyhold-primary"'))]
             self.assertLess(primary.index("buyHoldDrawdown"), primary.index("buyHoldNextDistance"))
             risk = private_html[private_html.index('<section id="risk"'):private_html.index('<section id="growth"')]
             self.assertLess(risk.index("槓桿"), risk.index("Buy&amp;Hold"))

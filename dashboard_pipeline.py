@@ -1346,8 +1346,6 @@ def main():
     # display, not a research report and never an order instruction.
     bh_light = buy_hold_policy.get("light") or {}
     bh_next = bh_light.get("nextLight") or {}
-    bh_gate = buy_hold_policy.get("portfolioGate") or {}
-    bh_gate_status = bh_gate.get("status") or "DATA UNAVAILABLE"
     bh_dd = bh_light.get("dd240")
     bh_dd_text = f"{float(bh_dd) * 100:.1f}%" if isinstance(bh_dd, (int, float)) and math.isfinite(float(bh_dd)) else "—"
     bh_next_name = bh_next.get("name") or "—"
@@ -1356,12 +1354,19 @@ def main():
     bh_action = (buy_hold_policy.get("recommendation") or {}).get("action") or "Opportunity Buy disabled"
     bh_light_text = f"{bh_light.get('emoji', '⚪')} {bh_light.get('name', '資料暫不可用')}"
     bh_code = str(bh_light.get("code") or "UNAVAILABLE").upper()
+    bh_next_code = str(bh_next.get("code") or ("RED" if bh_code == "RED" else "UNAVAILABLE")).upper()
+    bh_next_class = {
+        "GREEN": "is-green",
+        "YELLOW": "is-yellow",
+        "ORANGE": "is-orange",
+        "RED": "is-red",
+    }.get(bh_next_code, "is-unavailable")
     bh_meaning = str(bh_light.get("meaning") or "資料暫不可用")
     bh_action_text = "資料不足，暫停買進" if bh_code == "UNAVAILABLE" else f"{bh_meaning} · {bh_action}"
+    bh_next_label = "已達最高機會級別" if bh_code == "RED" else f"距{bh_next_name if bh_next_name != '—' else '下一燈'}"
     buy_hold_section_html = f'''<div class="risk-section buyhold-section" id="buyhold">
                 <div class="sec-title">Buy&amp;Hold 紅綠燈 <span class="sec-note">Market opportunity</span></div>
-                <div class="buyhold-primary"><div class="buyhold-primary-content"><div class="buyhold-primary-heading"><span>當前燈號</span><strong>{bh_light_text}</strong></div><small>{bh_action_text}</small></div><div class="buyhold-metrics-rail"><div class="buyhold-metric buyhold-metric--drawdown"><span>目前回撤</span><b>{bh_dd_text}</b></div><div class="buyhold-metric buyhold-metric--next"><span>距{bh_next_name if bh_next_name != "—" else "下一燈"}</span><b>{bh_distance_text}</b></div></div></div>
-                <div class="buyhold-gate"><span>Portfolio Gate</span><strong>{bh_gate_status}</strong></div>
+                <div class="buyhold-primary"><div class="buyhold-primary-content"><div class="buyhold-primary-heading"><span>當前燈號</span><strong>{bh_light_text}</strong></div><small>{bh_action_text}</small></div><div class="buyhold-metrics-rail"><div class="buyhold-metric buyhold-metric--drawdown"><span>目前回撤</span><b>{bh_dd_text}</b></div><div class="buyhold-metric buyhold-metric--next {bh_next_class}"><span>{bh_next_label}</span><b>{bh_distance_text}</b></div></div></div>
             </div>'''
 
     html_content = f"""
@@ -1479,7 +1484,7 @@ def main():
             .risk-pair,.exposure-pair {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
             .risk-column,.exposure-row {{ background:#f8faf7; border:1px solid #d8dfd8; border-radius:12px; padding:15px 13px; min-width:0; }} .risk-column strong,.exposure-row strong {{ display:block; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; margin-top:7px; letter-spacing:-.02em; }} .risk-column small,.exposure-row small {{ display:block; margin-top:6px; color:var(--muted); font-size:12px; line-height:1.45; }}
             .risk-card-label {{ display:block; color:var(--muted); font-size:12px; font-weight:700; }} .risk-card-value {{ display:block; margin-top:7px; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; letter-spacing:-.02em; }} .risk-divider {{ border:0; border-top:1px solid #d5ddd5; margin:12px 0 10px; }} .risk-card-detail,.risk-card-subdetail,.risk-card-status {{ display:block; line-height:1.45; }} .risk-card-detail {{ color:var(--ink); font-size:13px; font-weight:700; }} .risk-card-subdetail {{ margin-top:4px; color:var(--muted); font-size:12px; }} .risk-card-status {{ margin-top:8px; font-size:12px; font-weight:700; white-space:normal; }}
-            .buyhold-section {{ border-top-color:var(--navy); }} .buyhold-primary {{ display:grid; grid-template-columns:minmax(0,1fr) minmax(150px,.72fr); align-items:stretch; gap:10px; padding:12px 13px; border-radius:12px; background:#f8faf7; border:1px solid #d8dfd8; }} .buyhold-primary-content {{ display:flex; min-width:0; flex-direction:column; justify-content:center; }} .buyhold-primary-heading {{ display:flex; align-items:baseline; justify-content:space-between; gap:10px; flex-wrap:wrap; }} .buyhold-primary span,.buyhold-metric span,.buyhold-gate span {{ color:var(--muted); font-size:11px; }} .buyhold-primary strong {{ color:var(--navy); font-size:22px; }} .buyhold-primary small {{ display:block; width:100%; margin-top:7px; color:var(--ink); font-size:13px; line-height:1.45; overflow-wrap:anywhere; }} .buyhold-metrics-rail {{ display:grid; grid-template-rows:repeat(2,minmax(0,1fr)); gap:8px; min-width:0; }} .buyhold-metric {{ min-width:0; padding:10px; border:2px solid; border-radius:10px; background:#fff; }} .buyhold-metric--drawdown {{ border-color:#ef4444; }} .buyhold-metric--next {{ border-color:#22c55e; }} .buyhold-metric b {{ display:block; margin-top:5px; color:var(--navy); font-size:14px; line-height:1.4; word-break:break-word; }} .buyhold-gate {{ display:flex; justify-content:space-between; gap:10px; margin-top:9px; padding:9px 10px; border-radius:10px; background:#eef2ee; }} .buyhold-gate strong {{ color:var(--navy); font-size:12px; overflow-wrap:anywhere; }}
+            .buyhold-section {{ border-top-color:var(--navy); }} .buyhold-primary {{ display:grid; grid-template-columns:minmax(0,1fr) minmax(150px,.72fr); align-items:stretch; gap:10px; padding:12px 13px; border-radius:12px; background:#f8faf7; border:1px solid #d8dfd8; }} .buyhold-primary-content {{ display:flex; min-width:0; flex-direction:column; justify-content:center; }} .buyhold-primary-heading {{ display:flex; align-items:baseline; justify-content:space-between; gap:10px; flex-wrap:wrap; }} .buyhold-primary span,.buyhold-metric span {{ color:var(--muted); font-size:11px; }} .buyhold-primary strong {{ color:var(--navy); font-size:22px; }} .buyhold-primary small {{ display:block; width:100%; margin-top:7px; color:var(--ink); font-size:13px; line-height:1.45; overflow-wrap:anywhere; }} .buyhold-metrics-rail {{ display:grid; grid-template-rows:repeat(2,minmax(0,1fr)); gap:8px; min-width:0; }} .buyhold-metric {{ min-width:0; padding:10px; border:2px solid; border-radius:10px; background:#fff; }} .buyhold-metric--drawdown {{ border-color:#ef4444; }} .buyhold-metric--next.is-green {{ border-color:#22c55e; }} .buyhold-metric--next.is-yellow {{ border-color:#eab308; }} .buyhold-metric--next.is-orange {{ border-color:#f97316; }} .buyhold-metric--next.is-red {{ border-color:#ef4444; }} .buyhold-metric--next.is-unavailable {{ border-color:#94a3b8; }} .buyhold-metric b {{ display:block; margin-top:5px; color:var(--navy); font-size:14px; line-height:1.4; word-break:break-word; overflow-wrap:anywhere; }} @media (max-width:540px) {{ .buyhold-primary {{ grid-template-columns:minmax(0,1fr) minmax(112px,.62fr); gap:8px; padding:10px; }} .buyhold-metric {{ padding:9px 8px; }} .buyhold-primary-heading {{ align-items:flex-start; flex-direction:column; gap:5px; }} }} @media (max-width:359px) {{ .buyhold-primary {{ grid-template-columns:1fr; }} .buyhold-metrics-rail {{ grid-template-rows:auto auto; }} }}
         </style>
     </head>
     <body>
