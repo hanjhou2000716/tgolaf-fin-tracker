@@ -457,4 +457,16 @@ def buy_hold_telegram_line(policy: Mapping[str, Any]) -> str:
     code = str(light.get("code") or "UNAVAILABLE").upper()
     if code == "UNAVAILABLE":
         return "🚦 Buy&Hold：⚪ 資料暫不可用"
-    return f"🚦 Buy&Hold：{light.get('emoji', '⚪')} {light.get('name', '資料暫不可用')}｜{light.get('meaning', 'Opportunity Buy disabled')}"
+    meaning = str(light.get("meaning") or "Opportunity Buy disabled")
+    # Keep the daily message to one line while carrying the locked policy
+    # context required by the V1 contract.  Blue is a hold state; the deeper
+    # tiers include only their incremental budget (no private NAV amount).
+    suffix = {
+        "GREEN": "本月可買 006208",
+        "YELLOW": "2% NAV",
+        "ORANGE": "3% NAV",
+        "RED": "5% NAV",
+    }.get(code)
+    if suffix:
+        meaning = f"{meaning}（{suffix}）"
+    return f"🚦 Buy&Hold：{light.get('emoji', '⚪')} {light.get('name', '資料暫不可用')}｜{meaning}"

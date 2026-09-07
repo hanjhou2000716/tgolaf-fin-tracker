@@ -109,12 +109,33 @@ class BuyHoldPolicyTests(unittest.TestCase):
         self.assertEqual(result["light"]["emoji"], "⚪")
         self.assertFalse(result["recommendation"]["monthlyDca006208Allowed"])
 
-    def test_telegram_line_maps_light_without_private_values(self):
-        policy = build_buy_hold_policy(_history([100] * 240 + [95]), net_asset=100000)
-        line = buy_hold_telegram_line(policy)
-        self.assertTrue(line.startswith("🚦 Buy&Hold："))
-        self.assertIn("綠燈", line)
-        self.assertNotIn("100000", line)
+    def test_telegram_line_maps_locked_copy_without_private_values(self):
+        cases = [
+            ("BLUE", "🔵 藍燈｜正常持有"),
+            ("GREEN", "🟢 綠燈｜原型買進區（本月可買 006208）"),
+            ("YELLOW", "🟡 黃燈｜初階加碼區（2% NAV）"),
+            ("ORANGE", "🟠 橘燈｜深度加碼區（3% NAV）"),
+            ("RED", "🔴 紅燈｜極端加碼區（5% NAV）"),
+        ]
+        emoji_names = {
+            "BLUE": ("🔵", "藍燈", "正常持有"),
+            "GREEN": ("🟢", "綠燈", "原型買進區"),
+            "YELLOW": ("🟡", "黃燈", "初階加碼區"),
+            "ORANGE": ("🟠", "橘燈", "深度加碼區"),
+            "RED": ("🔴", "紅燈", "極端加碼區"),
+        }
+        for code, expected in cases:
+            emoji, name, meaning = emoji_names[code]
+            with self.subTest(code=code):
+                line = buy_hold_telegram_line({"light": {"code": code, "emoji": emoji, "name": name, "meaning": meaning}})
+                self.assertEqual(line, f"🚦 Buy&Hold：{expected}")
+                self.assertNotIn("100000", line)
+
+    def test_telegram_line_unavailable_is_safe(self):
+        self.assertEqual(
+            buy_hold_telegram_line({"light": {"code": "UNAVAILABLE"}}),
+            "🚦 Buy&Hold：⚪ 資料暫不可用",
+        )
 
 
 if __name__ == "__main__":
