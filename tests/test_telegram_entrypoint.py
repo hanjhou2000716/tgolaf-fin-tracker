@@ -38,6 +38,11 @@ class TelegramEntrypointTests(unittest.TestCase):
         self.assertIn("buyhold-metric--drawdown", dashboard)
         self.assertIn("buyhold-metric--next", dashboard)
         self.assertNotIn("buyhold-info-grid", dashboard)
+        self.assertNotIn("buyhold-gate", dashboard)
+        self.assertIn("buyhold-metric--next.is-green", dashboard)
+        self.assertIn("buyhold-metric--next.is-yellow", dashboard)
+        self.assertIn("buyhold-metric--next.is-orange", dashboard)
+        self.assertIn("buyhold-metric--next.is-red", dashboard)
 
 
 if __name__ == "__main__":
