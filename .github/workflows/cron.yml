@@ -99,6 +99,15 @@ jobs:
           path: .private-build/ledger-conflict-summary.json
           if-no-files-found: error
 
+      - name: Upload private Buy&Hold market-data summary
+        # Source, freshness, and row-count diagnostics only.  No price series
+        # or portfolio values are published as a Pages artifact.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: buyhold-market-data-summary
+          path: .private-build/buyhold-market-data-summary.json
+          if-no-files-found: error
+
       - name: Verify generated public Demo is sanitized
         run: |
           test -s public-site/index.html

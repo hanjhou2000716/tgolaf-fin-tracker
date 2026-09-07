@@ -43,7 +43,7 @@ from transaction_schema import (
 from transaction_command import apply_current_transactions, apply_reconciliation_events, build_ingestion_contract, build_ingestion_status, inventory_rows_from_transactions
 from settlement_pricing import enrich_missing_trade_prices
 from performance import performance_breakdown
-from market_data import MarketDataService, Quote
+from market_data import MarketDataService, Quote, get_taiex_history
 from metrics import summarize_performance
 from attribution import build_pnl_attribution
 from exposure import build_exposure_matrix
@@ -1141,17 +1141,12 @@ def main():
     }
     liabilities_json = json.dumps(liabilities_payload, ensure_ascii=False)
 
-    # Buy&Hold V1 uses only completed-session TAIEX closes.  Keep the history
-    # fetch isolated from the existing quote fallbacks so a market-data
-    # outage renders an explicit unavailable light instead of reusing a stale
-    # light or failing the daily summary.
-    try:
-        taiex_history = yf.Ticker("^TWII").history(period="2y", interval="1d", auto_adjust=False)
-        taiex_closes = taiex_history["Close"].dropna() if taiex_history is not None and "Close" in taiex_history else []
-        taiex_val = float(taiex_closes.iloc[-1]) if len(taiex_closes) else None
-    except Exception:
-        taiex_history = None
-        taiex_val = None
+    # Buy&Hold V1 uses one validated, completed-session TAIEX history for the
+    # DD240 signal, display quote, and MA200 context.  yfinance is deliberately
+    # not on this path because its ^TWII cookie/crumb flow has failed in Actions.
+    taiex_market_data = get_taiex_history(now=tw_now, compare_sources=True)
+    taiex_history = taiex_market_data.get("history") or []
+    taiex_val = float(taiex_history[-1]["close"]) if taiex_history else None
     try:
         nasdaq_val = float(yf.Ticker("^IXIC").history(period="1d")["Close"].iloc[-1])
     except Exception:
@@ -1175,6 +1170,25 @@ def main():
         as_of=tw_now,
         nav_history=history_records,
     )
+    buy_hold_policy["marketData"] = {
+        key: taiex_market_data.get(key)
+        for key in (
+            "status", "source", "quality", "latestSessionDate", "sessionCount",
+            "fetchedAt", "fallbackReason", "sourceComparison",
+        )
+    }
+    if taiex_market_data.get("status") != "READY":
+        buy_hold_policy["reason"] = taiex_market_data.get("fallbackReason") or "TAIEX history unavailable"
+    write_json(".private-build/buyhold-market-data-summary.json", {
+        "status": taiex_market_data.get("status"),
+        "source": taiex_market_data.get("source"),
+        "quality": taiex_market_data.get("quality"),
+        "latestSessionDate": taiex_market_data.get("latestSessionDate"),
+        "sessionCount": taiex_market_data.get("sessionCount", 0),
+        "fetchedAt": taiex_market_data.get("fetchedAt"),
+        "fallbackReason": taiex_market_data.get("fallbackReason"),
+        "sourceComparison": taiex_market_data.get("sourceComparison"),
+    })
 
     yesterday_net = next((float(str(row.get('Net_Asset', 0)).replace(',', '')) for row in reversed(history_records) if float(str(row.get('Net_Asset', 0)).replace(',', '')) > 0 and str(row.get('Date', ''))[-5:] != today_str), 0)
     daily_diff = net_asset - yesterday_net if yesterday_net else 0
@@ -1957,10 +1971,12 @@ def main():
     if not os.path.exists('public'):
         os.makedirs('public')
     
+    # Use the same completed-session history as Buy&Hold; never make a second
+    # provider request that could disagree with the signal's as-of date.
     try:
-        # 200MA is a separate context metric; preserve null when unavailable.
-        ma200_val = float(yf.Ticker("^TWII").history(period="200d")["Close"].mean())
-    except Exception:
+        recent_taiex = [float(row["close"]) for row in taiex_history[-200:] if float(row["close"]) > 0]
+        ma200_val = sum(recent_taiex) / len(recent_taiex) if len(recent_taiex) >= 200 else None
+    except (TypeError, ValueError, ZeroDivisionError):
         ma200_val = None
 
     try:

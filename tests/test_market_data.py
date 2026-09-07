@@ -1,7 +1,33 @@
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
-from market_data import MarketDataService, Quote
+from market_data import (
+    MarketDataService,
+    Quote,
+    compare_taiex_sources,
+    fetch_twse_taiex_history,
+    get_taiex_history,
+    parse_twse_taiex_payload,
+    parse_yahoo_taiex_payload,
+)
+
+
+def _rows(end=date(2026, 9, 7), count=250, close=22000):
+    return [
+        {"date": (end - timedelta(days=count - index - 1)).isoformat(), "close": close + index}
+        for index in range(count)
+    ]
+
+
+class _Response:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def raise_for_status(self):
+        return None
+
+    def json(self):
+        return self.payload
 
 
 class MarketDataContractTests(unittest.TestCase):
@@ -39,6 +65,86 @@ class MarketDataContractTests(unittest.TestCase):
     def test_quote_serialization_is_explicit(self):
         quote = Quote("A", 1, "USD", "test", "as-of", "fetched", False, False, "ok")
         self.assertEqual(set(quote.as_dict()), {"symbol", "price", "currency", "source", "as_of", "fetched_at", "is_stale", "fallback_used", "quality"})
+
+    def test_twse_payload_maps_explicit_chinese_fields_and_roc_date(self):
+        payload = {
+            "fields": ["日期", "開盤指數", "最高指數", "最低指數", "收盤指數"],
+            "data": [["115/09/07", "46,000.00", "46,500.00", "45,900.00", "46,400.25"]],
+        }
+        self.assertEqual(parse_twse_taiex_payload(payload), [{"date": "2026-09-07", "close": 46400.25}])
+
+    def test_yahoo_payload_maps_timestamps_and_closes(self):
+        timestamp = int(datetime(2026, 9, 7, tzinfo=timezone.utc).timestamp())
+        payload = {
+            "chart": {"result": [{"timestamp": [timestamp], "indicators": {"quote": [{"close": [46400.25]}]}}]}
+        }
+        self.assertEqual(parse_yahoo_taiex_payload(payload), [{"date": "2026-09-07", "close": 46400.25}])
+
+    def test_twse_success_does_not_call_yahoo(self):
+        calls = []
+        result = get_taiex_history(
+            now=date(2026, 9, 7),
+            twse_fetcher=lambda: _rows(),
+            yahoo_fetcher=lambda: calls.append(True) or _rows(),
+        )
+        self.assertEqual(result["status"], "READY")
+        self.assertEqual(result["source"], "TWSE")
+        self.assertEqual(result["quality"], "fresh")
+        self.assertEqual(calls, [])
+
+    def test_twse_failure_falls_back_to_yahoo_chart(self):
+        result = get_taiex_history(
+            now=date(2026, 9, 7),
+            twse_fetcher=lambda: (_ for _ in ()).throw(RuntimeError("rate limited")),
+            yahoo_fetcher=lambda: _rows(),
+        )
+        self.assertEqual(result["status"], "READY")
+        self.assertEqual(result["source"], "Yahoo Chart")
+        self.assertIn("TWSE", result["fallbackReason"])
+
+    def test_opt_in_secondary_check_blocks_material_source_mismatch(self):
+        shifted = _rows()
+        shifted[-1] = {**shifted[-1], "close": shifted[-1]["close"] * 1.01}
+        result = get_taiex_history(
+            now=date(2026, 9, 7),
+            twse_fetcher=lambda: _rows(),
+            yahoo_fetcher=lambda: shifted,
+            compare_sources=True,
+        )
+        self.assertEqual(result["status"], "UNAVAILABLE")
+        self.assertEqual(result["quality"], "source_mismatch")
+        self.assertEqual(result["sourceComparison"]["status"], "SOURCE_MISMATCH")
+
+    def test_twse_monthly_fetch_uses_documented_explicit_fields(self):
+        payload = {
+            "fields": ["日期", "開盤指數", "最高指數", "最低指數", "收盤指數"],
+            "data": [[row["date"], "1", "2", "1", str(row["close"])] for row in _rows()],
+        }
+        result = fetch_twse_taiex_history(
+            now=date(2026, 9, 7),
+            http_get=lambda *args, **kwargs: _Response(payload),
+            sleep_fn=lambda _: None,
+        )
+        self.assertGreaterEqual(len(result), 240)
+        self.assertEqual(result[-1]["date"], "2026-09-07")
+
+    def test_source_comparison_rejects_date_or_price_mismatch(self):
+        mismatch_date = compare_taiex_sources(_rows(), _rows(end=date(2026, 9, 6)))
+        self.assertEqual(mismatch_date["status"], "SOURCE_MISMATCH")
+        shifted = _rows()
+        shifted[-1] = {**shifted[-1], "close": shifted[-1]["close"] * 1.01}
+        mismatch_price = compare_taiex_sources(_rows(), shifted)
+        self.assertEqual(mismatch_price["status"], "SOURCE_MISMATCH")
+
+    def test_stale_or_missing_sources_are_unavailable(self):
+        stale = get_taiex_history(now=date(2026, 9, 7), twse_fetcher=lambda: _rows(end=date(2026, 8, 1)), yahoo_fetcher=lambda: _rows(end=date(2026, 8, 1)))
+        self.assertEqual(stale["status"], "UNAVAILABLE")
+        missing = get_taiex_history(
+            now=date(2026, 9, 7),
+            twse_fetcher=lambda: (_ for _ in ()).throw(RuntimeError("down")),
+            yahoo_fetcher=lambda: (_ for _ in ()).throw(RuntimeError("down")),
+        )
+        self.assertEqual(missing["status"], "UNAVAILABLE")
 
 
 if __name__ == "__main__":
