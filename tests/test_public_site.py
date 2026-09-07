@@ -189,6 +189,21 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertNotIn("1.32", public_risk)
             self.assertNotIn("1,870,000", public_risk)
 
+    def test_buy_hold_demo_is_unavailable_and_private_template_has_placement(self):
+        with tempfile.TemporaryDirectory() as directory:
+            write_public_site(directory, "2026-08-12T10:37:00+08:00")
+            public_html = (Path(directory) / "index.html").read_text(encoding="utf-8")
+            private_html = (Path(directory) / "private" / "index.html").read_text(encoding="utf-8")
+            self.assertIn("Buy&amp;Hold 紅綠燈", public_html)
+            self.assertIn("⚪ 資料暫不可用", public_html)
+            self.assertIn("buyHoldLight", private_html)
+            self.assertIn("Portfolio Gate", private_html)
+            risk = private_html[private_html.index('<section id="risk"'):private_html.index('<section id="growth"')]
+            self.assertLess(risk.index("槓桿"), risk.index("Buy&amp;Hold"))
+            self.assertLess(risk.index("Buy&amp;Hold"), risk.index("曝險"))
+            self.assertNotIn("1.32", public_html)
+            self.assertNotIn("169.2", public_html)
+
 
 if __name__ == "__main__":
     unittest.main()
