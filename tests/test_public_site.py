@@ -197,14 +197,18 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertIn("Buy&amp;Hold 紅綠燈", public_html)
             self.assertIn("⚪ 資料暫不可用", public_html)
             self.assertIn("buyHoldLight", private_html)
-            for element_id in ("buyHoldMeaning", "buyHoldDrawdown", "buyHoldNextDistance", "buyHoldAction", "buyHoldGate"):
+            for element_id in ("buyHoldMeaning", "buyHoldDrawdown", "buyHoldNextDistance", "buyHoldGate"):
                 self.assertIn(f'id="{element_id}"', private_html)
             self.assertIn("Portfolio Gate", private_html)
+            self.assertIn("資料不足，暫停買進", public_html)
+            self.assertIn("bhRec.action", private_html)
+            self.assertNotIn('id="buyHoldAction"', private_html)
             risk = private_html[private_html.index('<section id="risk"'):private_html.index('<section id="growth"')]
             self.assertLess(risk.index("槓桿"), risk.index("Buy&amp;Hold"))
             self.assertLess(risk.index("Buy&amp;Hold"), risk.index("曝險"))
             self.assertIn("@media(max-width:560px)", private_html)
             self.assertIn("grid-template-columns:repeat(2", private_html)
+            self.assertIn("grid-template-columns:1fr", private_html)
             self.assertNotIn("1.32", public_html)
             self.assertNotIn("169.2", public_html)
 
