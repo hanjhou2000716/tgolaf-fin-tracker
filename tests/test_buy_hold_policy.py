@@ -9,6 +9,8 @@ from buy_hold_policy import (
     evaluate_portfolio_gate,
     next_light_details,
     buy_hold_telegram_line,
+    buy_hold_telegram_emoji,
+    build_settlement_telegram_message,
 )
 
 
@@ -136,6 +138,36 @@ class BuyHoldPolicyTests(unittest.TestCase):
             buy_hold_telegram_line({"light": {"code": "UNAVAILABLE"}}),
             "🚦 Buy&Hold：⚪ 資料暫不可用",
         )
+
+    def test_settlement_message_prefixes_the_current_light_and_stays_two_lines(self):
+        cases = [
+            ("BLUE", "🔵", -8966, -0.1, "可憐的阿洲，今天賠了 8,966 元 (-0.1%)"),
+            ("GREEN", "🟢", 1234, 0.7, "厲害的阿洲，今天賺了 1,234 元 (+0.7%)"),
+            ("YELLOW", "🟡", 0, -0.0, "阿洲今天持平，損益 0 元 (+0.0%)"),
+            ("ORANGE", "🟠", 50.5, 0.2, "厲害的阿洲，今天賺了 50 元 (+0.2%)"),
+            ("RED", "🔴", -1, -0.01, "可憐的阿洲，今天賠了 1 元 (-0.0%)"),
+        ]
+        for code, emoji, difference, percentage, expected_body in cases:
+            with self.subTest(code=code):
+                message = build_settlement_telegram_message(
+                    "09/09",
+                    difference,
+                    percentage,
+                    {"light": {"code": code, "emoji": "⚪"}},
+                )
+                self.assertEqual(message, f"✅ 09/09 結算完畢！\n{emoji} {expected_body}")
+                self.assertEqual(message.count("\n"), 1)
+                self.assertNotIn("Buy&Hold", message)
+
+    def test_settlement_message_uses_white_light_for_missing_or_unknown_signal(self):
+        for policy in ({}, {"light": {"code": "UNAVAILABLE"}}, {"light": {"code": "unknown"}}):
+            with self.subTest(policy=policy):
+                self.assertEqual(buy_hold_telegram_emoji(policy), "⚪")
+                message = build_settlement_telegram_message("09/09", -8966, -0.1, policy)
+                self.assertEqual(
+                    message,
+                    "✅ 09/09 結算完畢！\n⚪ 可憐的阿洲，今天賠了 8,966 元 (-0.1%)",
+                )
 
 
 if __name__ == "__main__":

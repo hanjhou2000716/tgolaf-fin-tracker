@@ -66,7 +66,12 @@ from refresh_recovery import inventory_has_positive_assets, validate_recovery_ca
 from ledger_conflict_diagnostics import ledger_conflict_digest, ledger_conflict_summary_artifact
 from source_roles import SourceRoleConfig
 from form_v3 import FORM_V3_SCHEMA
-from buy_hold_policy import build_buy_hold_policy, buy_hold_telegram_line, classify_buyhold_drawdown
+from buy_hold_policy import (
+    build_buy_hold_policy,
+    build_settlement_telegram_message,
+    buy_hold_telegram_emoji,
+    classify_buyhold_drawdown,
+)
 
 # ==========================================
 # 1. 環境變數與金鑰設定
@@ -2166,15 +2171,9 @@ def main():
             f"原因：{refresh_control.get('reasonCode') or '資料來源驗證失敗'}"
         )
     else:
-        if daily_diff >= 0:
-            msg_body = f"🚀 厲害的阿洲，今天賺了 {int(daily_diff):,} 元 (+{daily_pct:.1f}%)"
-        else:
-            # daily_pct 本身就是負數，所以直接顯示即可
-            msg_body = f"💸 可憐的阿洲，今天賠了 {abs(int(daily_diff)):,} 元 ({daily_pct:.1f}%)"
-        tg_text = f"✅ {display_date} 結算完畢！\n{msg_body}"
-        # V1 adds exactly one compact policy line to the existing settlement
-        # notification.  It never includes private portfolio values.
-        tg_text += "\n" + buy_hold_telegram_line(buy_hold_policy)
+        tg_text = build_settlement_telegram_message(
+            display_date, daily_diff, daily_pct, buy_hold_policy
+        )
     conflict_digest = ledger_conflict_digest(sync_conflicts) if sync_conflicts else ""
     conflict_already_alerted = ledger_conflict_alert_sent(
         history_sheet, tw_now.strftime("%Y-%m-%d"), conflict_digest
@@ -2241,7 +2240,10 @@ def main():
                     )
             # This line is intentionally non-financial and makes production
             # verification auditable without logging the settlement payload.
-            print(f"Telegram Buy&Hold line sent: {buy_hold_telegram_line(buy_hold_policy)}")
+            print(
+                "Telegram settlement light sent: "
+                f"{buy_hold_telegram_emoji(buy_hold_policy)}"
+            )
             print(f"Telegram notification sent; window={settlement_window}, forced={FORCE_TELEGRAM}")
         except requests.RequestException as error:
             print(f"Telegram notification failed: {error}")

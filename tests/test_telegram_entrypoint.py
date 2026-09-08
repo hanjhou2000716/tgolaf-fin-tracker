@@ -18,11 +18,16 @@ class TelegramEntrypointTests(unittest.TestCase):
         self.assertNotIn("外部現金流 {performance", source)
         self.assertNotIn("融資現金流 {performance", source)
 
-    def test_buy_hold_policy_is_one_additional_line(self):
+    def test_settlement_message_uses_light_prefix_without_buy_hold_third_line(self):
         source = (ROOT / "dashboard_pipeline.py").read_text(encoding="utf-8")
-        self.assertIn("buy_hold_telegram_line", source)
-        self.assertIn('tg_text += "\\n" + buy_hold_telegram_line(buy_hold_policy)', source)
-        self.assertIn("Telegram Buy&Hold line sent", source)
+        self.assertIn("build_settlement_telegram_message", source)
+        self.assertIn("buy_hold_telegram_emoji", source)
+        self.assertNotIn("buy_hold_telegram_line", source)
+        self.assertNotIn('tg_text += "\\n" + buy_hold_telegram_line(buy_hold_policy)', source)
+        self.assertNotIn("Telegram Buy&Hold line sent", source)
+        self.assertIn("Telegram settlement light sent", source)
+        self.assertNotIn("🚀 厲害的阿洲", source)
+        self.assertNotIn("💸 可憐的阿洲", source)
         self.assertIn("completed-session-close", (ROOT / "buy_hold_policy.py").read_text(encoding="utf-8"))
         self.assertIn("get_taiex_history", source)
         self.assertIn("buyhold-market-data-summary.json", source)

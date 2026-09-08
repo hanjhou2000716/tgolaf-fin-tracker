@@ -486,3 +486,43 @@ def buy_hold_telegram_line(policy: Mapping[str, Any]) -> str:
     if suffix:
         meaning = f"{meaning}（{suffix}）"
     return f"🚦 Buy&Hold：{light.get('emoji', '⚪')} {light.get('name', '資料暫不可用')}｜{meaning}"
+
+
+def buy_hold_telegram_emoji(policy: Mapping[str, Any]) -> str:
+    """Return the trusted current-light emoji for a settlement message.
+
+    The light code is the canonical policy value; a caller-provided emoji is
+    deliberately ignored so a stale or malformed presentation field cannot
+    disagree with the signal shown in the dashboard.
+    """
+    light = policy.get("light") or {}
+    code = str(light.get("code") or "UNAVAILABLE").strip().upper()
+    return str((LIGHT_DEFINITIONS.get(code) or {}).get("emoji") or "⚪")
+
+
+def build_settlement_telegram_message(
+    display_date: str,
+    daily_diff: Any,
+    daily_pct: Any,
+    policy: Mapping[str, Any],
+) -> str:
+    """Build the compact two-line healthy settlement notification.
+
+    Buy&Hold supplies the only leading symbol.  A zero result is rendered as
+    a neutral hold message, while the existing profit/loss wording and
+    integer amount formatting remain unchanged for non-zero results.
+    """
+    difference = _finite(daily_diff)
+    percentage = _finite(daily_pct)
+    if difference is None or percentage is None:
+        raise ValueError("settlement change values must be finite numbers")
+    emoji = buy_hold_telegram_emoji(policy)
+    if difference > 0:
+        body = f"{emoji} 厲害的阿洲，今天賺了 {int(difference):,} 元 (+{percentage:.1f}%)"
+    elif difference < 0:
+        body = f"{emoji} 可憐的阿洲，今天賠了 {abs(int(difference)):,} 元 ({percentage:.1f}%)"
+    else:
+        # A flat settlement is neutral even if an upstream calculation
+        # happens to preserve a signed zero (``-0.0``).
+        body = f"{emoji} 阿洲今天持平，損益 0 元 ({abs(percentage):+.1f}%)"
+    return f"✅ {display_date} 結算完畢！\n{body}"
