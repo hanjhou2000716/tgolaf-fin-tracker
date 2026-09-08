@@ -38,6 +38,22 @@ HYSTERESIS_POINTS = 0.02
 HYSTERESIS_SESSIONS = 3
 CASH_FLOOR_PCT = 0.03
 DEBT_TO_NET_ASSET_LIMIT = 0.30
+
+
+def classify_buyhold_drawdown(value: Any) -> str:
+    """Return the semantic card state for a ``dd240Pct`` value.
+
+    Negative drawdown is the normal below-peak condition and uses the green
+    down treatment. Positive values use the red up treatment; zero and any
+    missing/non-finite input remain neutral rather than being coerced to 0%.
+    """
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "is-flat"
+    if not math.isfinite(numeric) or numeric == 0:
+        return "is-flat"
+    return "is-down" if numeric < 0 else "is-up"
 MAINTENANCE_RATIO_LIMIT = 167.0
 POSITION_00685L_CAP_PCT = 0.10
 
