@@ -22,7 +22,12 @@ from risk import (
 )
 from validation import validate_history_sheet, validate_inventory, validate_quote
 from asset_tree import asset_tree_metadata_summary, build_asset_tree
-from public_site import write_public_site
+from public_site import (
+    BUYHOLD_LAMP_CSS,
+    canonical_buyhold_lamp_code,
+    render_buyhold_lamp,
+    write_public_site,
+)
 from supabase_sync import (
     load_goal_state,
     load_private_snapshot,
@@ -1380,8 +1385,8 @@ def main():
     bh_distance = bh_next.get("distancePct")
     bh_distance_text = f"{float(bh_distance) * 100:.1f}%" if isinstance(bh_distance, (int, float)) and math.isfinite(float(bh_distance)) else "—"
     bh_action = (buy_hold_policy.get("recommendation") or {}).get("action") or "Opportunity Buy disabled"
-    bh_light_emoji = str(bh_light.get("emoji") or "⚪")
-    bh_code = str(bh_light.get("code") or "UNAVAILABLE").upper()
+    bh_code = canonical_buyhold_lamp_code(bh_light.get("code"))
+    bh_lamp_html = render_buyhold_lamp(bh_code)
     bh_next_code = str(bh_next.get("code") or ("RED" if bh_code == "RED" else "UNAVAILABLE")).upper() if bh_code != "UNAVAILABLE" else "UNAVAILABLE"
     bh_next_class = {
         "GREEN": "is-green",
@@ -1394,7 +1399,7 @@ def main():
     bh_next_label = "已達最高機會級別" if bh_code == "RED" else "距下一燈" if bh_code == "UNAVAILABLE" else f"距{bh_next_name if bh_next_name not in {'', '—'} else '下一燈'}"
     buy_hold_section_html = f'''<div class="risk-section buyhold-section" id="buyhold">
                 <div class="sec-title">Buy&amp;Hold 紅綠燈 <span class="sec-note">Market opportunity</span></div>
-                <div class="buyhold-primary"><div class="buyhold-primary-content"><div class="buyhold-primary-heading"><span>當前燈號</span><strong title="{bh_light.get('name', '資料暫不可用')}">{bh_light_emoji}</strong></div><hr class="buyhold-divider" aria-hidden="true"><div class="buyhold-copy"><span class="buyhold-meaning">{bh_meaning}</span><small class="buyhold-action">({bh_action_text})</small></div></div><div class="buyhold-metrics-rail"><div class="buyhold-metric buyhold-metric--drawdown {bh_dd_class}"><span>TAIEX 目前回撤</span><b>{bh_dd_text}</b></div><div class="buyhold-metric buyhold-metric--next {bh_next_class}"><span>{bh_next_label}</span><b>{bh_distance_text}</b></div></div></div>
+                <div class="buyhold-primary"><div class="buyhold-primary-content"><div class="buyhold-primary-heading"><span>當前燈號</span>{bh_lamp_html}</div><hr class="buyhold-divider" aria-hidden="true"><div class="buyhold-copy"><span class="buyhold-meaning">{bh_meaning}</span><small class="buyhold-action">({bh_action_text})</small></div></div><div class="buyhold-metrics-rail"><div class="buyhold-metric buyhold-metric--drawdown {bh_dd_class}"><span>TAIEX 目前回撤</span><b>{bh_dd_text}</b></div><div class="buyhold-metric buyhold-metric--next {bh_next_class}"><span>{bh_next_label}</span><b>{bh_distance_text}</b></div></div></div>
             </div>'''
 
     html_content = f"""
@@ -1411,6 +1416,7 @@ def main():
         <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0"></script>
         <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.2.0/dist/chartjs-plugin-zoom.min.js"></script>
         <style>
+            {BUYHOLD_LAMP_CSS}
             @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&family=Noto+Serif+TC:wght@600;700&display=swap');
             :root {{ --paper: #f1f0eb; --surface: #fbfaf7; --ink: #23354a; --muted: #77736b; --line: #d7d4cc; --sage: #687c70; --brick: #c4674f; --orange:#c98a4b; --navy:#24425e; }}
             * {{ box-sizing: border-box; }} html {{ scroll-behavior:smooth; }}

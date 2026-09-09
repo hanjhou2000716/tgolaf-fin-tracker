@@ -7,6 +7,7 @@ next security phase.
 """
 
 from copy import deepcopy
+from html import escape as html_escape
 import json
 import os
 import shutil
@@ -16,6 +17,141 @@ import shutil
 # environment variable avoids accidentally sending users back to the retired
 # branched form during cutover.
 FORM_V3_URL = os.getenv("FORM_V3_URL", "https://forms.google.com/").strip()
+
+
+# This content-addressed asset is deliberately shared by the public shell and
+# authenticated MiniApp.  The lens is rendered underneath it so the metal
+# housing never changes colour when the Buy&Hold code changes.
+BUYHOLD_LAMP_ASSET = "buyhold-lamp-shell-06f6e7ca2f56.png"
+BUYHOLD_LAMP_STATE_CLASSES = {
+    "BLUE": "is-blue",
+    "GREEN": "is-green",
+    "YELLOW": "is-yellow",
+    "ORANGE": "is-orange",
+    "RED": "is-red",
+    "UNAVAILABLE": "is-unavailable",
+}
+BUYHOLD_LAMP_NAMES = {
+    "BLUE": "藍燈",
+    "GREEN": "綠燈",
+    "YELLOW": "黃燈",
+    "ORANGE": "橘燈",
+    "RED": "紅燈",
+    "UNAVAILABLE": "資料暫不可用",
+}
+BUYHOLD_LAMP_CLASS_NAMES = "is-blue is-green is-yellow is-orange is-red is-unavailable"
+
+
+def canonical_buyhold_lamp_code(code: object) -> str:
+    """Return the only accepted Buy&Hold code, failing closed for unknown data."""
+    normalized = str(code or "UNAVAILABLE").strip().upper()
+    if normalized not in BUYHOLD_LAMP_STATE_CLASSES:
+        normalized = "UNAVAILABLE"
+    return normalized
+
+
+def buyhold_lamp_state(code: object) -> tuple[str, str]:
+    """Canonicalize a Buy&Hold code into a safe CSS state and accessible name."""
+    normalized = canonical_buyhold_lamp_code(code)
+    return BUYHOLD_LAMP_STATE_CLASSES[normalized], BUYHOLD_LAMP_NAMES[normalized]
+
+
+def render_buyhold_lamp(
+    code: object = "UNAVAILABLE",
+    *,
+    element_id: str = "buyHoldLight",
+    asset_path: str = BUYHOLD_LAMP_ASSET,
+) -> str:
+    """Render the shared lamp shell without exposing a visible light name."""
+    state_class, light_name = buyhold_lamp_state(code)
+    safe_id = html_escape(str(element_id), quote=True)
+    safe_asset = html_escape(str(asset_path), quote=True)
+    safe_name = html_escape(light_name, quote=True)
+    return (
+        f'<div id="{safe_id}" class="buyhold-lamp {state_class}" role="img" '
+        f'aria-label="當前燈號：{safe_name}" title="{safe_name}">'
+        '<span class="buyhold-lamp__lens" aria-hidden="true"></span>'
+        f'<img class="buyhold-lamp__shell" src="{safe_asset}" alt="" '
+        'aria-hidden="true" loading="eager" decoding="async"></div>'
+    )
+
+
+BUYHOLD_LAMP_CSS = """
+    .buyhold-group{border-top-color:var(--navy)}
+    .buyhold-primary{display:grid;grid-template-columns:minmax(0,1fr) minmax(150px,.72fr);align-items:stretch;gap:10px;padding:12px 13px;border-radius:12px;background:#f8faf7;border:1px solid #d5ded8}
+    .buyhold-primary-content{display:flex;min-width:0;flex-direction:column;justify-content:flex-start;align-self:stretch;padding:4px 2px 2px}
+    .buyhold-primary-heading{display:flex;flex-direction:column;align-items:flex-start;gap:5px;min-width:0}
+    .buyhold-primary-heading>span{color:var(--muted);font-size:12px;font-weight:500}
+    .buyhold-divider{width:100%;border:0;border-top:1px solid #d5ddd5;margin:12px 0 10px}
+    .buyhold-copy{display:flex;min-width:0;flex-direction:column;gap:2px}
+    .buyhold-meaning{color:var(--ink);font-size:15px;line-height:1.35;overflow-wrap:anywhere}
+    .buyhold-action{color:var(--muted);font-size:12px;line-height:1.35;overflow-wrap:anywhere}
+    .buyhold-metrics-rail{display:grid;grid-template-rows:repeat(2,minmax(0,1fr));gap:8px;min-width:0}
+    .buyhold-metric{min-width:0;padding:10px;border:2px solid;border-radius:10px;background:#fff}
+    .buyhold-metric--drawdown.is-up{border-color:#ef4444}.buyhold-metric--drawdown.is-down{border-color:#22c55e}.buyhold-metric--drawdown.is-flat{border-color:#94a3b8}
+    .buyhold-metric--next.is-green{border-color:#22c55e}.buyhold-metric--next.is-yellow{border-color:#eab308}.buyhold-metric--next.is-orange{border-color:#f97316}.buyhold-metric--next.is-red{border-color:#ef4444}.buyhold-metric--next.is-unavailable{border-color:#94a3b8}
+    .buyhold-metric span{display:block;color:var(--muted);font-size:11px}.buyhold-metric b{display:block;margin-top:5px;color:var(--navy);font-size:14px;line-height:1.4;word-break:break-word;overflow-wrap:anywhere}
+    @media(max-width:540px){.buyhold-primary{grid-template-columns:minmax(0,1fr) minmax(112px,.62fr);gap:8px;padding:10px}.buyhold-metric{padding:9px 8px}}
+    @media(max-width:359px){.buyhold-primary{grid-template-columns:1fr}.buyhold-metrics-rail{grid-template-rows:auto auto}}
+    .buyhold-lamp{position:relative;display:block;width:clamp(50px,12vw,60px);aspect-ratio:1;flex:0 0 auto;isolation:isolate}
+    .buyhold-lamp__lens{position:absolute;z-index:0;inset:16%;overflow:hidden;border-radius:50%;background:radial-gradient(circle at 48% 42%,color-mix(in srgb,var(--lamp-color) 92%,white 8%) 0%,var(--lamp-color) 42%,color-mix(in srgb,var(--lamp-color) 58%,#182332 42%) 86%,#182332 100%);box-shadow:0 0 10px 2px color-mix(in srgb,var(--lamp-color) 58%,transparent),inset 0 -5px 9px rgba(11,24,38,.42),inset 0 3px 6px rgba(255,255,255,.42)}
+    .buyhold-lamp__lens::after{content:"";position:absolute;inset:0;background:repeating-linear-gradient(to bottom,rgba(255,255,255,.32) 0 2px,rgba(18,30,43,.22) 2px 4px);mix-blend-mode:soft-light;opacity:.75}
+    .buyhold-lamp__shell{position:absolute;z-index:1;inset:0;width:100%;height:100%;object-fit:contain;pointer-events:none}
+    .buyhold-lamp.is-blue{--lamp-color:#3b82f6}.buyhold-lamp.is-green{--lamp-color:#22c55e}.buyhold-lamp.is-yellow{--lamp-color:#facc15}.buyhold-lamp.is-orange{--lamp-color:#f97316}.buyhold-lamp.is-red{--lamp-color:#ef4444}.buyhold-lamp.is-unavailable{--lamp-color:#94a3b8}
+    .buyhold-lamp.is-unavailable .buyhold-lamp__lens{filter:saturate(.16) brightness(.66);box-shadow:inset 0 -5px 9px rgba(11,24,38,.5),inset 0 3px 6px rgba(255,255,255,.24)}
+    .buyhold-lamp.is-unavailable .buyhold-lamp__lens::after{opacity:.38}
+    .buyhold-lamp img{display:block}
+    .buyhold-lamp-fallback{display:none}
+    @supports not (background:color-mix(in srgb, red 50%, white)){.buyhold-lamp__lens{background:var(--lamp-color);box-shadow:inset 0 -5px 9px rgba(11,24,38,.42),inset 0 3px 6px rgba(255,255,255,.42)}}
+"""
+
+
+BUYHOLD_LAMP_JS = f"""
+    const buyHoldLampStateClasses = {json.dumps(BUYHOLD_LAMP_STATE_CLASSES, ensure_ascii=False)};
+    const buyHoldLampNames = {json.dumps(BUYHOLD_LAMP_NAMES, ensure_ascii=False)};
+    const buyHoldLampClassNames = {json.dumps(BUYHOLD_LAMP_CLASS_NAMES)}.split(' ');
+    const setBuyHoldLamp = (element, rawCode) => {{
+      if (!element) return 'UNAVAILABLE';
+      const code = String(rawCode || 'UNAVAILABLE').trim().toUpperCase();
+      const safeCode = Object.prototype.hasOwnProperty.call(buyHoldLampStateClasses, code) ? code : 'UNAVAILABLE';
+      element.classList.remove(...buyHoldLampClassNames);
+      element.classList.add('buyhold-lamp', buyHoldLampStateClasses[safeCode]);
+      const name = buyHoldLampNames[safeCode] || buyHoldLampNames.UNAVAILABLE;
+      element.title = name;
+      element.setAttribute('aria-label', '當前燈號：' + name);
+      return safeCode;
+    }};
+"""
+
+
+def _prepare_buyhold_template(template: str, *, asset_path: str, dynamic: bool = False) -> str:
+    """Apply the shared lamp asset, CSS, and (private) state updater."""
+    markup = render_buyhold_lamp("UNAVAILABLE", asset_path=asset_path)
+    prepared = template.replace("__BUYHOLD_LAMP_MARKUP__", markup)
+    if "__BUYHOLD_LAMP_CSS__" in prepared:
+        prepared = prepared.replace("__BUYHOLD_LAMP_CSS__", BUYHOLD_LAMP_CSS)
+    else:
+        prepared = prepared.replace("</style>", f"{BUYHOLD_LAMP_CSS}\n  </style>", 1)
+    prepared = prepared.replace(
+        '<strong title="資料暫不可用">⚪</strong>',
+        markup,
+    )
+    prepared = prepared.replace(
+        '<strong id="buyHoldLight" title="資料暫不可用" aria-label="當前燈號：資料暫不可用">⚪</strong>',
+        markup,
+    )
+    if dynamic:
+        prepared = prepared.replace(
+            "    const buyHold=",
+            f"{BUYHOLD_LAMP_JS}\n    const buyHold=",
+            1,
+        )
+        prepared = prepared.replace(
+            "const lightElement=$('buyHoldLight'); const lightName=String(bhLight.name||'資料暫不可用'); lightElement.textContent=bhLight.emoji||'⚪'; lightElement.title=lightName; lightElement.setAttribute('aria-label','當前燈號：'+lightName);",
+            "const lightElement=$('buyHoldLight'); setBuyHoldLamp(lightElement,bhCode);",
+            1,
+        )
+    return prepared
 
 
 DEMO_DATA = {
@@ -89,7 +225,7 @@ DEMO_HTML = """<!doctype html>
       </div>
       <div class="risk-group buyhold-group">
         <div class="risk-group-title">Buy&amp;Hold 紅綠燈 <span>Market opportunity</span></div>
-        <div class="buyhold-primary"><div class="buyhold-primary-content"><div class="buyhold-primary-heading"><span>當前燈號</span><strong title="資料暫不可用">⚪</strong></div><hr class="buyhold-divider" aria-hidden="true"><div class="buyhold-copy"><span class="buyhold-meaning">資料不足</span><small class="buyhold-action">(暫停買進)</small></div></div><div class="buyhold-metrics-rail"><div class="buyhold-metric buyhold-metric--drawdown is-flat"><span>TAIEX 目前回撤</span><b>—</b></div><div class="buyhold-metric buyhold-metric--next is-unavailable"><span>距下一燈</span><b>—</b></div></div></div>
+        <div class="buyhold-primary"><div class="buyhold-primary-content"><div class="buyhold-primary-heading"><span>當前燈號</span>__BUYHOLD_LAMP_MARKUP__</div><hr class="buyhold-divider" aria-hidden="true"><div class="buyhold-copy"><span class="buyhold-meaning">資料不足</span><small class="buyhold-action">(暫停買進)</small></div></div><div class="buyhold-metrics-rail"><div class="buyhold-metric buyhold-metric--drawdown is-flat"><span>TAIEX 目前回撤</span><b>—</b></div><div class="buyhold-metric buyhold-metric--next is-unavailable"><span>距下一燈</span><b>—</b></div></div></div>
       </div>
       <p class="note">個人風險數值僅在驗證後 API 提供。</p>
       <div class="safe"><span>公開資料政策</span><strong>Demo only · Private by default</strong></div>
@@ -131,8 +267,8 @@ PRIVATE_HTML_TEMPLATE = """<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex,nofollow">
   <title>Growth Dashboard · Private</title>
-   <style>
-     .buyhold-group{border-top-color:var(--navy)}.buyhold-primary{display:grid;grid-template-columns:minmax(0,1fr) minmax(150px,.72fr);align-items:stretch;gap:10px;padding:12px 13px;border-radius:12px;background:#f8faf7;border:1px solid #d5ded8}.buyhold-primary-content{display:flex;min-width:0;flex-direction:column;justify-content:flex-start;align-self:stretch;padding:4px 2px 2px}.buyhold-primary-heading{display:flex;flex-direction:column;align-items:flex-start;gap:5px;min-width:0}.buyhold-primary-heading > span{color:var(--muted);font-size:12px;font-weight:500}.buyhold-primary strong{color:var(--navy);font-size:30px;line-height:1;letter-spacing:0}.buyhold-divider{width:100%;border:0;border-top:1px solid #d5ddd5;margin:12px 0 10px}.buyhold-copy{display:flex;min-width:0;flex-direction:column;gap:2px}.buyhold-meaning{color:var(--ink);font-size:15px;line-height:1.35;overflow-wrap:anywhere}.buyhold-action{color:var(--muted);font-size:12px;line-height:1.35;overflow-wrap:anywhere}.buyhold-metrics-rail{display:grid;grid-template-rows:repeat(2,minmax(0,1fr));gap:8px;min-width:0}.buyhold-metric{min-width:0;padding:10px;border:2px solid;border-radius:10px;background:#fff}.buyhold-metric--drawdown.is-up{border-color:#ef4444}.buyhold-metric--drawdown.is-down{border-color:#22c55e}.buyhold-metric--drawdown.is-flat{border-color:#94a3b8}.buyhold-metric--next.is-green{border-color:#22c55e}.buyhold-metric--next.is-yellow{border-color:#eab308}.buyhold-metric--next.is-orange{border-color:#f97316}.buyhold-metric--next.is-red{border-color:#ef4444}.buyhold-metric--next.is-unavailable{border-color:#94a3b8}.buyhold-metric span{display:block;color:var(--muted);font-size:11px}.buyhold-metric b{display:block;margin-top:5px;color:var(--navy);font-size:14px;line-height:1.4;word-break:break-word;overflow-wrap:anywhere}
+  <style>
+    __BUYHOLD_LAMP_CSS__
     :root { --paper:#f2f0ea; --card:#fbfaf7; --navy:#24425e; --sage:#708a7c; --orange:#c98a4b; --ink:#283d50; --muted:#6d756f; --line:#ddd9d0; }
     * { box-sizing:border-box; } body { margin:0; padding:28px 16px 48px; background:var(--paper); color:var(--ink); font-family:ui-sans-serif,system-ui,-apple-system,"Noto Sans TC",sans-serif; }
     main { width:min(760px,100%); margin:0 auto; } .brand { color:var(--navy); font-family:Georgia,"Noto Serif TC",serif; font-size:20px; letter-spacing:.12em; }
@@ -219,7 +355,7 @@ TELEGRAM_PRIVATE_HTML_TEMPLATE = """<!doctype html>
   <meta name="robots" content="noindex,nofollow"><title>Growth Dashboard · Private</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
    <style>
-    .buyhold-group{border-top-color:var(--navy)}.buyhold-primary{display:grid;grid-template-columns:minmax(0,1fr) minmax(150px,.72fr);align-items:stretch;gap:10px;padding:12px 13px;border-radius:12px;background:#f8faf7;border:1px solid #d5ded8}.buyhold-primary-content{display:flex;min-width:0;flex-direction:column;justify-content:flex-start;align-self:stretch;padding:4px 2px 2px}.buyhold-primary-heading{display:flex;flex-direction:column;align-items:flex-start;gap:5px;min-width:0}.buyhold-primary-heading > span{color:var(--muted);font-size:12px;font-weight:500}.buyhold-primary strong{color:var(--navy);font-size:30px;line-height:1;letter-spacing:0}.buyhold-divider{width:100%;border:0;border-top:1px solid #d5ddd5;margin:12px 0 10px}.buyhold-copy{display:flex;min-width:0;flex-direction:column;gap:2px}.buyhold-meaning{color:var(--ink);font-size:15px;line-height:1.35;overflow-wrap:anywhere}.buyhold-action{color:var(--muted);font-size:12px;line-height:1.35;overflow-wrap:anywhere}.buyhold-metrics-rail{display:grid;grid-template-rows:repeat(2,minmax(0,1fr));gap:8px;min-width:0}.buyhold-metric{min-width:0;padding:10px;border:2px solid;border-radius:10px;background:#fff}.buyhold-metric--drawdown.is-up{border-color:#ef4444}.buyhold-metric--drawdown.is-down{border-color:#22c55e}.buyhold-metric--drawdown.is-flat{border-color:#94a3b8}.buyhold-metric--next.is-green{border-color:#22c55e}.buyhold-metric--next.is-yellow{border-color:#eab308}.buyhold-metric--next.is-orange{border-color:#f97316}.buyhold-metric--next.is-red{border-color:#ef4444}.buyhold-metric--next.is-unavailable{border-color:#94a3b8}.buyhold-metric span{display:block;color:var(--muted);font-size:11px}.buyhold-metric b{display:block;margin-top:5px;color:var(--navy);font-size:14px;line-height:1.4;word-break:break-word;overflow-wrap:anywhere}
+    __BUYHOLD_LAMP_CSS__
     :root{--paper:#f2f0ea;--surface:#fbfaf7;--navy:#24425e;--blue:#3d6f9f;--sage:#708a7c;--orange:#c98a4b;--brick:#bf6654;--ink:#283d50;--muted:#6d756f;--line:#ddd9d0}
     *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;padding:20px 14px 44px;background:var(--paper);color:var(--ink);font-family:ui-sans-serif,system-ui,-apple-system,"Noto Sans TC",sans-serif}main{width:min(820px,100%);margin:auto}.brand{display:flex;align-items:center;gap:11px;color:var(--navy);font:700 20px Georgia,"Noto Serif TC",serif;letter-spacing:.12em;padding:4px 2px 16px;border-bottom:1px solid var(--line)}.brand img{display:block;width:auto;object-fit:contain}.brand .prstk{height:29px;max-width:126px}.brand .sfce{height:31px;max-width:116px}.brand .divider{color:#a39e93;font-weight:400;letter-spacing:0}.brand .growth{white-space:nowrap}
     .hero{position:relative;overflow:hidden;margin-top:16px;padding:22px;border-radius:22px;background:var(--navy);border-top:4px solid var(--orange);color:#fff;box-shadow:0 10px 24px rgba(36,66,94,.15)}.hero:after{content:"";position:absolute;width:190px;height:190px;border:1px solid #ffffff55;border-radius:50%;right:-74px;top:-110px;box-shadow:0 0 0 30px #ffffff0d}.hero-header{position:relative;z-index:1;display:flex;align-items:center;justify-content:space-between;gap:12px}.eyebrow{position:relative;z-index:1;margin:0 0 7px;color:#cbd9df;font-size:11px;letter-spacing:.14em;text-transform:uppercase}.sync-meta{color:#dce9e6;font-size:11px;white-space:nowrap}.hero-kpi-stack{position:relative;z-index:1;display:flex;flex-direction:column;gap:12px}.net-value-group{min-width:0}.hero-value{display:flex;flex-wrap:wrap;align-items:baseline;gap:7px;min-width:0;font:700 clamp(34px,9vw,54px)/1.05 Georgia,"Noto Serif TC",serif;letter-spacing:-.04em}.hero-value>span{white-space:nowrap}.equity-ratio{color:#f7d6ab;font-size:clamp(15px,3vw,22px);font-weight:700;letter-spacing:-.01em}.hero-kpi-stack>.pill{align-self:flex-start;white-space:nowrap}.hero-divider{position:relative;z-index:1;margin:16px 0 15px;border-top:1px solid #ffffff38}.pill{display:inline-flex;align-items:center;min-height:35px;padding:8px 12px;border:1px solid #ffffff2c;border-radius:12px;background:#35536d;color:#f7d6ab;font-size:12px;font-weight:700}.metrics{position:relative;z-index:1;display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.metric{padding-left:11px;border-left:2px solid #ffffff55}.metric span{display:block;color:#cbd9df;font-size:11px}.metric strong{display:block;margin-top:4px;color:#fff;font-size:18px}
@@ -283,7 +419,7 @@ TELEGRAM_PRIVATE_HTML_TEMPLATE = """<!doctype html>
     const safety=p.pledgeSafety||{};
     treeRoot=p.assetTree||{label:'總資產',value:p.totalAsset||0,children:[]}; treePath=[]; renderTree(); $('treeBack').onclick=()=>{if(treePath.length){hideTooltip('treeDetail');treePath.pop();renderTree();}};
     $('leverage').textContent=`${num(risk.effectiveLeverage,2)} ×`; $('kelly').textContent=`${num(risk.kellyLimit||1.23,2)} ×`; $('capacity').textContent=pct(risk.betaCapacity); $('betaStatus').textContent=risk.betaStatus||'Beta 維持'; const principal=Number(p.pledgePrincipal ?? p.liabilities?.principal ?? p.totalDebt ?? 0); const riskDebt=Number(p.totalDebt ?? p.liabilities?.debt ?? 0); $('debtRisk').textContent=money(principal); $('interest').textContent=`(含息負債 ${money(riskDebt)})`; $('maintenance').textContent=pct(risk.maintenanceRatio||safety.currentRatio); $('maintenanceStatus').textContent=safety.status==='healthy'?'🟢 可加槓桿':safety.status==='warning'?'🟡 注意槓桿':'🔴 補擔保品';
-    const buyHold=p.buyHold||data.buyHold||{}; const bhLight=buyHold.light||{}; const bhNext=bhLight.nextLight||{}; const bhRec=buyHold.recommendation||{}; const bhCode=String(bhLight.code||'UNAVAILABLE').toUpperCase(); const nextMetric=document.querySelector('.buyhold-metric--next'); const drawdownMetric=document.querySelector('.buyhold-metric--drawdown'); const nextClassByCode={GREEN:'is-green',YELLOW:'is-yellow',ORANGE:'is-orange',RED:'is-red'}; const nextCode=bhCode==='UNAVAILABLE'?'UNAVAILABLE':String(bhNext.code||'').toUpperCase(); if(nextMetric){nextMetric.classList.remove('is-green','is-yellow','is-orange','is-red','is-unavailable'); nextMetric.classList.add(nextClassByCode[nextCode]||'is-unavailable');} const ddRaw=finiteNumber(bhLight.dd240Pct)?Number(bhLight.dd240Pct):null; if(drawdownMetric){drawdownMetric.classList.remove('is-up','is-down','is-flat'); drawdownMetric.classList.add(ddRaw===null||ddRaw===0?'is-flat':ddRaw<0?'is-down':'is-up');} const lightElement=$('buyHoldLight'); const lightName=String(bhLight.name||'資料暫不可用'); lightElement.textContent=bhLight.emoji||'⚪'; lightElement.title=lightName; lightElement.setAttribute('aria-label','當前燈號：'+lightName); $('buyHoldMeaningText').textContent=bhCode==='UNAVAILABLE'?'資料不足':(bhLight.meaning||'資料暫不可用'); $('buyHoldActionText').textContent=bhCode==='UNAVAILABLE'?'(暫停買進)':`(${bhRec.action||'維持持有'})`; $('buyHoldDrawdown').textContent=ddRaw===null?'—':`${ddRaw.toFixed(1)}%`; const nextName=String(bhNext.name||'').trim(); $('buyHoldNextLabel').textContent=bhCode==='RED'?'已達最高機會級別':bhCode==='UNAVAILABLE'?'距下一燈':`距${nextName&&nextName!=='—'?nextName:'下一燈'}`; $('buyHoldNextDistance').textContent=finiteNumber(bhNext.distancePct)?`${(Number(bhNext.distancePct)*100).toFixed(1)}%`:'—';
+    const buyHold=p.buyHold||data.buyHold||{}; const bhLight=buyHold.light||{}; const bhNext=bhLight.nextLight||{}; const bhRec=buyHold.recommendation||{}; const bhCodeRaw=String(bhLight.code||'UNAVAILABLE').toUpperCase(); const lightElement=$('buyHoldLight'); const bhCode=setBuyHoldLamp(lightElement,bhCodeRaw); const nextMetric=document.querySelector('.buyhold-metric--next'); const drawdownMetric=document.querySelector('.buyhold-metric--drawdown'); const nextClassByCode={GREEN:'is-green',YELLOW:'is-yellow',ORANGE:'is-orange',RED:'is-red'}; const nextCode=bhCode==='UNAVAILABLE'?'UNAVAILABLE':String(bhNext.code||'').toUpperCase(); if(nextMetric){nextMetric.classList.remove('is-green','is-yellow','is-orange','is-red','is-unavailable'); nextMetric.classList.add(nextClassByCode[nextCode]||'is-unavailable');} const ddRaw=finiteNumber(bhLight.dd240Pct)?Number(bhLight.dd240Pct):null; if(drawdownMetric){drawdownMetric.classList.remove('is-up','is-down','is-flat'); drawdownMetric.classList.add(ddRaw===null||ddRaw===0?'is-flat':ddRaw<0?'is-down':'is-up');} $('buyHoldMeaningText').textContent=bhCode==='UNAVAILABLE'?'資料不足':(bhLight.meaning||'資料暫不可用'); $('buyHoldActionText').textContent=bhCode==='UNAVAILABLE'?'(暫停買進)':`(${bhRec.action||'維持持有'})`; $('buyHoldDrawdown').textContent=ddRaw===null?'—':`${ddRaw.toFixed(1)}%`; const nextName=String(bhNext.name||'').trim(); $('buyHoldNextLabel').textContent=bhCode==='RED'?'已達最高機會級別':bhCode==='UNAVAILABLE'?'距下一燈':`距${nextName&&nextName!=='—'?nextName:'下一燈'}`; $('buyHoldNextDistance').textContent=finiteNumber(bhNext.distancePct)?`${(Number(bhNext.distancePct)*100).toFixed(1)}%`:'—';
     $('tsmc').textContent=pct(risk.tsmcExposureRatio); $('nvda').textContent=pct(risk.nvdaExposureRatio);
     const largest=risk.largestPosition||{}; $('concentration').innerHTML=`<div class="box"><span>最大單一標的（台股）</span><b>${esc(largest.symbol||'—')} · ${pct(largest.percent)}</b><small>${money(largest.value)}</small></div><div class="box"><span>美股最大單一標的</span><b>${esc(p.usLargest?.symbol||'—')} · ${pct(p.usLargest?.percent)}</b><small>${money(p.usLargest?.value)}</small></div>`; $('stress').innerHTML=(p.stressTests||[]).map(s=>`<div class="box"><span>${esc(s.label||'壓力測試')}</span><b>${money(s.netImpact||0)}</b><small>壓力後淨資產 ${money(s.netAsset||0)}${s.maintenance!=null?' · 維持率 '+pct(s.maintenance):''}</small></div>`).join('');
     const metrics=p.performanceMetrics||{}; $('growthStats').innerHTML=[['年化報酬',metrics.annualizedReturn],['年化波動',metrics.annualizedVolatility],['Sharpe',metrics.sharpe],['最大回撤',metrics.maxDrawdown]].map(x=>`<div class="box">${x[0]}<b>${x[1]==null?'—':pct(Number(x[1])*100)}</b></div>`).join(''); const history=p.history||{}; renderChart(history); const goalForecast=p.runtimeExtensions?.goalForecast||{}; const activeGoal=goalForecast.activeGoal; const rawTarget=Number(activeGoal?.targetTwdEquivalent); const rawProgress=rawTarget>0?Number(p.netAsset||0)/rawTarget*100:null; const visualProgress=Number.isFinite(rawProgress)?Math.max(0,Math.min(100,rawProgress)):0; $('goalNativeTarget').textContent=activeGoal?`${Number(activeGoal.targetAmount).toLocaleString('zh-TW')} ${activeGoal.targetCurrency}`:'—'; $('goalLabel').textContent=activeGoal&&Number.isFinite(rawProgress)?`目前進度 ${rawProgress.toFixed(1)}%`:(goalForecast.status==='completed'?'三階段資產目標已完成':'目前進度 —'); $('goalFill').style.width=`${visualProgress}%`; const displayYear=activeGoal?.displayYear||'—'; const probability=goalForecast.probability; $('goalForecast').textContent=goalForecast.status==='completed'?'目標里程碑 · 三階段資產目標已完成':`${displayYear}前達成機率 ${probability==null?'—':pct(Number(probability)*100)}`; document.querySelector('.goal-card')?.classList.toggle('is-overdue',Boolean(goalForecast.overdue));
@@ -322,14 +458,14 @@ def write_public_site(directory: str, generated_at: str) -> None:
     """Write only safe static artifacts to the Pages publish directory."""
     os.makedirs(directory, exist_ok=True)
     with open(os.path.join(directory, "index.html"), "w", encoding="utf-8") as file:
-        file.write(DEMO_HTML)
+        file.write(_prepare_buyhold_template(DEMO_HTML, asset_path=BUYHOLD_LAMP_ASSET))
     with open(os.path.join(directory, "data.public.json"), "w", encoding="utf-8") as file:
         json.dump(build_public_payload(generated_at), file, ensure_ascii=False, indent=2)
     with open(os.path.join(directory, "status.json"), "w", encoding="utf-8") as file:
         json.dump(build_public_status(generated_at), file, ensure_ascii=False, indent=2)
     # Brand assets are static artwork and contain no portfolio data. Copy them
     # into Pages so the private Telegram shell can render the same identity.
-    for asset_name in ("PRStK-Remove.png", "SFC.e-removebg-preview.png"):
+    for asset_name in ("PRStK-Remove.png", "SFC.e-removebg-preview.png", BUYHOLD_LAMP_ASSET):
         source = os.path.join(os.getcwd(), asset_name)
         if os.path.isfile(source):
             shutil.copy2(source, os.path.join(directory, asset_name))
@@ -338,7 +474,11 @@ def write_public_site(directory: str, generated_at: str) -> None:
     supabase_url = os.getenv("SUPABASE_URL", "").strip()
     function_url = os.getenv("SUPABASE_FUNCTION_URL", "").strip()
     config = json.dumps({"url": supabase_url, "functionUrl": function_url}, ensure_ascii=True)
-    private_html = TELEGRAM_PRIVATE_HTML_TEMPLATE.replace("__SUPABASE_CONFIG__", config).replace("__FORM_V3_URL__", FORM_V3_URL)
+    private_html = _prepare_buyhold_template(
+        TELEGRAM_PRIVATE_HTML_TEMPLATE,
+        asset_path=f"../{BUYHOLD_LAMP_ASSET}",
+        dynamic=True,
+    ).replace("__SUPABASE_CONFIG__", config).replace("__FORM_V3_URL__", FORM_V3_URL)
     direct_treemap_renderer = r"""
   const formatShares = (value) => { const n=Number(value); return Number.isFinite(n)&&n>0 ? n.toLocaleString('zh-TW',{maximumFractionDigits:6}) : ''; };
   const nodeShareLines = (node) => {

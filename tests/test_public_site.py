@@ -4,7 +4,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from public_site import build_public_payload, build_public_status, write_public_site
+from public_site import (
+    BUYHOLD_LAMP_ASSET,
+    build_public_payload,
+    build_public_status,
+    write_public_site,
+)
 
 
 class PublicSiteSecurityTests(unittest.TestCase):
@@ -39,6 +44,7 @@ class PublicSiteSecurityTests(unittest.TestCase):
                     "private",
                     "PRStK-Remove.png",
                     "SFC.e-removebg-preview.png",
+                    BUYHOLD_LAMP_ASSET,
                 },
             )
             html = (Path(directory) / "index.html").read_text(encoding="utf-8")
@@ -195,8 +201,14 @@ class PublicSiteSecurityTests(unittest.TestCase):
             public_html = (Path(directory) / "index.html").read_text(encoding="utf-8")
             private_html = (Path(directory) / "private" / "index.html").read_text(encoding="utf-8")
             self.assertIn("Buy&amp;Hold 紅綠燈", public_html)
-            self.assertIn("⚪", public_html)
+            self.assertIn('class="buyhold-lamp is-unavailable"', public_html)
+            self.assertIn('class="buyhold-lamp__lens"', public_html)
+            self.assertIn(BUYHOLD_LAMP_ASSET, public_html)
+            self.assertNotIn("⚪", public_html)
             self.assertIn("buyHoldLight", private_html)
+            self.assertIn('class="buyhold-lamp is-unavailable"', private_html)
+            self.assertIn(f'src="../{BUYHOLD_LAMP_ASSET}"', private_html)
+            self.assertNotIn("⚪", private_html)
             for element_id in ("buyHoldMeaning", "buyHoldMeaningText", "buyHoldActionText", "buyHoldDrawdown", "buyHoldNextLabel", "buyHoldNextDistance"):
                 self.assertIn(f'id="{element_id}"', private_html)
             self.assertNotIn("Portfolio Gate", private_html)
@@ -217,6 +229,9 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertIn("buyhold-metric--drawdown.is-flat", private_html)
             self.assertNotIn("距—", private_html)
             self.assertIn("bhCode==='UNAVAILABLE'?'距下一燈'", private_html)
+            self.assertIn("setBuyHoldLamp(lightElement,bhCodeRaw)", private_html)
+            self.assertIn("buyHoldLampStateClasses", private_html)
+            self.assertIn("element.classList.remove(...buyHoldLampClassNames)", private_html)
             self.assertIn("buyhold-metric--next.is-green", private_html)
             self.assertIn("buyhold-metric--next.is-yellow", private_html)
             self.assertIn("buyhold-metric--next.is-orange", private_html)
