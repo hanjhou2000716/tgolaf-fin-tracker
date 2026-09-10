@@ -66,6 +66,7 @@ from history_store import (
     schema_drift_alert_sent,
     upsert_history_snapshot,
 )
+from sheets_retry import TRANSIENT_SHEETS_STATUS, retry_sheet_operation, write_operation_summary
 from runtime_extensions import build_runtime_extensions
 from refresh_recovery import inventory_has_positive_assets, validate_recovery_candidate
 from ledger_conflict_diagnostics import ledger_conflict_digest, ledger_conflict_summary_artifact
@@ -98,7 +99,9 @@ WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/private/"
 HISTORY_EXTRA_COLUMNS = ["TW_Stock_Value", "US_Stock_Value", "Cash_Value", "Fund_Value", "NVDA_QQQM_Weight", "NVDA_SPYG_Weight", "NVDA_VOO_Weight", "Settlement_Notification_Sent_At", "Ledger_Conflict_Alert_Marker", "Schema_Drift_Alert_Marker"]
 ETF_NVDA_WEIGHT_FALLBACKS = {"QQQM": 0.095, "SPYG": 0.075, "VOO": 0.070}
 MARKET_DATA = MarketDataService()
-TRANSIENT_SHEETS_STATUS = frozenset({429, 500, 502, 503, 504})
+# Kept as a module-level compatibility contract for operators and tests.  The
+# actual policy is implemented by sheets_retry.retry_sheet_operation and is
+# shared by every History and transaction worksheet operation.
 # Populated by calculate_current_assets for the private output assembly.  It
 # avoids changing the long-standing four-value compatibility return contract.
 LAST_SCHEMA_DIAGNOSTICS = []
@@ -139,30 +142,26 @@ def open_spreadsheets_with_retry(client, *, attempts=4, sleep=time.sleep):
     raised immediately. The final transient error is also re-raised so a
     missing data source cannot be hidden by a fallback snapshot.
     """
-    for attempt in range(attempts):
-        try:
-            return client.openall()
-        except gspread.exceptions.APIError as error:
-            status = getattr(getattr(error, "response", None), "status_code", None)
-            if status not in TRANSIENT_SHEETS_STATUS or attempt == attempts - 1:
-                raise
-            delay = 2**attempt
-            print(f"Google Sheets discovery transient HTTP {status}; retrying in {delay}s")
-            sleep(delay)
+    return retry_sheet_operation(
+        "spreadsheets.openall",
+        client.openall,
+        attempts=attempts,
+        sleep=sleep,
+    )
 
 
 def settlement_notification_sent(history_sheet, snapshot_date, window_key):
     """Read the durable per-day/per-window notification marker from History."""
     if history_sheet is None:
         return False
-    header_map = build_header_map(history_sheet.row_values(1))
+    header_map = build_header_map(retry_sheet_operation("history.row_values", history_sheet.row_values, 1))
     marker_column = header_map.get("Settlement_Notification_Sent_At")
     if not marker_column:
         return False
     row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
     if row_number is None:
         return False
-    row = history_sheet.row_values(row_number)
+    row = retry_sheet_operation("history.row_values", history_sheet.row_values, row_number)
     raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
     if not raw_marker:
         return False
@@ -178,14 +177,14 @@ def settlement_notification_sent(history_sheet, snapshot_date, window_key):
 def mark_settlement_notification_sent(history_sheet, snapshot_date, window_key, sent_at):
     if history_sheet is None:
         return
-    header_map = build_header_map(history_sheet.row_values(1))
+    header_map = build_header_map(retry_sheet_operation("history.row_values", history_sheet.row_values, 1))
     marker_column = header_map.get("Settlement_Notification_Sent_At")
     if not marker_column:
         return
     row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
     if row_number is None:
         return
-    row = history_sheet.row_values(row_number)
+    row = retry_sheet_operation("history.row_values", history_sheet.row_values, row_number)
     raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
     try:
         markers = json.loads(raw_marker) if raw_marker else {}
@@ -195,7 +194,7 @@ def mark_settlement_notification_sent(history_sheet, snapshot_date, window_key, 
         markers = {}
     markers[window_key] = sent_at
     marker_a1 = column_to_a1(marker_column)
-    history_sheet.update(
+    retry_sheet_operation("history.update", history_sheet.update,
         f"{marker_a1}{row_number}",
         [[json.dumps(markers, ensure_ascii=False, separators=(",", ":"))]],
     )
@@ -330,7 +329,11 @@ def calculate_current_assets():
         # The current response workbook is an explicit cutover boundary. Do
         # not fall back to title matching when it is configured: similarly
         # named legacy workbooks must never be ingested as current data.
-        sheet = client.open_by_key(CURRENT_TRANSACTION_SPREADSHEET_ID)
+        sheet = retry_sheet_operation(
+            "spreadsheets.open_by_key.current",
+            client.open_by_key,
+            CURRENT_TRANSACTION_SPREADSHEET_ID,
+        )
     else:
         for s in available_sheets:
             if "PRStK" in s.title: sheet = s; break
@@ -343,7 +346,11 @@ def calculate_current_assets():
         # Legacy archive and History remain in the original workbook. Keep
         # that boundary explicit so a clean V3 response workbook does not
         # need private-history duplication.
-        workbooks.append(client.open_by_key(LEGACY_TRANSACTION_SPREADSHEET_ID))
+        workbooks.append(retry_sheet_operation(
+            "spreadsheets.open_by_key.legacy",
+            client.open_by_key,
+            LEGACY_TRANSACTION_SPREADSHEET_ID,
+        ))
         
     source_roles = SourceRoleConfig.from_environment()
     data_rows, history_sheet = [], None
@@ -358,13 +365,22 @@ def calculate_current_assets():
     active_current_rejections = []
     current_schema_versions = []
     current_source_seen = False
-    for ws in [worksheet for workbook in workbooks for worksheet in workbook.worksheets()]:
+    worksheets = []
+    for workbook_index, workbook in enumerate(workbooks, start=1):
+        worksheets.extend(retry_sheet_operation(
+            f"spreadsheet.worksheets.{workbook_index}",
+            workbook.worksheets,
+        ))
+    for ws_index, ws in enumerate(worksheets, start=1):
         role = source_roles.role_for(ws.title)
         if role == "HISTORY":
             history_sheet = ws
         elif role in {"CURRENT", "LEGACY_ARCHIVE"}:
             current_source_seen = current_source_seen or role == "CURRENT"
-            rows = ws.get_all_values()
+            rows = retry_sheet_operation(
+                f"worksheet.get_all_values.{role.lower()}.{ws_index}",
+                ws.get_all_values,
+            )
             if len(rows) > 1:
                 schema_version = detect_schema(rows[0])
                 schema_versions.append(schema_version)
@@ -868,7 +884,7 @@ def main():
             }
     validate_inventory(inventory)
     validate_history_sheet(history_sheet)
-    history_records = history_sheet.get_all_records()
+    history_records = retry_sheet_operation("history.get_all_records", history_sheet.get_all_records)
     if _refresh_is_ready(refresh_control) and not _inventory_has_positive_assets(inventory):
         previous_total_asset = 0.0
         for history_row in reversed(history_records):
@@ -2272,6 +2288,13 @@ def main():
             "Telegram notification skipped; "
             f"window={settlement_window}, alreadySent={notification_already_sent}, snapshotResult={snapshot_result}"
         )
+    # Flush a non-financial Google Sheets availability summary for the private
+    # Actions artifact after a successful run.  Fatal Sheet errors are flushed
+    # by retry_sheet_operation before they propagate.
+    write_operation_summary()
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        write_operation_summary()

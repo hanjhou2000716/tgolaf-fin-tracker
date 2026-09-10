@@ -88,6 +88,7 @@ jobs:
           FORM_MISSING_EMAIL_COMPAT: ${{ inputs.recover_missing_email || false }}
           FORM_V3_URL: ${{ vars.FORM_V3_URL || 'https://forms.google.com/' }}
           FORM_V3_CUTOVER_AT: ${{ vars.FORM_V3_CUTOVER_AT || '' }}
+          SHEETS_OPERATION_SUMMARY_PATH: .private-build/google-sheets-operation-summary.json
           CURRENT_TRANSACTION_SPREADSHEET_ID: ${{ vars.CURRENT_TRANSACTION_SPREADSHEET_ID || '' }}
           LEGACY_TRANSACTION_SPREADSHEET_ID: ${{ vars.LEGACY_TRANSACTION_SPREADSHEET_ID || '' }}
           CURRENT_TRANSACTION_SOURCE: ${{ vars.CURRENT_TRANSACTION_SOURCE || 'TRANSACTIONS_CURRENT' }}
@@ -95,6 +96,16 @@ jobs:
           HISTORY_SOURCE: ${{ vars.HISTORY_SOURCE || 'History' }}
           TAIEX_HISTORY_CACHE_PATH: .taiex-cache/taiex-history-cache.json
         run: python main.py
+
+      - name: Upload Google Sheets operation summary
+        if: always()
+        # Availability diagnostics contain only operation names, status codes,
+        # retry counts and error types; never worksheet values or finance data.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: google-sheets-operation-summary
+          path: .private-build/google-sheets-operation-summary.json
+          if-no-files-found: ignore
 
       - name: Upload private schema recovery summary
         # This artifact contains only fingerprints, row counts and control

@@ -2,6 +2,8 @@
 
 import math
 
+from sheets_retry import retry_sheet_operation
+
 
 REQUIRED_INVENTORY_KEYS = {
     "台股", "美股", "基金", "現金_TWD", "現金_USD", "質押負債", "質押利率", "擔保品"
@@ -45,7 +47,7 @@ def validate_inventory(inventory):
 def validate_history_sheet(history_sheet):
     if history_sheet is None:
         raise ValueError("History worksheet is required for performance tracking")
-    header = set(history_sheet.row_values(1))
+    header = set(retry_sheet_operation("history.row_values", history_sheet.row_values, 1))
     missing = REQUIRED_HISTORY_COLUMNS - header
     if missing:
         raise ValueError(f"History worksheet is missing columns: {', '.join(sorted(missing))}")

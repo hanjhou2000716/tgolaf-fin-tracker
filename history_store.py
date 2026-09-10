@@ -7,6 +7,8 @@ operator-maintained columns untouched.
 
 import json
 
+from sheets_retry import retry_sheet_operation
+
 
 def column_to_a1(column_index: int) -> str:
     """Convert a one-based column number to an A1 column label."""
@@ -37,7 +39,7 @@ def ensure_history_columns(history_sheet, columns):
     """Append missing named columns and return the refreshed header map."""
     if history_sheet is None:
         return {}
-    headers = list(history_sheet.row_values(1))
+    headers = list(retry_sheet_operation("history.row_values", history_sheet.row_values, 1))
     header_map = build_header_map(headers)
     for column in columns:
         name = str(column).strip()
@@ -45,7 +47,7 @@ def ensure_history_columns(history_sheet, columns):
             continue
         if name not in header_map:
             next_index = len(headers) + 1
-            history_sheet.update_cell(1, next_index, name)
+            retry_sheet_operation("history.update_cell", history_sheet.update_cell, 1, next_index, name)
             headers.append(name)
             header_map[name] = next_index
     return header_map
@@ -55,13 +57,13 @@ def find_row_by_key(history_sheet, key, value):
     """Find the last data row whose named key equals ``value``."""
     if history_sheet is None:
         return None
-    headers = history_sheet.row_values(1)
+    headers = retry_sheet_operation("history.row_values", history_sheet.row_values, 1)
     header_map = build_header_map(headers)
     if key not in header_map:
         return None
     column_index = header_map[key] - 1
     expected = str(value).strip()[:10]
-    rows = history_sheet.get_all_values()
+    rows = retry_sheet_operation("history.get_all_values", history_sheet.get_all_values)
     for row_number in range(len(rows), 1, -1):
         row = rows[row_number - 1]
         if len(row) > column_index and str(row[column_index]).strip()[:10] == expected:
@@ -69,7 +71,7 @@ def find_row_by_key(history_sheet, key, value):
     return None
 
 
-def upsert_history_snapshot(history_sheet, values):
+def _upsert_history_snapshot_once(history_sheet, values):
     """Create/update one snapshot using column names rather than positions.
 
     Only keys supplied in ``values`` are written on an update. This is
@@ -81,12 +83,12 @@ def upsert_history_snapshot(history_sheet, values):
     if not isinstance(values, dict) or not values.get("Date"):
         raise ValueError("History snapshot must include a Date")
 
-    headers = list(history_sheet.row_values(1))
+    headers = list(retry_sheet_operation("history.row_values", history_sheet.row_values, 1))
     header_map = build_header_map(headers)
     for key in values:
         if key not in header_map:
             next_index = len(headers) + 1
-            history_sheet.update_cell(1, next_index, key)
+            retry_sheet_operation("history.update_cell", history_sheet.update_cell, 1, next_index, key)
             headers.append(key)
             header_map[key] = next_index
 
@@ -94,14 +96,40 @@ def upsert_history_snapshot(history_sheet, values):
     if row_number is not None:
         for key, value in values.items():
             column = column_to_a1(header_map[key])
-            history_sheet.update(f"{column}{row_number}", [[value]])
+            retry_sheet_operation("history.update", history_sheet.update, f"{column}{row_number}", [[value]])
         return "updated"
 
     row = [""] * len(headers)
     for key, value in values.items():
         row[header_map[key] - 1] = value
+    # Appends intentionally have no direct retry.  The caller retries this
+    # whole idempotent operation; its next pass re-reads Date and turns an
+    # ambiguous append into an update if the first request actually landed.
     history_sheet.append_row(row)
     return "created"
+
+
+def upsert_history_snapshot(history_sheet, values, *, attempts=4, sleep=None):
+    """Create/update one snapshot with a date-keyed, idempotent retry.
+
+    ``append_row`` is never blindly retried.  A retry starts by reading the
+    date key again, so a successful append whose response was lost cannot
+    produce a duplicate History row.
+    """
+    if history_sheet is None:
+        return "skipped"
+    if not isinstance(values, dict) or not values.get("Date"):
+        raise ValueError("History snapshot must include a Date")
+    kwargs = {"attempts": attempts}
+    if sleep is not None:
+        kwargs["sleep"] = sleep
+    return retry_sheet_operation(
+        "history.upsert_snapshot",
+        _upsert_history_snapshot_once,
+        history_sheet,
+        values,
+        **kwargs,
+    )
 
 
 def ledger_conflict_alert_sent(history_sheet, snapshot_date, digest):
@@ -115,11 +143,11 @@ def ledger_conflict_alert_sent(history_sheet, snapshot_date, digest):
     """
     if history_sheet is None or not digest:
         return False
-    header_map = build_header_map(history_sheet.row_values(1))
+    header_map = build_header_map(retry_sheet_operation("history.row_values", history_sheet.row_values, 1))
     marker_column = header_map.get("Ledger_Conflict_Alert_Marker")
     if not marker_column:
         return False
-    rows = history_sheet.get_all_values()
+    rows = retry_sheet_operation("history.get_all_values", history_sheet.get_all_values)
     for row in reversed(rows[-60:]):
         raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
         if not raw_marker:
@@ -137,7 +165,7 @@ def mark_ledger_conflict_alert_sent(history_sheet, snapshot_date, digest, sent_a
     """Persist only a bounded conflict digest on the current History row."""
     if history_sheet is None or not digest:
         return
-    header_map = build_header_map(history_sheet.row_values(1))
+    header_map = build_header_map(retry_sheet_operation("history.row_values", history_sheet.row_values, 1))
     marker_column = header_map.get("Ledger_Conflict_Alert_Marker")
     if not marker_column:
         return
@@ -146,11 +174,11 @@ def mark_ledger_conflict_alert_sent(history_sheet, snapshot_date, digest, sent_a
         # A blocked refresh intentionally does not create today's History
         # snapshot.  Keep the digest durable by attaching it to the latest
         # existing data row instead of losing deduplication across runs.
-        rows = history_sheet.get_all_values()
+        rows = retry_sheet_operation("history.get_all_values", history_sheet.get_all_values)
         row_number = len(rows) if len(rows) > 1 else None
     if row_number is None:
         return
-    row = history_sheet.row_values(row_number)
+    row = retry_sheet_operation("history.row_values", history_sheet.row_values, row_number)
     raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
     try:
         markers = json.loads(raw_marker) if raw_marker else {}
@@ -160,7 +188,7 @@ def mark_ledger_conflict_alert_sent(history_sheet, snapshot_date, digest, sent_a
         markers = {}
     markers[digest] = sent_at
     markers = dict(list(markers.items())[-20:])
-    history_sheet.update(
+    retry_sheet_operation("history.update", history_sheet.update,
         f"{column_to_a1(marker_column)}{row_number}",
         [[json.dumps(markers, ensure_ascii=False, separators=(",", ":"))]],
     )
@@ -170,11 +198,11 @@ def _alert_digest_sent(history_sheet, digest, marker_name):
     """Check a bounded digest marker across recent History rows."""
     if history_sheet is None or not digest:
         return False
-    header_map = build_header_map(history_sheet.row_values(1))
+    header_map = build_header_map(retry_sheet_operation("history.row_values", history_sheet.row_values, 1))
     marker_column = header_map.get(marker_name)
     if not marker_column:
         return False
-    for row in reversed(history_sheet.get_all_values()[-60:]):
+    for row in reversed(retry_sheet_operation("history.get_all_values", history_sheet.get_all_values)[-60:]):
         raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
         if not raw_marker:
             continue
@@ -191,17 +219,17 @@ def _mark_alert_digest(history_sheet, snapshot_date, digest, sent_at, marker_nam
     """Persist a bounded alert digest without touching other History fields."""
     if history_sheet is None or not digest:
         return
-    header_map = build_header_map(history_sheet.row_values(1))
+    header_map = build_header_map(retry_sheet_operation("history.row_values", history_sheet.row_values, 1))
     marker_column = header_map.get(marker_name)
     if not marker_column:
         return
     row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
     if row_number is None:
-        rows = history_sheet.get_all_values()
+        rows = retry_sheet_operation("history.get_all_values", history_sheet.get_all_values)
         row_number = len(rows) if len(rows) > 1 else None
     if row_number is None:
         return
-    row = history_sheet.row_values(row_number)
+    row = retry_sheet_operation("history.row_values", history_sheet.row_values, row_number)
     raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
     try:
         markers = json.loads(raw_marker) if raw_marker else {}
@@ -211,7 +239,7 @@ def _mark_alert_digest(history_sheet, snapshot_date, digest, sent_at, marker_nam
         markers = {}
     markers[digest] = sent_at
     markers = dict(list(markers.items())[-20:])
-    history_sheet.update(
+    retry_sheet_operation("history.update", history_sheet.update,
         f"{column_to_a1(marker_column)}{row_number}",
         [[json.dumps(markers, ensure_ascii=False, separators=(",", ":"))]],
     )
