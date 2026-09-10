@@ -1,6 +1,7 @@
 """Compatibility entry point for the modular dashboard pipeline."""
 
 from dashboard_pipeline import main
+from sheets_retry import write_operation_summary
 
 # Compatibility markers retained for static contract tests and operators:
 # FORM_SCHEMA_LEGACY_COMPAT
@@ -10,4 +11,7 @@ from dashboard_pipeline import main
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        write_operation_summary()
