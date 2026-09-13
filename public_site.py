@@ -12,6 +12,8 @@ import json
 import os
 import shutil
 
+from service_contracts import GROWTH_STALE_AFTER_HOURS
+
 
 # The production Form V3 URL is injected at build time.  Keeping it in an
 # environment variable avoids accidentally sending users back to the retired
@@ -446,7 +448,7 @@ def build_public_status(generated_at: str) -> dict:
         "mode": "demo",
         "generatedAt": generated_at,
         "dataPolicy": "No personal asset values or holdings are published.",
-        "freshness": {"expectedCadenceHours": 12, "staleAfterHours": 18, "timezone": "Asia/Taipei"},
+        "freshness": {"expectedCadenceHours": 12, "staleAfterHours": GROWTH_STALE_AFTER_HOURS, "timezone": "Asia/Taipei"},
         "sources": {"publicDemo": "ok"},
     }
 

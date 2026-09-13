@@ -28,6 +28,7 @@ class PublicSiteSecurityTests(unittest.TestCase):
         status = build_public_status("2026-08-04T12:00:00+08:00")
         encoded = json.dumps(status, ensure_ascii=False)
         self.assertEqual(status["mode"], "demo")
+        self.assertEqual(status["freshness"]["staleAfterHours"], 72)
         self.assertNotIn("portfolio", encoded)
         self.assertNotIn("totalAsset", encoded)
 

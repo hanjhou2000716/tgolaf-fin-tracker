@@ -246,7 +246,7 @@ GitHub Actions 的 `workflow_dispatch` 提供 `force_telegram` 勾選項。勾�
 `health-watchdog.yml` 會在台灣時間約 06:00 與 17:00 檢查 Growth、Skynet 的 `status.json`。以下任一條件成立就透過 Telegram 告警：
 
 - `status` 不是 `ok`。
-- `generatedAt` 超過各自 `staleAfterHours`（目前 18 小時）。
+- `generatedAt` 超過各自 `staleAfterHours`（Growth 72 小時；Skynet 維持 18 小時）。
 - 任一資料來源狀態不是 `ok`。
 - endpoint 無法取得或 JSON 無效。
 
