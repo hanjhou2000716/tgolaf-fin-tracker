@@ -77,6 +77,7 @@ from buy_hold_policy import (
     build_settlement_telegram_message,
     buy_hold_telegram_emoji,
 )
+from service_contracts import GROWTH_BUTTON_TEXT, GROWTH_STALE_AFTER_HOURS
 
 # ==========================================
 # 1. 環境變數與金鑰設定
@@ -2157,7 +2158,7 @@ def main():
         "portfolioDataAsOf": ingestion_health.get("portfolioDataAsOf") or tw_now.isoformat(),
         "freshness": {
             "expectedCadenceHours": 12,
-            "staleAfterHours": 18,
+            "staleAfterHours": GROWTH_STALE_AFTER_HOURS,
             "timezone": "Asia/Taipei",
         },
         "sources": {
@@ -2224,7 +2225,7 @@ def main():
 
     keyboard = {
         "inline_keyboard": [
-            [{"text": "🌱 Growth儀表板", "web_app": {"url": WEB_APP_URL}}],
+            [{"text": GROWTH_BUTTON_TEXT, "web_app": {"url": WEB_APP_URL}}],
         ]
     }
     

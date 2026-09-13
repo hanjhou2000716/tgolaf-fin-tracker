@@ -4,12 +4,20 @@ import datetime
 import os
 import sys
 
+from service_contracts import GROWTH_BUTTON_TEXT, GROWTH_STALE_AFTER_HOURS
+
 TAIPEI = datetime.timezone(datetime.timedelta(hours=8), name="Asia/Taipei")
 ENDPOINTS = {
     "Growth Dashboard": "https://hanjhou2000716.github.io/tgolaf-fin-tracker/status.json",
     "Skynet Monitoring": "https://hanjhou2000716.github.io/skynet-monitoring/status.json",
 }
 GROWTH_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/"
+DEFAULT_STALE_AFTER_HOURS = 18
+
+
+def default_stale_after_hours(name):
+    """Return a source-specific fallback without weakening Skynet checks."""
+    return GROWTH_STALE_AFTER_HOURS if "growth" in str(name).lower() else DEFAULT_STALE_AFTER_HOURS
 
 
 def parse_generated_at(value):
@@ -27,7 +35,14 @@ def evaluate_status(name, payload, now):
 
     try:
         generated_at = parse_generated_at(payload.get("generatedAt"))
-        stale_hours = float(payload.get("freshness", {}).get("staleAfterHours", payload.get("staleAfterHours", 18)))
+        freshness = payload.get("freshness")
+        freshness = freshness if isinstance(freshness, dict) else {}
+        declared_stale_hours = freshness.get("staleAfterHours", payload.get("staleAfterHours"))
+        if declared_stale_hours in (None, ""):
+            declared_stale_hours = default_stale_after_hours(name)
+        stale_hours = float(declared_stale_hours)
+        if stale_hours <= 0:
+            raise ValueError("staleAfterHours must be positive")
         age_hours = (now - generated_at).total_seconds() / 3600
         if age_hours > stale_hours:
             issues.append(f"{name} stale for {age_hours:.1f}h (limit {stale_hours:.0f}h)")
@@ -67,7 +82,7 @@ def send_alert(issues):
         json={
             "chat_id": chat_id,
             "text": message,
-            "reply_markup": {"inline_keyboard": [[{"text": "🌱 Growth儀表板", "web_app": {"url": GROWTH_URL}}]]},
+            "reply_markup": {"inline_keyboard": [[{"text": GROWTH_BUTTON_TEXT, "web_app": {"url": GROWTH_URL}}]]},
         },
         timeout=15,
     )
