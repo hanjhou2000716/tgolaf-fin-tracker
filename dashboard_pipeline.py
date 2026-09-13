@@ -77,7 +77,13 @@ from buy_hold_policy import (
     build_settlement_telegram_message,
     buy_hold_telegram_emoji,
 )
-from service_contracts import GROWTH_BUTTON_TEXT, GROWTH_STALE_AFTER_HOURS
+from service_contracts import (
+    GROWTH_BUTTON_TEXT,
+    GROWTH_STALE_AFTER_HOURS,
+    TAIPEI,
+    UTC,
+    rfc3339_utc,
+)
 
 # ==========================================
 # 1. 環境變數與金鑰設定
@@ -92,6 +98,8 @@ FORM_SCHEMA_LEGACY_COMPAT = os.getenv("FORM_SCHEMA_LEGACY_COMPAT", "false").stri
 FORM_MISSING_EMAIL_COMPAT = os.getenv("FORM_MISSING_EMAIL_COMPAT", "false").strip().lower() in {"1", "true", "yes", "on"}
 FORM_V3_URL = os.getenv("FORM_V3_URL", "https://forms.google.com/").strip()
 FORM_V3_CUTOVER_AT = os.getenv("FORM_V3_CUTOVER_AT", "").strip() or None
+SCHEDULED_WINDOW_OVERRIDE = os.getenv("SCHEDULED_WINDOW_OVERRIDE", "").strip().lower()
+SCHEDULED_DATE_OVERRIDE = os.getenv("SCHEDULED_DATE_OVERRIDE", "").strip()
 CURRENT_TRANSACTION_SPREADSHEET_ID = os.getenv("CURRENT_TRANSACTION_SPREADSHEET_ID", "").strip() or None
 LEGACY_TRANSACTION_SPREADSHEET_ID = os.getenv("LEGACY_TRANSACTION_SPREADSHEET_ID", "").strip() or None
 WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/private/"
@@ -837,9 +845,21 @@ def _settlement_quote_for_transaction(transaction):
 # 4. 主程序與 HTML (Web App) 生成
 # ==========================================
 def main():
-    tw_now = datetime.datetime.utcnow() + datetime.timedelta(hours=8)
+    # Keep one absolute instant for the entire run.  Taiwan-local values are
+    # derived only for date keys, notification windows and display labels.
+    now_utc = datetime.datetime.now(UTC)
+    tw_now = now_utc.astimezone(TAIPEI)
+    generated_at = rfc3339_utc(now_utc)
     today_str = tw_now.strftime("%m-%d")
     display_date = tw_now.strftime("%m/%d")
+    override_date = None
+    if SCHEDULED_DATE_OVERRIDE:
+        try:
+            override_date = datetime.date.fromisoformat(SCHEDULED_DATE_OVERRIDE)
+        except ValueError:
+            override_date = None
+    if os.getenv("GITHUB_EVENT_NAME", "").strip() == "schedule" and override_date:
+        display_date = override_date.strftime("%m/%d")
         
     inventory, history_sheet, accepted_transactions, ledger_sync_result = calculate_current_assets()
     refresh_control = copy.deepcopy(LAST_REFRESH_CONTROL)
@@ -1337,7 +1357,7 @@ def main():
         total_asset=total_asset,
         total_debt=total_debt,
         pledged_value=pledged_value,
-        data_as_of=tw_now.isoformat(),
+        data_as_of=generated_at,
         sources={
             "googleSheet": {"quality": "fresh" if inventory else "unavailable", "source": "Google Sheets"},
             "marketQuotes": {"quality": "fresh" if total_asset > 0 else "unavailable", "source": "market providers"},
@@ -2141,7 +2161,7 @@ def main():
             # Private-only canonical state used as the next Last-Known-Good
             # snapshot.  public_site.py receives a separate Demo contract.
             "inventory": _serialize_inventory(inventory),
-            "portfolioDataAsOf": ingestion_health.get("portfolioDataAsOf") or tw_now.isoformat(),
+            "portfolioDataAsOf": ingestion_health.get("portfolioDataAsOf") or generated_at,
             "nvdaExposure": {"value": round(nvda_exposure_twd, 2), "percent": round(nvda_pct, 1), "etfWeights": {symbol: {"weight": round(weight * 100, 2), "source": source} for symbol, (weight, source) in etf_nvda_weights.items()}},
         },
     }
@@ -2149,13 +2169,13 @@ def main():
     data_status = "blocked" if refresh_blocked else "ok" if total_asset > 0 and net_asset > 0 else "degraded"
     status_payload = {
         "status": data_status,
-        "generatedAt": tw_now.isoformat(),
+        "generatedAt": generated_at,
         "snapshotResult": snapshot_result,
         "portfolioValueAvailable": total_asset > 0,
         "ingestionHealth": ingestion_health,
         "refreshControl": refresh_control,
-        "pipelineGeneratedAt": tw_now.isoformat(),
-        "portfolioDataAsOf": ingestion_health.get("portfolioDataAsOf") or tw_now.isoformat(),
+        "pipelineGeneratedAt": generated_at,
+        "portfolioDataAsOf": ingestion_health.get("portfolioDataAsOf") or generated_at,
         "freshness": {
             "expectedCadenceHours": 12,
             "staleAfterHours": GROWTH_STALE_AFTER_HOURS,
@@ -2167,9 +2187,9 @@ def main():
         },
     }
     data_for_web["status"] = data_status
-    data_for_web["generatedAt"] = tw_now.isoformat()
-    data_for_web["pipelineGeneratedAt"] = tw_now.isoformat()
-    data_for_web["portfolioDataAsOf"] = ingestion_health.get("portfolioDataAsOf") or tw_now.isoformat()
+    data_for_web["generatedAt"] = generated_at
+    data_for_web["pipelineGeneratedAt"] = generated_at
+    data_for_web["portfolioDataAsOf"] = ingestion_health.get("portfolioDataAsOf") or generated_at
     data_for_web["snapshotResult"] = snapshot_result
     data_for_web["ledgerSyncResult"] = ledger_sync_result
     data_for_web["ledgerAudit"] = ledger_audit
@@ -2197,7 +2217,7 @@ def main():
     status_payload["snapshotResult"] = snapshot_result
     write_json('.private-build/data.private.json', data_for_web)
     write_json('.private-build/status.private.json', status_payload)
-    write_public_site('public-site', tw_now.isoformat())
+    write_public_site('public-site', generated_at)
     # =================================
 
     # --- 判斷每日損益，動態生成推播文字 ---
@@ -2233,9 +2253,13 @@ def main():
     # window so the US morning and Taiwan afternoon notifications can both be
     # delivered while remaining idempotent across Cron retries. Manual force
     # mode intentionally bypasses both the time window and the dedupe marker.
-    snapshot_date = tw_now.strftime("%Y-%m-%d")
+    snapshot_date = override_date.isoformat() if override_date and os.getenv("GITHUB_EVENT_NAME", "").strip() == "schedule" else tw_now.strftime("%Y-%m-%d")
     if FORCE_TELEGRAM:
         settlement_window = "manual"
+    elif os.getenv("GITHUB_EVENT_NAME", "").strip() == "schedule" and SCHEDULED_WINDOW_OVERRIDE in {"us", "tw"}:
+        # A delayed GitHub cron still represents its scheduled settlement
+        # window; never infer the window from the late wall clock.
+        settlement_window = SCHEDULED_WINDOW_OVERRIDE
     elif 5 <= tw_now.hour < 7:
         settlement_window = "us"
     elif 14 <= tw_now.hour < 17:
@@ -2263,17 +2287,17 @@ def main():
             response.raise_for_status()
             if refresh_blocked:
                 mark_schema_drift_alert_sent(
-                    history_sheet, snapshot_date, refresh_digest, tw_now.isoformat()
+                    history_sheet, snapshot_date, refresh_digest, generated_at
                 )
             else:
-                mark_settlement_notification_sent(history_sheet, snapshot_date, settlement_window, tw_now.isoformat())
+                mark_settlement_notification_sent(history_sheet, snapshot_date, settlement_window, generated_at)
                 if conflict_digest and not conflict_already_alerted:
                     mark_ledger_conflict_alert_sent(
-                        history_sheet, snapshot_date, conflict_digest, tw_now.isoformat()
+                        history_sheet, snapshot_date, conflict_digest, generated_at
                     )
                 if schema_digest and schema_alert_due:
                     mark_schema_drift_alert_sent(
-                        history_sheet, snapshot_date, schema_digest, tw_now.isoformat()
+                        history_sheet, snapshot_date, schema_digest, generated_at
                     )
             # This line is intentionally non-financial and makes production
             # verification auditable without logging the settlement payload.

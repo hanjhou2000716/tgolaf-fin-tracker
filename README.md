@@ -258,9 +258,11 @@ GitHub Actions 的 `workflow_dispatch` 提供 `force_telegram` 勾選項。勾�
 
 - `repository_dispatch`：`trigger_update`，由外部 Cornjob 觸發。
 - `workflow_dispatch`：GitHub 手動執行；可勾選 `force_telegram` 測試 Telegram。
-- 另有 GitHub schedule 備援：`40 21 * * 1-5`（台灣週二至週六 05:40）與 `45 6 * * 1-5`（台灣週一至週五 14:45）；外部 Cornjob 正常時仍由 History marker 防止重複通知。
+- 另有延後 40 分鐘的條件式 GitHub schedule 備援：`20 22 * * 1-5`（台灣週二至週六 06:20）與 `25 7 * * 1-5`（台灣週一至週五 15:25）。備援會比對同一台灣日期、結算窗口及 `main` commit；已有成功的外部 dispatch、手動或備援 run 時只記錄 `SKIP_ALREADY_SUCCEEDED`，不重建頁面、不寫入快照、不推播。
 - 流程：安裝 Python → 執行 14 項測試 → 執行 `main.py` → 驗證 JSON → 發佈 `gh-pages`。
-- `concurrency` 使用 `growth-dashboard` 並取消較舊執行，避免備援排程與外部 Cornjob 同時部署同一版本。
+- `concurrency` 使用 `growth-dashboard` 並排隊執行，避免備援啟動時取消尚未完成的主要更新。排程 Gate 無法查詢 GitHub 時採可用性優先執行，並以 History marker 保護通知冪等性。
+
+所有跨服務的 `generatedAt`、`pipelineGeneratedAt` 與 `generated_at` 均使用帶 `Z` 或明確偏移的 RFC3339 絕對時間；畫面與日期鍵再以 `Asia/Taipei` 轉換一次。舊版無時區值僅作相容解析為台灣牆上時間，未來超過五分鐘的時間會被健康監控與 MiniApp 標為異常。
 
 ### Skynet `deploy.yml`
 

@@ -11,9 +11,11 @@ class OpsContractTests(unittest.TestCase):
         self.assertIn("jobs:", workflow)
         self.assertIn("build:", workflow)
         self.assertIn("deploy:", workflow)
-        self.assertIn("cancel-in-progress: true", workflow)
-        self.assertIn('cron: "40 21 * * 1-5"', workflow)
-        self.assertIn('cron: "45 6 * * 1-5"', workflow)
+        self.assertIn("cancel-in-progress: false", workflow)
+        self.assertIn('cron: "20 22 * * 1-5"', workflow)
+        self.assertIn('cron: "25 7 * * 1-5"', workflow)
+        self.assertIn("Conditional fallback gate", workflow)
+        self.assertIn("SKIP_ALREADY_SUCCEEDED", (ROOT / "schedule_gate.py").read_text(encoding="utf-8"))
         self.assertIn("contents: read", workflow)
         build_section = workflow.split("  deploy:", 1)[0]
         deploy_section = workflow.split("  deploy:", 1)[1]
