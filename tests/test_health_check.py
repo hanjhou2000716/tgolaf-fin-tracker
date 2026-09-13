@@ -70,6 +70,16 @@ class HealthCheckTests(unittest.TestCase):
         self.assertEqual(DEFAULT_STALE_AFTER_HOURS, 18)
         self.assertEqual(GROWTH_STALE_AFTER_HOURS, 72)
 
+    def test_future_timestamp_is_never_healthy(self):
+        payload = {
+            "status": "ok",
+            "generatedAt": (self.now + datetime.timedelta(minutes=5, seconds=1)).isoformat(),
+            "freshness": {"staleAfterHours": 72},
+        }
+        issues = evaluate_status("Growth Dashboard", payload, self.now)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("generatedAt is in the future", issues[0])
+
     def test_health_alert_uses_shared_growth_button_label(self):
         with patch.dict(
             "os.environ",

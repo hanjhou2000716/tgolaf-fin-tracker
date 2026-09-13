@@ -4,9 +4,13 @@ import datetime
 import os
 import sys
 
-from service_contracts import GROWTH_BUTTON_TEXT, GROWTH_STALE_AFTER_HOURS
-
-TAIPEI = datetime.timezone(datetime.timedelta(hours=8), name="Asia/Taipei")
+from service_contracts import (
+    FUTURE_TIMESTAMP_TOLERANCE,
+    GROWTH_BUTTON_TEXT,
+    GROWTH_STALE_AFTER_HOURS,
+    TAIPEI,
+    parse_contract_timestamp,
+)
 ENDPOINTS = {
     "Growth Dashboard": "https://hanjhou2000716.github.io/tgolaf-fin-tracker/status.json",
     "Skynet Monitoring": "https://hanjhou2000716.github.io/skynet-monitoring/status.json",
@@ -21,15 +25,16 @@ def default_stale_after_hours(name):
 
 
 def parse_generated_at(value):
-    if not value:
-        raise ValueError("generatedAt is missing")
-    parsed = datetime.datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    return parsed.replace(tzinfo=TAIPEI) if parsed.tzinfo is None else parsed.astimezone(TAIPEI)
+    return parse_contract_timestamp(value).astimezone(TAIPEI)
 
 
 def evaluate_status(name, payload, now):
     """Return human-readable health issues; an empty list means healthy."""
     issues = []
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=TAIPEI)
+    else:
+        now = now.astimezone(TAIPEI)
     if payload.get("status") != "ok":
         issues.append(f"{name} status={payload.get('status', 'missing')}")
 
@@ -44,7 +49,9 @@ def evaluate_status(name, payload, now):
         if stale_hours <= 0:
             raise ValueError("staleAfterHours must be positive")
         age_hours = (now - generated_at).total_seconds() / 3600
-        if age_hours > stale_hours:
+        if generated_at - now > FUTURE_TIMESTAMP_TOLERANCE:
+            issues.append(f"{name} generatedAt is in the future")
+        elif age_hours > stale_hours:
             issues.append(f"{name} stale for {age_hours:.1f}h (limit {stale_hours:.0f}h)")
     except (TypeError, ValueError) as error:
         issues.append(f"{name} invalid freshness contract: {error}")
