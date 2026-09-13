@@ -10,7 +10,7 @@ class TelegramEntrypointTests(unittest.TestCase):
         source = (ROOT / "dashboard_pipeline.py").read_text(encoding="utf-8")
         self.assertIn('WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/private/"', source)
         self.assertIn('GROWTH_BUTTON_TEXT', source)
-        self.assertIn('"🌱SFC.e Growth"', (ROOT / "service_contracts.py").read_text(encoding="utf-8"))
+        self.assertIn('"🌱 SFC.e Growth"', (ROOT / "service_contracts.py").read_text(encoding="utf-8"))
 
 
     def test_settlement_push_keeps_message_compact(self):
