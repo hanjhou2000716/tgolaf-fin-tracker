@@ -11,7 +11,7 @@ import datetime
 
 
 # Telegram button label shared by settlement and health-watchdog messages.
-GROWTH_BUTTON_TEXT = "🌱SFC.e Growth"
+GROWTH_BUTTON_TEXT = "🌱 SFC.e Growth"
 
 # Growth is updated only after the settlement windows. A 72-hour tolerance
 # avoids treating the normal weekend gap as a stale-data incident. Skynet

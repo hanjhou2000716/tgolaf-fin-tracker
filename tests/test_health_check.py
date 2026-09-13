@@ -90,7 +90,7 @@ class HealthCheckTests(unittest.TestCase):
             send_alert(["Growth Dashboard stale for 73.0h (limit 72h)"])
         payload = post.call_args.kwargs["json"]
         button = payload["reply_markup"]["inline_keyboard"][0][0]
-        self.assertEqual(button["text"], "🌱SFC.e Growth")
+        self.assertEqual(button["text"], "🌱 SFC.e Growth")
         self.assertEqual(button["web_app"]["url"], GROWTH_URL)
 
 
