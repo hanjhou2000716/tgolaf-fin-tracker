@@ -47,6 +47,8 @@ def _finite_number(value):
 
 def resolve_beta_policy(overrides=None):
     """Validate configured non-fixed Betas while enforcing canonical values."""
+    if not isinstance(overrides, Mapping):
+        return dict(FIXED_BETA_POLICY)
     policy = {}
     for symbol, value in (overrides or {}).items():
         key = str(symbol).strip().upper()
@@ -90,6 +92,14 @@ def calculate_nav_beta(
         if value > 0:
             values[str(symbol)] = value
 
+    beta_map = {
+        str(symbol).strip().upper(): value
+        for symbol, value in (beta_by_symbol or {}).items()
+    } if isinstance(beta_by_symbol, Mapping) else {}
+    market_map = {
+        str(symbol).strip().upper(): value
+        for symbol, value in (market_by_symbol or {}).items()
+    } if isinstance(market_by_symbol, Mapping) else {}
     risk_asset_value = sum(value for symbol, value in values.items() if str(symbol).upper() not in CASH_SYMBOLS)
     covered_value = 0.0
     exposure = 0.0
@@ -100,7 +110,7 @@ def calculate_nav_beta(
         symbol_key = str(symbol).upper()
         # Fixed policy instruments cannot be overridden by a caller/env map.
         # Overrides are reserved for explicitly researched non-fixed assets.
-        beta = _finite_number(FIXED_BETA_POLICY.get(symbol_key, (beta_by_symbol or {}).get(symbol)))
+        beta = _finite_number(FIXED_BETA_POLICY.get(symbol_key, beta_map.get(symbol_key)))
         is_cash = symbol_key in CASH_SYMBOLS
         if is_cash:
             beta = 0.0
@@ -112,7 +122,7 @@ def calculate_nav_beta(
         covered_value += value if not is_cash else 0.0
         position_exposure = value * beta
         exposure += position_exposure
-        market = str((market_by_symbol or {}).get(symbol, "other")).lower()
+        market = str(market_map.get(symbol_key, "other")).lower()
         bucket = "tw" if market in {"tw", "taiwan", "twd"} else "us" if market in {"us", "usa", "usd"} else "other"
         contributions[bucket] += position_exposure / nav
         positions.append({"symbol": symbol, "valueTwd": round(value, 2), "beta": beta, "covered": True, "market": bucket})
