@@ -15,6 +15,11 @@ from risk import (
     HALF_KELLY_LIMIT,
     beta_capacity as calculate_beta_capacity,
     beta_status as classify_beta_capacity,
+    calculate_nav_beta,
+    build_quarterly_kelly_candidate,
+    FIXED_BETA_POLICY,
+    resolve_beta_policy,
+    quarterly_half_kelly,
     maintenance_ratio as calculate_maintenance_ratio,
     maintenance_status,
     stress_scenarios as build_stress_scenarios,
@@ -817,10 +822,24 @@ def get_usd_twd_rate():
     return get_usd_twd_quote().price
 
 def get_us_stock_price(symbol):
-    try: return float(requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5).json()['chart']['result'][0]['meta']['regularMarketPrice'])
-    except:
-        try: return yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1]
-        except: return 0
+    return get_us_stock_quote(symbol).price
+
+
+def get_us_stock_quote(symbol):
+    fetched_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    try:
+        value = float(requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5).json()['chart']['result'][0]['meta']['regularMarketPrice'])
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("invalid Yahoo Chart price")
+        return Quote(symbol, value, "USD", "Yahoo Finance", fetched_at, fetched_at, False, False, "fresh")
+    except Exception:
+        try:
+            value = float(yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1])
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError("invalid yfinance price")
+            return Quote(symbol, value, "USD", "Yahoo Finance/yfinance", fetched_at, fetched_at, False, False, "fresh")
+        except Exception:
+            return Quote(symbol, 0.0, "USD", "unavailable", fetched_at, fetched_at, True, True, "unavailable")
 
 
 def _settlement_quote_for_transaction(transaction):
@@ -951,6 +970,9 @@ def main():
         
     fx_quote = get_usd_twd_quote()
     usd_rate = validate_quote("USD/TWD", fx_quote.price)
+    market_quotes_fresh = bool(
+        not fx_quote.fallback_used and not fx_quote.is_stale and fx_quote.quality in {"fresh", "ok"}
+    )
     persisted_goal_state = load_goal_state()
     tw_stock_value, us_stock_value_usd, tsmc_exposure_twd, price_006208, leveraged_etf_value = 0, 0, 0, 0, 0
     position_values_twd, tw_position_values, us_position_values = {}, {}, {}
@@ -959,7 +981,9 @@ def main():
 
     for symbol, shares in inventory["台股"].items():
         if symbol == "History" or shares <= 0: continue
-        price = validate_quote(symbol, MARKET_DATA.get_taiwan(symbol, FINMIND_TOKEN).price)
+        quote = MARKET_DATA.get_taiwan(symbol, FINMIND_TOKEN)
+        market_quotes_fresh = market_quotes_fresh and not quote.fallback_used and not quote.is_stale and quote.quality in {"fresh", "ok"}
+        price = validate_quote(symbol, quote.price)
         value = price * shares
         tw_stock_value += value 
         position_values_twd[symbol] = value
@@ -975,7 +999,12 @@ def main():
     for symbol, shares in inventory["擔保品"].items():
         if symbol == "History" or shares <= 0:
             continue
-        price = price_006208 if symbol == "006208" and price_006208 > 0 else validate_quote(symbol, MARKET_DATA.get_taiwan(symbol, FINMIND_TOKEN).price)
+        if symbol == "006208" and price_006208 > 0:
+            price = price_006208
+        else:
+            quote = MARKET_DATA.get_taiwan(symbol, FINMIND_TOKEN)
+            market_quotes_fresh = market_quotes_fresh and not quote.fallback_used and not quote.is_stale and quote.quality in {"fresh", "ok"}
+            price = validate_quote(symbol, quote.price)
         value = price * shares
         pledged_value += value
         if symbol == "006208":
@@ -983,7 +1012,9 @@ def main():
 
     for symbol, shares in inventory["美股"].items():
         if symbol == "History" or shares <= 0: continue
-        value = validate_quote(symbol, get_us_stock_price(symbol)) * shares
+        us_quote = get_us_stock_quote(symbol)
+        market_quotes_fresh = market_quotes_fresh and not us_quote.fallback_used and not us_quote.is_stale and us_quote.quality in {"fresh", "ok"}
+        value = validate_quote(symbol, us_quote.price) * shares
         us_stock_value_usd += value
         position_values_twd[symbol] = value * usd_rate
         us_position_values[symbol] = value * usd_rate
@@ -1021,6 +1052,49 @@ def main():
     total_debt = debt + accumulated_interest
     total_asset = tw_stock_value + us_stock_value_twd + total_cash_twd + fund_value
     net_asset = total_asset - total_debt
+
+    # Canonical NAV-Beta input is one economic position per symbol.  The
+    # collateral ledger is an ownership annotation and is intentionally not
+    # merged into this value map a second time.
+    beta_values = {**position_values_twd}
+    # Keep cash in the input ledger for auditability.  Its policy Beta is 0,
+    # so it increases the denominator (total assets/NAV) without exposure.
+    if cash_twd > 0:
+        beta_values["CASH_TWD"] = cash_twd
+    if cash_usd > 0:
+        beta_values["CASH_USD"] = cash_usd * usd_rate
+    if fund_value > 0:
+        beta_values["FUND"] = fund_value
+    beta_overrides = {}
+    try:
+        configured = json.loads(os.getenv("RISK_BETA_OVERRIDES", "{}"))
+        if isinstance(configured, dict):
+            beta_overrides = configured
+    except (TypeError, ValueError):
+        beta_overrides = {}
+    # Environment policy can describe researched non-fixed assets only;
+    # canonical 006208/00685L definitions always win.
+    beta_by_symbol = resolve_beta_policy(beta_overrides)
+    market_by_symbol = {
+        **{symbol: "tw" for symbol in tw_position_values},
+        **{symbol: "us" for symbol in us_position_values},
+    }
+    nav_beta_result = calculate_nav_beta(
+        beta_values,
+        total_asset,
+        total_debt,
+        beta_by_symbol,
+        market_by_symbol=market_by_symbol,
+    )
+    if nav_beta_result.get("status") == "READY":
+        nav_beta = float(nav_beta_result["navBeta"])
+        asset_beta = float(nav_beta_result["assetBeta"])
+        gross_leverage = float(nav_beta_result["grossLeverage"])
+        debt_to_nav = float(nav_beta_result["debtToNav"])
+        beta_exposure_twd = float(nav_beta_result["betaExposureTwd"])
+        beta_coverage_pct = float(nav_beta_result["coveragePct"])
+    else:
+        nav_beta = asset_beta = gross_leverage = debt_to_nav = beta_exposure_twd = beta_coverage_pct = None
 
     # A zero result after a previously non-zero history is never a valid
     # settlement.  Keep the run green for the public Demo, but block private
@@ -1080,10 +1154,12 @@ def main():
     refresh_blocked = not _refresh_is_ready(refresh_control)
     
     invested_assets = tw_stock_value + us_stock_value_twd + fund_value
+    # Keep the legacy value for API consumers during the compatibility
+    # release; all new UI and gates use the canonical NAV-Beta result below.
     effective_leverage = ((invested_assets + leveraged_etf_value) / net_asset) if net_asset > 0 else 0
     half_kelly_limit = HALF_KELLY_LIMIT
-    beta_capacity = calculate_beta_capacity(effective_leverage, half_kelly_limit)
-    beta_status, beta_status_class = classify_beta_capacity(beta_capacity)
+    beta_capacity = calculate_beta_capacity(nav_beta, half_kelly_limit) if nav_beta is not None else None
+    beta_status, beta_status_class = classify_beta_capacity(beta_capacity) if beta_capacity is not None else ("⚪ 資料不足", "risk-unavailable")
     
     debt_ratio = ((total_debt / total_asset) * 100) if total_asset > 0 else 0
     net_asset_pct = ((net_asset / total_asset) * 100) if total_asset > 0 else 0
@@ -1118,12 +1194,19 @@ def main():
     us_largest_symbol, us_largest_value = max(us_position_values.items(), key=lambda item: item[1], default=("—", 0))
     tw_largest_pct = (tw_largest_value / total_asset * 100) if total_asset else 0
     us_largest_pct = (us_largest_value / total_asset * 100) if total_asset else 0
+    data_fresh = bool(
+        ingestion_health.get("status") in {"OK", "READY"}
+        and market_quotes_fresh
+        and nav_beta_result.get("status") == "READY"
+        and nav_beta_result.get("quality") == "policy_complete"
+        and net_asset > 0
+    )
     guardrails = composite_guardrails(
-        beta_capacity,
+        beta_capacity if beta_capacity is not None else float("inf"),
         maintenance_ratio,
         largest_position_pct,
         (total_cash_twd / total_asset * 100) if total_asset else 0,
-        data_fresh=True,
+        data_fresh=data_fresh,
     )
     # 資產板塊採用可動用台股／質押借款／現貨美股的風險視角。
     # 質押台股此處代表借款金額，而非擔保品的市值。
@@ -1454,6 +1537,10 @@ def main():
                 <div class="buyhold-primary"><div class="buyhold-primary-content"><div class="buyhold-primary-heading">{bh_lamp_html}</div><div class="buyhold-copy"><span class="buyhold-meaning">{bh_meaning}</span><small class="buyhold-action">({bh_action_text})</small></div></div><div class="buyhold-metrics-panel {bh_metrics_panel_class}"><div class="buyhold-metric buyhold-metric--drawdown"><span>TX目前回撤</span><b>{bh_dd_text}</b></div><div class="buyhold-metric buyhold-metric--next"><span>{bh_next_label}</span><b>{bh_distance_text}</b></div></div></div>
             </div>'''
 
+    nav_beta_display = f"{nav_beta:.2f}" if nav_beta is not None else "—"
+    beta_capacity_display = f"{beta_capacity:.1f}%" if beta_capacity is not None else "—"
+    asset_beta_display = f"{asset_beta:.2f}" if asset_beta is not None else "—"
+    gross_leverage_display = f"{gross_leverage:.2f}" if gross_leverage is not None else "—"
     html_content = f"""
     <!DOCTYPE html>
     <html lang="zh-TW">
@@ -1503,7 +1590,7 @@ def main():
             .box {{ background:#f4f2ed; padding:14px; border:1px solid #e5e2db; border-radius:3px; font-size:12px; color:var(--muted); }}
             .box b {{ display:block; font-size:19px; color:var(--ink); font-weight:700; margin-top:6px; margin-bottom:2px; }}
             .box small {{ font-size:11px; color:var(--muted); }}
-            .risk-good {{ color:#5e806d !important; }} .risk-watch {{ color:#b78435 !important; }} .risk-alert {{ color:#b84f45 !important; }}
+            .risk-good {{ color:#5e806d !important; }} .risk-watch {{ color:#b78435 !important; }} .risk-orange {{ color:#c56f2e !important; }} .risk-alert {{ color:#b84f45 !important; }} .risk-critical {{ color:#a52f2f !important; }} .risk-unavailable {{ color:#64748b !important; }}
             .timeline ul {{ padding-left:18px; margin:10px 0 0; font-size:13px; color:#514f49; line-height:1.9; }}
             .goal-track {{ height:6px; background:#e5e2db; margin:12px 0 8px; }} .goal-fill {{ height:100%; background:var(--sage); width:{min(progress_pct, 100):.1f}%; }}
             .actions {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; margin:16px 0 30px; }}
@@ -1644,7 +1731,7 @@ def main():
             <div class="risk-section">
                 <div class="sec-title" style="margin-bottom:10px;">槓桿 <span class="sec-note">Leverage &amp; collateral</span></div>
                 <div class="risk-pair">
-                    <div class="risk-column"><span class="risk-card-label">Beta</span><strong class="risk-card-value">{effective_leverage:.2f} ×</strong><hr class="risk-divider"><span class="risk-card-detail">凱利安全邊界 {half_kelly_limit:.2f} ×</span><span class="risk-card-subdetail">(容量：{beta_capacity:.1f}%)</span><span class="risk-card-status {beta_status_class}">{beta_status}</span></div>
+                    <div class="risk-column"><span class="risk-card-label">Beta <small>(NAV)</small></span><strong class="risk-card-value">{nav_beta_display} ×</strong><hr class="risk-divider"><span class="risk-card-detail">半凱利安全上限（凱利安全邊界） {half_kelly_limit:.2f} ×</span><span class="risk-card-subdetail">(容量：{beta_capacity_display}；使用率：{beta_capacity_display})</span><span class="risk-card-status {beta_status_class}">{beta_status}</span><span id="betaDetail" class="risk-card-subdetail">資產 Beta {asset_beta_display} × · 總資產/NAV {gross_leverage_display} ×</span></div>
                     <div class="risk-column"><span class="risk-card-label">質押維持率</span><strong class="risk-card-value {maintenance_status_class}">{maintenance_ratio:.1f}%</strong><hr class="risk-divider"><span class="risk-card-detail">借款: ${debt_principal:,.0f}</span><span class="risk-card-subdetail">(含息負債 ${total_debt:,.0f})</span><span class="risk-card-status {maintenance_status_class}">{ratio_status}</span></div>
                 </div>
             </div>
@@ -2091,15 +2178,96 @@ def main():
         item["percent"] = round((item["value"] / total_asset * 100), 1) if total_asset > 0 else 0
 
     risk_level = "attention" if (not guardrails["eligible"] or (maintenance_ratio and maintenance_ratio < 150) or largest_position_pct >= 35) else "watch" if (debt_ratio >= 25 or tsmc_pct >= 35 or largest_position_pct >= 20) else "stable"
+    kelly_candidate = {"status": "INSUFFICIENT_EVIDENCE", "reason": "006208 point-in-time return history not supplied"}
+    kelly_candidate_source = None
+    kelly_candidate_hash = None
+    try:
+        candidate_series = os.getenv("KELLY_CANDIDATE_PRICES")
+        if candidate_series:
+            parsed_series = json.loads(candidate_series)
+            kelly_candidate_source = "research-price-series"
+            kelly_candidate_hash = hashlib.sha256(
+                json.dumps(parsed_series, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            kelly_candidate = build_quarterly_kelly_candidate(
+                parsed_series,
+                data_cutoff=os.getenv("KELLY_CANDIDATE_CUTOFF"),
+            )
+        else:
+            candidate_mu = os.getenv("KELLY_CANDIDATE_MU")
+            candidate_sigma = os.getenv("KELLY_CANDIDATE_SIGMA")
+            if candidate_mu not in (None, "") and candidate_sigma not in (None, ""):
+                kelly_candidate = quarterly_half_kelly(candidate_mu, candidate_sigma)
+                kelly_candidate.update({"dataCutoff": os.getenv("KELLY_CANDIDATE_CUTOFF")})
+    except (TypeError, ValueError, json.JSONDecodeError):
+        kelly_candidate = {"status": "INSUFFICIENT_EVIDENCE", "reason": "invalid quarterly candidate inputs"}
+    write_json(".private-build/kelly-quarterly-candidate.json", {
+        "schemaVersion": 1,
+        "status": kelly_candidate.get("status"),
+        "reason": kelly_candidate.get("reason"),
+        "mu": kelly_candidate.get("mu"),
+        "sigma": kelly_candidate.get("sigma"),
+        "halfKellyLimit": kelly_candidate.get("halfKellyLimit"),
+        "dataCutoff": kelly_candidate.get("dataCutoff"),
+        "source": kelly_candidate_source,
+        "contentHash": kelly_candidate_hash,
+        "corporateActionStatus": "RESEARCH_CONTRACT_REQUIRED" if kelly_candidate_source else "NOT_PROVIDED",
+        "approvalStatus": "PENDING" if kelly_candidate.get("status") == "CANDIDATE" else "NOT_READY",
+    })
+    beta_payload = {
+        "schemaVersion": nav_beta_result.get("schemaVersion", 1),
+        "status": nav_beta_result.get("status"),
+        "quality": nav_beta_result.get("quality"),
+        "asOf": generated_at,
+        "marketQuotesFresh": market_quotes_fresh,
+        "navBeta": round(nav_beta, 2) if nav_beta is not None else None,
+        "assetBeta": round(asset_beta, 2) if asset_beta is not None else None,
+        "betaExposureTwd": round(beta_exposure_twd, 2) if beta_exposure_twd is not None else None,
+        "grossLeverage": round(gross_leverage, 2) if gross_leverage is not None else None,
+        "debtToNav": round(debt_to_nav, 4) if debt_to_nav is not None else None,
+        "coveragePct": round(beta_coverage_pct, 1) if beta_coverage_pct is not None else None,
+        "benchmark": "006208.TW/TWD",
+        "contributions": nav_beta_result.get("contributions", {"tw": None, "us": None, "other": None}),
+        "missing": nav_beta_result.get("missing", []),
+    }
+    write_json(".private-build/nav-beta-audit.json", {
+        "schemaVersion": nav_beta_result.get("schemaVersion", 1),
+        "status": nav_beta_result.get("status"),
+        "quality": nav_beta_result.get("quality"),
+        "reason": nav_beta_result.get("reason"),
+        "benchmark": "006208.TW/TWD",
+        "coveragePct": nav_beta_result.get("coveragePct"),
+        "contributions": nav_beta_result.get("contributions"),
+        "missing": nav_beta_result.get("missing", []),
+        "calculation": "betaExposureTwd / NAV",
+    })
     risk_summary = {
         "level": risk_level,
         "debtRatio": round(debt_ratio, 1),
+        "debtToNav": round(debt_to_nav, 4) if debt_to_nav is not None else None,
         "maintenanceRatio": round(maintenance_ratio, 1),
+        "maintenanceStatus": ratio_status,
+        "maintenanceStatusClass": maintenance_status_class,
         "tsmcExposureRatio": round(tsmc_pct, 1),
         "effectiveLeverage": round(effective_leverage, 2),
+        "portfolioBeta": round(nav_beta, 2) if nav_beta is not None else None,
+        "assetBeta": round(asset_beta, 2) if asset_beta is not None else None,
         "kellyLimit": round(half_kelly_limit, 2),
-        "betaCapacity": round(beta_capacity, 1),
+        "betaCapacity": round(beta_capacity, 1) if beta_capacity is not None else None,
         "betaStatus": beta_status,
+        "beta": beta_payload,
+        "kelly": {
+            "activeVersion": "legacy-08pct-18pct",
+            "mu": 0.08,
+            "sigma": 0.18,
+            "halfKellyLimit": round(half_kelly_limit, 8),
+            "dataCutoff": kelly_candidate.get("dataCutoff"),
+            "approvalStatus": "APPROVED",
+            "freshness": "current",
+            "candidateStatus": kelly_candidate.get("status"),
+            "candidateDataCutoff": kelly_candidate.get("dataCutoff"),
+            "candidateApprovalStatus": "PENDING" if kelly_candidate.get("status") == "CANDIDATE" else "NOT_READY",
+        },
         "largestPosition": {"symbol": largest_symbol, "value": round(largest_position_value, 2), "percent": round(largest_position_pct, 1), "status": largest_position_status},
         "nvdaExposureRatio": round(nvda_pct, 1),
         "guardrails": guardrails,

@@ -14,13 +14,14 @@ from risk import (
 class RiskFormulaTests(unittest.TestCase):
     def test_beta_capacity_and_thresholds(self):
         self.assertAlmostEqual(beta_capacity(HALF_KELLY_LIMIT), 100)
-        self.assertEqual(beta_status(115), ("🟡 Beta維持", "risk-watch"))
-        self.assertEqual(beta_status(115.01), ("🔴 加原型補現金", "risk-alert"))
+        self.assertEqual(beta_status(115), ("🔴 加原型補現金", "risk-alert"))
+        self.assertEqual(beta_status(114.99), ("🟡 Beta維持", "risk-watch"))
 
     def test_maintenance_thresholds(self):
         self.assertEqual(maintenance_ratio(0, 0), 0)
         self.assertEqual(maintenance_status(100, 149.9), ("🔴 補擔保品", "risk-alert"))
-        self.assertEqual(maintenance_status(100, 150), ("🟡 注意槓桿", "risk-watch"))
+        self.assertEqual(maintenance_status(100, 150), ("🟠 禁止新增槓桿", "risk-orange"))
+        self.assertEqual(maintenance_status(100, 167), ("🟡 注意槓桿", "risk-watch"))
         self.assertEqual(maintenance_status(100, 190), ("🟢 維持率充足", "risk-good"))
 
     def test_stress_scenarios_reduce_net_asset_and_collateral(self):
