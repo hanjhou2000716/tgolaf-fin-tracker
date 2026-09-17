@@ -174,6 +174,25 @@ jobs:
           path: .private-build/buyhold-market-data-summary.json
           if-no-files-found: error
 
+      - name: Upload private NAV Beta audit
+        # The audit contains the formal status, coverage and contribution
+        # contract.  It is private Actions evidence and is never copied into
+        # the Pages artifact.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nav-beta-audit
+          path: .private-build/nav-beta-audit.json
+          if-no-files-found: error
+
+      - name: Upload private quarterly Kelly candidate
+        # Candidate parameters are private review evidence; activation still
+        # requires an explicit approval and versioned configuration change.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: kelly-quarterly-candidate
+          path: .private-build/kelly-quarterly-candidate.json
+          if-no-files-found: error
+
       - name: Upload validated TAIEX history cache
         # Full index sessions are private market data, never part of Pages.
         # A mismatch or unavailable run produces no cache and cannot poison
