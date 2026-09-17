@@ -14,16 +14,20 @@ from google.oauth2.service_account import Credentials
 from risk import (
     HALF_KELLY_LIMIT,
     beta_capacity as calculate_beta_capacity,
+    remaining_beta_capacity,
     beta_status as classify_beta_capacity,
     calculate_nav_beta,
-    build_quarterly_kelly_candidate,
-    FIXED_BETA_POLICY,
     resolve_beta_policy,
-    quarterly_half_kelly,
     maintenance_ratio as calculate_maintenance_ratio,
     maintenance_status,
     stress_scenarios as build_stress_scenarios,
     composite_guardrails,
+)
+from beta_policy import (
+    DEFAULT_ACTIVE_KELLY_PATH,
+    DEFAULT_ACTIVE_POLICY_PATH,
+    load_active_beta_policy,
+    load_active_kelly_policy,
 )
 from validation import validate_history_sheet, validate_inventory, validate_quote
 from asset_tree import asset_tree_metadata_summary, build_asset_tree
@@ -1064,17 +1068,16 @@ def main():
     if cash_usd > 0:
         beta_values["CASH_USD"] = cash_usd * usd_rate
     if fund_value > 0:
+        # FUND is retained as one economic position until it reaches the
+        # materiality threshold; no arbitrary Beta is assigned to it.
         beta_values["FUND"] = fund_value
-    beta_overrides = {}
-    try:
-        configured = json.loads(os.getenv("RISK_BETA_OVERRIDES", "{}"))
-        if isinstance(configured, dict):
-            beta_overrides = configured
-    except (TypeError, ValueError):
-        beta_overrides = {}
-    # Environment policy can describe researched non-fixed assets only;
-    # canonical 006208/00685L definitions always win.
-    beta_by_symbol = resolve_beta_policy(beta_overrides)
+    # Formal Beta values come only from the versioned, approved policy.  No
+    # temporary environment value can unlock risk-taking in production.
+    beta_policy = load_active_beta_policy(
+        os.getenv("BETA_POLICY_ACTIVE_PATH", DEFAULT_ACTIVE_POLICY_PATH),
+        as_of=tw_now.date(),
+    )
+    beta_by_symbol = resolve_beta_policy(beta_policy.get("betas", {})) if beta_policy.get("status") == "READY" else resolve_beta_policy()
     market_by_symbol = {
         **{symbol: "tw" for symbol in tw_position_values},
         **{symbol: "us" for symbol in us_position_values},
@@ -1086,6 +1089,13 @@ def main():
         beta_by_symbol,
         market_by_symbol=market_by_symbol,
     )
+    if beta_policy.get("status") != "READY":
+        nav_beta_result = {
+            **nav_beta_result,
+            "status": "UNAVAILABLE",
+            "quality": beta_policy.get("quality", "policy_unavailable"),
+            "reason": beta_policy.get("reason", "active Beta policy unavailable"),
+        }
     if nav_beta_result.get("status") == "READY":
         nav_beta = float(nav_beta_result["navBeta"])
         asset_beta = float(nav_beta_result["assetBeta"])
@@ -1157,9 +1167,15 @@ def main():
     # Keep the legacy value for API consumers during the compatibility
     # release; all new UI and gates use the canonical NAV-Beta result below.
     effective_leverage = ((invested_assets + leveraged_etf_value) / net_asset) if net_asset > 0 else 0
-    half_kelly_limit = HALF_KELLY_LIMIT
+    kelly_policy = load_active_kelly_policy(
+        os.getenv("KELLY_POLICY_ACTIVE_PATH", DEFAULT_ACTIVE_KELLY_PATH),
+        as_of=tw_now.date(),
+    )
+    active_kelly = kelly_policy.get("policy") or {}
+    half_kelly_limit = float(active_kelly.get("halfKellyLimit", HALF_KELLY_LIMIT)) if kelly_policy.get("status") == "READY" else HALF_KELLY_LIMIT
     beta_capacity = calculate_beta_capacity(nav_beta, half_kelly_limit) if nav_beta is not None else None
     beta_status, beta_status_class = classify_beta_capacity(beta_capacity) if beta_capacity is not None else ("⚪ 資料不足", "risk-unavailable")
+    beta_remaining_capacity = remaining_beta_capacity(nav_beta, half_kelly_limit) if nav_beta is not None else None
     
     debt_ratio = ((total_debt / total_asset) * 100) if total_asset > 0 else 0
     net_asset_pct = ((net_asset / total_asset) * 100) if total_asset > 0 else 0
@@ -1199,6 +1215,8 @@ def main():
         and market_quotes_fresh
         and nav_beta_result.get("status") == "READY"
         and nav_beta_result.get("quality") == "policy_complete"
+        and beta_policy.get("status") == "READY"
+        and kelly_policy.get("status") == "READY"
         and net_asset > 0
     )
     guardrails = composite_guardrails(
@@ -1538,9 +1556,13 @@ def main():
             </div>'''
 
     nav_beta_display = f"{nav_beta:.2f}" if nav_beta is not None else "—"
-    beta_capacity_display = f"{beta_capacity:.1f}%" if beta_capacity is not None else "—"
+    beta_capacity_display = f"{beta_remaining_capacity:.2f} ×" if beta_remaining_capacity is not None else "—"
+    beta_usage_display = f"{beta_capacity:.1f}%" if beta_capacity is not None else "—"
     asset_beta_display = f"{asset_beta:.2f}" if asset_beta is not None else "—"
     gross_leverage_display = f"{gross_leverage:.2f}" if gross_leverage is not None else "—"
+    beta_coverage_display = f"{beta_coverage_pct:.1f}%" if beta_coverage_pct is not None else "—"
+    beta_policy_version_display = str((beta_policy.get("metadata") or {}).get("policyVersion") or "—")
+    beta_cutoff_display = str((beta_policy.get("metadata") or {}).get("dataCutoff") or "—")
     html_content = f"""
     <!DOCTYPE html>
     <html lang="zh-TW">
@@ -1656,7 +1678,7 @@ def main():
             .risk-section {{ background:#f4f2ed; border:1px solid #e5e2db; border-radius:16px; padding:15px; }} .risk-section + .risk-section {{ margin-top:12px; }}
             .risk-pair,.exposure-pair {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
             .risk-column,.exposure-row {{ background:#f8faf7; border:1px solid #d8dfd8; border-radius:12px; padding:15px 13px; min-width:0; }} .risk-column strong,.exposure-row strong {{ display:block; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; margin-top:7px; letter-spacing:-.02em; }} .risk-column small,.exposure-row small {{ display:block; margin-top:6px; color:var(--muted); font-size:12px; line-height:1.45; }}
-            .risk-card-label {{ display:block; color:var(--muted); font-size:12px; font-weight:700; }} .risk-card-value {{ display:block; margin-top:7px; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; letter-spacing:-.02em; }} .risk-divider {{ border:0; border-top:1px solid #d5ddd5; margin:12px 0 10px; }} .risk-card-detail,.risk-card-subdetail,.risk-card-status {{ display:block; line-height:1.45; }} .risk-card-detail {{ color:var(--ink); font-size:13px; font-weight:700; }} .risk-card-subdetail {{ margin-top:4px; color:var(--muted); font-size:12px; }} .risk-card-status {{ margin-top:8px; font-size:12px; font-weight:700; white-space:normal; }}
+            .risk-card-label {{ display:block; color:var(--muted); font-size:12px; font-weight:700; }} .risk-card-value {{ display:block; margin-top:7px; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; letter-spacing:-.02em; }} .risk-divider {{ border:0; border-top:1px solid #d5ddd5; margin:12px 0 10px; }} .risk-card-detail,.risk-card-subdetail,.risk-card-status {{ display:block; line-height:1.45; }} .risk-card-detail {{ color:var(--ink); font-size:13px; font-weight:700; }} .risk-card-subdetail {{ margin-top:4px; color:var(--muted); font-size:12px; }} .risk-card-status {{ margin-top:8px; font-size:12px; font-weight:700; white-space:normal; }} .risk-evidence {{ margin-top:9px; color:var(--muted); font-size:11px; }} .risk-evidence summary {{ cursor:pointer; color:var(--navy); font-weight:700; }}
         </style>
     </head>
     <body>
@@ -1731,7 +1753,7 @@ def main():
             <div class="risk-section">
                 <div class="sec-title" style="margin-bottom:10px;">槓桿 <span class="sec-note">Leverage &amp; collateral</span></div>
                 <div class="risk-pair">
-                    <div class="risk-column"><span class="risk-card-label">Beta <small>(NAV)</small></span><strong class="risk-card-value">{nav_beta_display} ×</strong><hr class="risk-divider"><span class="risk-card-detail">半凱利安全上限（凱利安全邊界） {half_kelly_limit:.2f} ×</span><span class="risk-card-subdetail">(容量：{beta_capacity_display}；使用率：{beta_capacity_display})</span><span class="risk-card-status {beta_status_class}">{beta_status}</span><span id="betaDetail" class="risk-card-subdetail">資產 Beta {asset_beta_display} × · 總資產/NAV {gross_leverage_display} ×</span></div>
+                    <div class="risk-column"><span class="risk-card-label">Beta(NAV)</span><strong class="risk-card-value">{nav_beta_display} ×</strong><hr class="risk-divider"><span class="risk-card-detail">半凱利邊界: {half_kelly_limit:.2f} ×</span><span class="risk-card-subdetail">(容量：{beta_capacity_display}；使用率：{beta_usage_display})</span><span class="risk-card-status {beta_status_class}">{beta_status}</span><details class="risk-evidence"><summary>計算依據</summary><span class="risk-card-subdetail">政策版本：{beta_policy_version_display} · 資料截止：{beta_cutoff_display}</span><span class="risk-card-subdetail">覆蓋率：{beta_coverage_display} · 資產 Beta：{asset_beta_display} × · 總資產/NAV：{gross_leverage_display} ×</span></details></div>
                     <div class="risk-column"><span class="risk-card-label">質押維持率</span><strong class="risk-card-value {maintenance_status_class}">{maintenance_ratio:.1f}%</strong><hr class="risk-divider"><span class="risk-card-detail">借款: ${debt_principal:,.0f}</span><span class="risk-card-subdetail">(含息負債 ${total_debt:,.0f})</span><span class="risk-card-status {maintenance_status_class}">{ratio_status}</span></div>
                 </div>
             </div>
@@ -2182,24 +2204,16 @@ def main():
     kelly_candidate_source = None
     kelly_candidate_hash = None
     try:
-        candidate_series = os.getenv("KELLY_CANDIDATE_PRICES")
-        if candidate_series:
-            parsed_series = json.loads(candidate_series)
-            kelly_candidate_source = "research-price-series"
-            kelly_candidate_hash = hashlib.sha256(
-                json.dumps(parsed_series, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-            ).hexdigest()
-            kelly_candidate = build_quarterly_kelly_candidate(
-                parsed_series,
-                data_cutoff=os.getenv("KELLY_CANDIDATE_CUTOFF"),
-            )
-        else:
-            candidate_mu = os.getenv("KELLY_CANDIDATE_MU")
-            candidate_sigma = os.getenv("KELLY_CANDIDATE_SIGMA")
-            if candidate_mu not in (None, "") and candidate_sigma not in (None, ""):
-                kelly_candidate = quarterly_half_kelly(candidate_mu, candidate_sigma)
-                kelly_candidate.update({"dataCutoff": os.getenv("KELLY_CANDIDATE_CUTOFF")})
-    except (TypeError, ValueError, json.JSONDecodeError):
+        candidate_path = os.getenv("KELLY_CANDIDATE_PATH", ".private-build/kelly-quarterly-candidate.json")
+        candidate_payload = json.loads(open(candidate_path, encoding="utf-8").read())
+        if isinstance(candidate_payload, dict):
+            kelly_candidate = candidate_payload
+            kelly_candidate_source = candidate_payload.get("source")
+            kelly_candidate_hash = candidate_payload.get("contentHash")
+        # Do not accept ad-hoc μ/σ environment overrides in production.  A
+        # candidate must be derived from the point-in-time research series;
+        # the approved policy above remains the only live Kelly input.
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
         kelly_candidate = {"status": "INSUFFICIENT_EVIDENCE", "reason": "invalid quarterly candidate inputs"}
     write_json(".private-build/kelly-quarterly-candidate.json", {
         "schemaVersion": 1,
@@ -2219,6 +2233,10 @@ def main():
         "status": nav_beta_result.get("status"),
         "quality": nav_beta_result.get("quality"),
         "asOf": generated_at,
+        "policyVersion": (beta_policy.get("metadata") or {}).get("policyVersion"),
+        "dataCutoff": (beta_policy.get("metadata") or {}).get("dataCutoff"),
+        "policyStatus": beta_policy.get("status"),
+        "kellyLimit": round(half_kelly_limit, 8) if kelly_policy.get("status") == "READY" else None,
         "marketQuotesFresh": market_quotes_fresh,
         "navBeta": round(nav_beta, 2) if nav_beta is not None else None,
         "assetBeta": round(asset_beta, 2) if asset_beta is not None else None,
@@ -2226,6 +2244,8 @@ def main():
         "grossLeverage": round(gross_leverage, 2) if gross_leverage is not None else None,
         "debtToNav": round(debt_to_nav, 4) if debt_to_nav is not None else None,
         "coveragePct": round(beta_coverage_pct, 1) if beta_coverage_pct is not None else None,
+        "remainingCapacity": round(beta_remaining_capacity, 8) if beta_remaining_capacity is not None else None,
+        "usagePct": round(beta_capacity, 4) if beta_capacity is not None else None,
         "benchmark": "006208.TW/TWD",
         "contributions": nav_beta_result.get("contributions", {"tw": None, "us": None, "other": None}),
         "missing": nav_beta_result.get("missing", []),
@@ -2257,13 +2277,15 @@ def main():
         "betaStatus": beta_status,
         "beta": beta_payload,
         "kelly": {
-            "activeVersion": "legacy-08pct-18pct",
-            "mu": 0.08,
-            "sigma": 0.18,
-            "halfKellyLimit": round(half_kelly_limit, 8),
-            "dataCutoff": kelly_candidate.get("dataCutoff"),
-            "approvalStatus": "APPROVED",
-            "freshness": "current",
+            "activeVersion": active_kelly.get("activeVersion") if kelly_policy.get("status") == "READY" else None,
+            "mu": active_kelly.get("mu") if kelly_policy.get("status") == "READY" else None,
+            "sigma": active_kelly.get("sigma") if kelly_policy.get("status") == "READY" else None,
+            "halfKellyLimit": round(half_kelly_limit, 8) if kelly_policy.get("status") == "READY" else None,
+            "dataCutoff": active_kelly.get("dataCutoff") if kelly_policy.get("status") == "READY" else None,
+            "approvalStatus": active_kelly.get("approvalStatus") if kelly_policy.get("status") == "READY" else "NOT_READY",
+            "freshness": active_kelly.get("freshness") if kelly_policy.get("status") == "READY" else "unavailable",
+            "status": kelly_policy.get("status"),
+            "reason": kelly_policy.get("reason"),
             "candidateStatus": kelly_candidate.get("status"),
             "candidateDataCutoff": kelly_candidate.get("dataCutoff"),
             "candidateApprovalStatus": "PENDING" if kelly_candidate.get("status") == "CANDIDATE" else "NOT_READY",

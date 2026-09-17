@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "policyVersion": "legacy-08pct-18pct",
+  "activeVersion": "legacy-08pct-18pct",
+  "status": "ACTIVE",
+  "approvalStatus": "APPROVED",
+  "benchmark": "006208.TW/TWD",
+  "mu": 0.08,
+  "sigma": 0.18,
+  "halfKellyLimit": 1.234567901234568,
+  "dataCutoff": "2026-06-30",
+  "source": "Conservative policy baseline pending first point-in-time quarterly candidate"
+}

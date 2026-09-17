@@ -93,6 +93,14 @@ jobs:
       - name: Run formula and data validation tests
         run: python -m unittest discover -s tests -v
 
+      - name: Build private quarterly Beta and Kelly candidates
+        # Candidate generation is review-only.  It never changes the active
+        # policy and never sends notifications or writes portfolio records.
+        env:
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          RISK_CANDIDATE_OUTPUT_DIR: .private-build
+        run: python build_risk_candidates.py
+
       - name: Download latest validated TAIEX cache
         # actions/download-artifact only sees artifacts from this run.  Use
         # the read-only Actions API to fetch the most recent successful cache
@@ -191,6 +199,15 @@ jobs:
         with:
           name: kelly-quarterly-candidate
           path: .private-build/kelly-quarterly-candidate.json
+          if-no-files-found: error
+
+      - name: Upload private quarterly Beta candidate
+        # Per-symbol estimates are private review evidence and never enter
+        # the Pages artifact until a versioned policy is explicitly approved.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: beta-policy-candidate
+          path: .private-build/beta-policy-candidate.json
           if-no-files-found: error
 
       - name: Upload validated TAIEX history cache

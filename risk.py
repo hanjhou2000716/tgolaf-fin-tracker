@@ -247,6 +247,15 @@ def beta_capacity(effective_beta, limit=HALF_KELLY_LIMIT):
     return effective_beta / limit * 100
 
 
+def remaining_beta_capacity(nav_beta, limit=HALF_KELLY_LIMIT):
+    """Return signed NAV-Beta headroom below the active Kelly boundary."""
+    value = _finite_number(nav_beta)
+    boundary = _finite_number(limit)
+    if value is None or boundary is None or value < 0 or boundary <= 0:
+        raise ValueError("NAV Beta must be non-negative and the limit positive")
+    return boundary - value
+
+
 def beta_status(capacity):
     capacity = _finite_number(capacity)
     if capacity is None:

@@ -7,7 +7,7 @@ class QuoteUnavailableError(RuntimeError):
     pass
 
 
-OTC_SYMBOLS = {"00886"}
+OTC_SYMBOLS = {"00886", "3455"}
 
 
 def yahoo_market_symbols(symbol):
