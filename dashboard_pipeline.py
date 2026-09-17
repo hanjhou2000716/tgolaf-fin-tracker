@@ -18,6 +18,7 @@ from risk import (
     calculate_nav_beta,
     build_quarterly_kelly_candidate,
     FIXED_BETA_POLICY,
+    resolve_beta_policy,
     quarterly_half_kelly,
     maintenance_ratio as calculate_maintenance_ratio,
     maintenance_status,
@@ -821,10 +822,24 @@ def get_usd_twd_rate():
     return get_usd_twd_quote().price
 
 def get_us_stock_price(symbol):
-    try: return float(requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5).json()['chart']['result'][0]['meta']['regularMarketPrice'])
-    except:
-        try: return yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1]
-        except: return 0
+    return get_us_stock_quote(symbol).price
+
+
+def get_us_stock_quote(symbol):
+    fetched_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    try:
+        value = float(requests.get(f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1d&range=1d", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5).json()['chart']['result'][0]['meta']['regularMarketPrice'])
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError("invalid Yahoo Chart price")
+        return Quote(symbol, value, "USD", "Yahoo Finance", fetched_at, fetched_at, False, False, "fresh")
+    except Exception:
+        try:
+            value = float(yf.Ticker(symbol).history(period="1d")['Close'].iloc[-1])
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError("invalid yfinance price")
+            return Quote(symbol, value, "USD", "Yahoo Finance/yfinance", fetched_at, fetched_at, False, False, "fresh")
+        except Exception:
+            return Quote(symbol, 0.0, "USD", "unavailable", fetched_at, fetched_at, True, True, "unavailable")
 
 
 def _settlement_quote_for_transaction(transaction):
@@ -997,7 +1012,9 @@ def main():
 
     for symbol, shares in inventory["美股"].items():
         if symbol == "History" or shares <= 0: continue
-        value = validate_quote(symbol, get_us_stock_price(symbol)) * shares
+        us_quote = get_us_stock_quote(symbol)
+        market_quotes_fresh = market_quotes_fresh and not us_quote.fallback_used and not us_quote.is_stale and us_quote.quality in {"fresh", "ok"}
+        value = validate_quote(symbol, us_quote.price) * shares
         us_stock_value_usd += value
         position_values_twd[symbol] = value * usd_rate
         us_position_values[symbol] = value * usd_rate
@@ -1040,6 +1057,12 @@ def main():
     # collateral ledger is an ownership annotation and is intentionally not
     # merged into this value map a second time.
     beta_values = {**position_values_twd}
+    # Keep cash in the input ledger for auditability.  Its policy Beta is 0,
+    # so it increases the denominator (total assets/NAV) without exposure.
+    if cash_twd > 0:
+        beta_values["CASH_TWD"] = cash_twd
+    if cash_usd > 0:
+        beta_values["CASH_USD"] = cash_usd * usd_rate
     if fund_value > 0:
         beta_values["FUND"] = fund_value
     beta_overrides = {}
@@ -1049,7 +1072,9 @@ def main():
             beta_overrides = configured
     except (TypeError, ValueError):
         beta_overrides = {}
-    beta_by_symbol = {**FIXED_BETA_POLICY, **beta_overrides}
+    # Environment policy can describe researched non-fixed assets only;
+    # canonical 006208/00685L definitions always win.
+    beta_by_symbol = resolve_beta_policy(beta_overrides)
     market_by_symbol = {
         **{symbol: "tw" for symbol in tw_position_values},
         **{symbol: "us" for symbol in us_position_values},
@@ -2154,10 +2179,16 @@ def main():
 
     risk_level = "attention" if (not guardrails["eligible"] or (maintenance_ratio and maintenance_ratio < 150) or largest_position_pct >= 35) else "watch" if (debt_ratio >= 25 or tsmc_pct >= 35 or largest_position_pct >= 20) else "stable"
     kelly_candidate = {"status": "INSUFFICIENT_EVIDENCE", "reason": "006208 point-in-time return history not supplied"}
+    kelly_candidate_source = None
+    kelly_candidate_hash = None
     try:
         candidate_series = os.getenv("KELLY_CANDIDATE_PRICES")
         if candidate_series:
             parsed_series = json.loads(candidate_series)
+            kelly_candidate_source = "research-price-series"
+            kelly_candidate_hash = hashlib.sha256(
+                json.dumps(parsed_series, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
             kelly_candidate = build_quarterly_kelly_candidate(
                 parsed_series,
                 data_cutoff=os.getenv("KELLY_CANDIDATE_CUTOFF"),
@@ -2178,12 +2209,16 @@ def main():
         "sigma": kelly_candidate.get("sigma"),
         "halfKellyLimit": kelly_candidate.get("halfKellyLimit"),
         "dataCutoff": kelly_candidate.get("dataCutoff"),
+        "source": kelly_candidate_source,
+        "contentHash": kelly_candidate_hash,
+        "corporateActionStatus": "RESEARCH_CONTRACT_REQUIRED" if kelly_candidate_source else "NOT_PROVIDED",
         "approvalStatus": "PENDING" if kelly_candidate.get("status") == "CANDIDATE" else "NOT_READY",
     })
     beta_payload = {
         "schemaVersion": nav_beta_result.get("schemaVersion", 1),
         "status": nav_beta_result.get("status"),
         "quality": nav_beta_result.get("quality"),
+        "asOf": generated_at,
         "marketQuotesFresh": market_quotes_fresh,
         "navBeta": round(nav_beta, 2) if nav_beta is not None else None,
         "assetBeta": round(asset_beta, 2) if asset_beta is not None else None,
@@ -2226,9 +2261,12 @@ def main():
             "mu": 0.08,
             "sigma": 0.18,
             "halfKellyLimit": round(half_kelly_limit, 8),
+            "dataCutoff": kelly_candidate.get("dataCutoff"),
             "approvalStatus": "APPROVED",
             "freshness": "current",
             "candidateStatus": kelly_candidate.get("status"),
+            "candidateDataCutoff": kelly_candidate.get("dataCutoff"),
+            "candidateApprovalStatus": "PENDING" if kelly_candidate.get("status") == "CANDIDATE" else "NOT_READY",
         },
         "largestPosition": {"symbol": largest_symbol, "value": round(largest_position_value, 2), "percent": round(largest_position_pct, 1), "status": largest_position_status},
         "nvdaExposureRatio": round(nvda_pct, 1),

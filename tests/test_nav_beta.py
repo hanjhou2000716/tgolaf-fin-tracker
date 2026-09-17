@@ -30,6 +30,10 @@ class NavBetaTests(unittest.TestCase):
         self.assertAlmostEqual(result["navBeta"], 2.0)
         self.assertAlmostEqual(sum(result["contributions"].values()), 2.0)
 
+    def test_fixed_policy_cannot_be_overridden(self):
+        result = calculate_nav_beta({"006208": 1_000_000, "00685L": 500_000}, 1_500_000, 500_000, {"006208": 9.0, "00685L": 0.1})
+        self.assertAlmostEqual(result["navBeta"], 2.0)
+
     def test_cash_has_zero_beta_and_collateral_is_not_a_second_position(self):
         result = calculate_nav_beta({"006208": 1_000_000, "CASH_TWD": 500_000}, 1_500_000, 0, {"006208": 1.0, "CASH_TWD": 0.0}, market_by_symbol={"006208": "tw"})
         self.assertAlmostEqual(result["betaExposureTwd"], 1_000_000)

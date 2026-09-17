@@ -16,6 +16,25 @@ BETA_SCHEMA_VERSION = 1
 BETA_COVERAGE_MIN_PERCENT = 95.0
 BETA_MATERIAL_NAV_PERCENT = 1.0
 FIXED_BETA_POLICY = {"006208": 1.0, "00685L": 2.0}
+CASH_SYMBOLS = frozenset({"CASH", "CASH_TWD", "CASH_USD", "現金", "現金_TWD", "現金_USD"})
+
+
+def _unavailable(reason, quality="unavailable", **fields):
+    """Return a stable, non-actionable Beta contract for every failure path."""
+    return {
+        "schemaVersion": BETA_SCHEMA_VERSION,
+        "status": "UNAVAILABLE",
+        "quality": quality,
+        "reason": reason,
+        "navBeta": None,
+        "assetBeta": None,
+        "betaExposureTwd": None,
+        "grossLeverage": None,
+        "debtToNav": None,
+        "coveragePct": None,
+        "contributions": {"tw": None, "us": None, "other": None},
+        **fields,
+    }
 
 
 def _finite_number(value):
@@ -24,6 +43,18 @@ def _finite_number(value):
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+def resolve_beta_policy(overrides=None):
+    """Validate configured non-fixed Betas while enforcing canonical values."""
+    policy = {}
+    for symbol, value in (overrides or {}).items():
+        key = str(symbol).strip().upper()
+        beta = _finite_number(value)
+        if not key or beta is None or beta < 0 or key in CASH_SYMBOLS or key in FIXED_BETA_POLICY:
+            continue
+        policy[key] = beta
+    return {**policy, **FIXED_BETA_POLICY}
 
 
 def calculate_nav_beta(
@@ -46,28 +77,31 @@ def calculate_nav_beta(
     total_asset_value = _finite_number(total_asset)
     debt_value = _finite_number(total_debt)
     if total_asset_value is None or debt_value is None or total_asset_value < 0 or debt_value < 0:
-        return {"status": "UNAVAILABLE", "quality": "invalid_balance", "reason": "invalid asset or debt total"}
+        return _unavailable("invalid asset or debt total", "invalid_balance")
     nav = total_asset_value - debt_value
     if nav <= 0:
-        return {"status": "UNAVAILABLE", "quality": "non_positive_nav", "reason": "NAV must be positive", "nav": nav}
+        return _unavailable("NAV must be positive", "non_positive_nav", nav=nav)
 
     values: dict[str, float] = {}
     for symbol, raw_value in (asset_values_twd or {}).items():
         value = _finite_number(raw_value)
         if value is None or value < 0:
-            return {"status": "UNAVAILABLE", "quality": "invalid_asset_value", "reason": f"invalid value for {symbol}"}
+            return _unavailable(f"invalid value for {symbol}", "invalid_asset_value")
         if value > 0:
             values[str(symbol)] = value
 
-    risk_asset_value = sum(value for symbol, value in values.items() if str(symbol).upper() not in {"CASH", "CASH_TWD", "CASH_USD", "現金", "現金_TWD", "現金_USD"})
+    risk_asset_value = sum(value for symbol, value in values.items() if str(symbol).upper() not in CASH_SYMBOLS)
     covered_value = 0.0
     exposure = 0.0
     missing: list[dict] = []
     contributions = {"tw": 0.0, "us": 0.0, "other": 0.0}
     positions: list[dict] = []
     for symbol, value in values.items():
-        beta = _finite_number((beta_by_symbol or {}).get(symbol))
-        is_cash = str(symbol).upper() in {"CASH", "CASH_TWD", "CASH_USD", "現金", "現金_TWD", "現金_USD"}
+        symbol_key = str(symbol).upper()
+        # Fixed policy instruments cannot be overridden by a caller/env map.
+        # Overrides are reserved for explicitly researched non-fixed assets.
+        beta = _finite_number(FIXED_BETA_POLICY.get(symbol_key, (beta_by_symbol or {}).get(symbol)))
+        is_cash = symbol_key in CASH_SYMBOLS
         if is_cash:
             beta = 0.0
         if beta is None or beta < 0:
@@ -87,19 +121,26 @@ def calculate_nav_beta(
     material_missing = [item for item in missing if item["material"]]
     formal_ready = not material_missing and coverage >= coverage_min_percent
     if not formal_ready:
-        return {
-            "status": "UNAVAILABLE",
-            "quality": "insufficient_beta_coverage",
-            "reason": "material holding beta unavailable" if material_missing else "beta coverage below policy minimum",
-            "nav": round(nav, 2),
-            "totalAsset": round(total_asset_value, 2),
-            "totalDebt": round(debt_value, 2),
-            "coveragePct": round(coverage, 2),
-            "missing": missing,
-            "positions": positions,
-        }
+        return _unavailable(
+            "material holding beta unavailable" if material_missing else "beta coverage below policy minimum",
+            "insufficient_beta_coverage",
+            nav=round(nav, 2),
+            totalAsset=round(total_asset_value, 2),
+            totalDebt=round(debt_value, 2),
+            coveragePct=round(coverage, 2),
+            missing=missing,
+            positions=positions,
+        )
     asset_beta = exposure / total_asset_value if total_asset_value else 0.0
     nav_beta = exposure / nav
+    nav_beta_rounded = round(nav_beta, 8)
+    contributions_rounded = {
+        "tw": round(contributions["tw"], 8),
+        "us": round(contributions["us"], 8),
+    }
+    # Allocate rounding residue to the other bucket so the public contract
+    # remains an exact decomposition of the rounded NAV Beta.
+    contributions_rounded["other"] = round(nav_beta_rounded - contributions_rounded["tw"] - contributions_rounded["us"], 8)
     return {
         "status": "READY",
         "quality": "policy_complete",
@@ -109,12 +150,12 @@ def calculate_nav_beta(
         "totalDebt": round(debt_value, 2),
         "betaExposureTwd": round(exposure, 2),
         "assetBeta": round(asset_beta, 8),
-        "navBeta": round(nav_beta, 8),
+        "navBeta": nav_beta_rounded,
         "grossLeverage": round(total_asset_value / nav, 8),
         "debtToNav": round(debt_value / nav, 8),
         "coveragePct": round(coverage, 2),
         "missing": missing,
-        "contributions": {key: round(value, 8) for key, value in contributions.items()},
+        "contributions": contributions_rounded,
         "positions": positions,
     }
 
@@ -177,8 +218,11 @@ def build_quarterly_kelly_candidate(total_return_prices, *, data_cutoff=None, mi
     if len(rows) < min_observations:
         return {"status": "INSUFFICIENT_EVIDENCE", "reason": "insufficient point-in-time weekly prices", "observations": len(rows), "dataCutoff": data_cutoff}
     returns = [rows[index][1] / rows[index - 1][1] - 1 for index in range(1, len(rows))]
-    mean = sum(returns) / len(returns)
-    sigma = math.sqrt(sum((value - mean) ** 2 for value in returns) / max(1, len(returns) - 1)) * math.sqrt(52)
+    # Kelly volatility is explicitly the most recent three completed years
+    # (156 weekly returns), while μ uses the full five-year point-in-time span.
+    recent_returns = returns[-156:] if len(returns) >= 156 else returns
+    mean = sum(recent_returns) / len(recent_returns)
+    sigma = math.sqrt(sum((value - mean) ** 2 for value in recent_returns) / max(1, len(recent_returns) - 1)) * math.sqrt(52)
     years = len(rows) / 52
     mu = (rows[-1][1] / rows[0][1]) ** (1 / years) - 1 if years > 0 else None
     candidate = quarterly_half_kelly(mu, sigma)
