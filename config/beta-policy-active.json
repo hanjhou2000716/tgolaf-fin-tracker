@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "policyVersion": "2026Q3-v1",
+  "status": "ACTIVE",
+  "approvalStatus": "APPROVED",
+  "benchmark": "006208.TW/TWD",
+  "dataCutoff": "2026-06-30",
+  "createdAt": "2026-09-17T00:00:00+00:00",
+  "method": "paired_weekly_split_adjusted_twd_returns",
+  "contentHash": "9ba7c6152d9213477d702c90272384ffce5eb53a9fd1311bef02fd40b920b0ba",
+  "assets": {
+    "00886": {"beta": 0.60375382, "observations": 271, "market": "tw", "source": "Yahoo Chart raw OHLC + research-price contract v1", "corporateActionStatus": "PASS"},
+    "00895": {"beta": 0.91183323, "observations": 252, "market": "tw", "source": "Yahoo Chart raw OHLC + research-price contract v1", "corporateActionStatus": "PASS"},
+    "00878": {"beta": 0.52046147, "observations": 307, "market": "tw", "source": "Yahoo Chart raw OHLC + research-price contract v1", "corporateActionStatus": "PASS"},
+    "3455": {"beta": 0.88070401, "observations": 411, "market": "tw", "source": "Yahoo Chart raw OHLC + research-price contract v1", "corporateActionStatus": "PASS"},
+    "8033": {"beta": 0.59433974, "observations": 411, "market": "tw", "source": "Yahoo Chart raw OHLC + research-price contract v1", "corporateActionStatus": "PASS"},
+    "2330": {"beta": 1.23573716, "observations": 411, "market": "tw", "source": "Yahoo Chart raw OHLC + research-price contract v1", "corporateActionStatus": "PASS"},
+    "3665": {"beta": 0.71131546, "observations": 411, "market": "tw", "source": "Yahoo Chart raw OHLC + research-price contract v1", "corporateActionStatus": "PASS"},
+    "QQQM": {"beta": 0.45805462, "observations": 293, "market": "us", "source": "Yahoo Chart raw OHLC + research-price contract v1", "corporateActionStatus": "PASS"},
+    "NVDA": {"beta": 1.05249640, "observations": 411, "market": "us", "source": "Yahoo Chart raw OHLC + research-price contract v1", "corporateActionStatus": "PASS"},
+    "SPYG": {"beta": 0.46000187, "observations": 411, "market": "us", "source": "Yahoo Chart raw OHLC + research-price contract v1", "corporateActionStatus": "PASS"},
+    "TSM": {"beta": 1.13240255, "observations": 411, "market": "us", "source": "Yahoo Chart raw OHLC + research-price contract v1", "corporateActionStatus": "PASS"},
+    "VOO": {"beta": 0.39121596, "observations": 411, "market": "us", "source": "Yahoo Chart raw OHLC + research-price contract v1", "corporateActionStatus": "PASS"},
+    "VTI": {"beta": 0.40537890, "observations": 411, "market": "us", "source": "Yahoo Chart raw OHLC + research-price contract v1", "corporateActionStatus": "PASS"},
+    "TSLA": {"beta": 1.02429403, "observations": 411, "market": "us", "source": "Yahoo Chart raw OHLC + research-price contract v1", "corporateActionStatus": "PASS"},
+    "AAPL": {"beta": 0.44225274, "observations": 411, "market": "us", "source": "Yahoo Chart raw OHLC + research-price contract v1", "corporateActionStatus": "PASS"},
+    "QQQ": {"beta": 0.50781239, "observations": 411, "market": "us", "source": "Yahoo Chart raw OHLC + research-price contract v1", "corporateActionStatus": "PASS"}
+  }
+}

@@ -29,6 +29,8 @@ class OpsContractTests(unittest.TestCase):
         self.assertIn("upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", workflow)
         self.assertIn("name: nav-beta-audit", workflow)
         self.assertIn("name: kelly-quarterly-candidate", workflow)
+        self.assertIn("Build private quarterly Beta and Kelly candidates", workflow)
+        self.assertIn("name: beta-policy-candidate", workflow)
         self.assertIn("touch public-site/.nojekyll", workflow)
 
     def test_actions_are_pinned_to_commit_shas(self):

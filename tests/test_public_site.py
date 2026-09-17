@@ -110,7 +110,11 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertIn("pledgePrincipal", private_html)
             self.assertIn("liabilities?.principal", private_html)
             self.assertIn("risk-card-label", private_html)
-            self.assertIn("凱利安全邊界", private_html)
+            self.assertIn("半凱利邊界:", private_html)
+            self.assertIn('class="risk-card-label">Beta(NAV)', private_html)
+            self.assertIn("計算依據", private_html)
+            self.assertNotIn("半凱利安全上限（凱利安全邊界）", private_html)
+            self.assertNotIn("資料不足，禁止增加風險", private_html)
             self.assertIn("(容量：", private_html)
             self.assertIn("借款:", private_html)
             self.assertIn("(含息負債", private_html)
@@ -186,7 +190,7 @@ class PublicSiteSecurityTests(unittest.TestCase):
             private_html = (Path(directory) / "private" / "index.html").read_text(encoding="utf-8")
             risk_html = private_html[private_html.index('<section id="risk"'):private_html.index('<section id="growth"')]
             self.assertLess(risk_html.index('class="risk-card-label">Beta'), risk_html.index('class="risk-card-label">質押維持率'))
-            self.assertLess(risk_html.index("凱利安全邊界"), risk_html.index("(容量："))
+            self.assertLess(risk_html.index("半凱利邊界:"), risk_html.index("(容量："))
             self.assertLess(risk_html.index("借款:"), risk_html.index("(含息負債"))
             self.assertIn('class="risk-divider"', risk_html)
             for removed in ("有效Beta", "質押借款本金", "Guardrail：", "含利息 — · 風控負債 —"):
@@ -194,7 +198,8 @@ class PublicSiteSecurityTests(unittest.TestCase):
 
             public_html = (Path(directory) / "index.html").read_text(encoding="utf-8")
             public_risk = public_html[public_html.index('<section class="card" aria-labelledby="risk-title">'):public_html.index('<footer>')]
-            self.assertIn('class="risk-card-label">Beta', public_risk)
+            self.assertIn('class="risk-card-label">Beta(NAV)', public_risk)
+            self.assertIn("計算依據", public_risk)
             self.assertIn('class="risk-card-label">質押維持率', public_risk)
             self.assertIn("僅示範", public_risk)
             self.assertNotIn("1.32", public_risk)

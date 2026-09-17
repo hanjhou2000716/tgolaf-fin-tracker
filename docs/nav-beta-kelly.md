@@ -12,7 +12,9 @@ navBeta = betaExposureTwd / NAV
 
 現金與負債的 Beta 為 0；006208 固定為 1.0；00685L 固定為 2.0。其他標的必須由已驗證的季度 Beta 覆蓋；不可把缺值、過期值或 fallback 價格轉成 0。
 
-季度候選使用上一季截止日前的 point-in-time 研究價格：μ 最高 8%，σ 最低 18%，`halfKelly = μ / (2 × σ²)`。候選先寫入私有 artifact，人工核准後才可成為下一季正式參數。
+季度候選使用上一季截止日前的 point-in-time 研究價格：μ 最高 8%，σ 最低 18%，`halfKelly = μ / (2 × σ²)`。候選先寫入私有 artifact，人工核准後才可成為下一季正式參數。正式執行只讀取 `config/beta-policy-active.json` 與 `config/kelly-policy-active.json`，不接受臨時環境變數覆蓋。
+
+資訊卡的「容量」是有正負號的剩餘 Beta 空間：`halfKellyLimit - navBeta`；「使用率」是 `navBeta / halfKellyLimit × 100%`。負容量代表已超過半凱利邊界，不能顯示成零或省略。
 
 Beta 容量 `<95%` 為綠色，`95%–<115%` 為黃色，`>=115%` 為紅色。正式加槓桿 Gate 要求容量低於 115%、維持率至少 167%（或無負債）、資料健康且 Beta 覆蓋通過。
 
