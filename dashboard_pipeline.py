@@ -1556,13 +1556,7 @@ def main():
             </div>'''
 
     nav_beta_display = f"{nav_beta:.2f}" if nav_beta is not None else "—"
-    beta_capacity_display = f"{beta_remaining_capacity:.2f} ×" if beta_remaining_capacity is not None else "—"
     beta_usage_display = f"{beta_capacity:.1f}%" if beta_capacity is not None else "—"
-    asset_beta_display = f"{asset_beta:.2f}" if asset_beta is not None else "—"
-    gross_leverage_display = f"{gross_leverage:.2f}" if gross_leverage is not None else "—"
-    beta_coverage_display = f"{beta_coverage_pct:.1f}%" if beta_coverage_pct is not None else "—"
-    beta_policy_version_display = str((beta_policy.get("metadata") or {}).get("policyVersion") or "—")
-    beta_cutoff_display = str((beta_policy.get("metadata") or {}).get("dataCutoff") or "—")
     html_content = f"""
     <!DOCTYPE html>
     <html lang="zh-TW">
@@ -1677,8 +1671,8 @@ def main():
             .block-grid {{ display:grid; grid-template-columns:repeat(3, 1fr); gap:10px; }}
             .risk-section {{ background:#f4f2ed; border:1px solid #e5e2db; border-radius:16px; padding:15px; }} .risk-section + .risk-section {{ margin-top:12px; }}
             .risk-pair,.exposure-pair {{ display:grid; grid-template-columns:1fr 1fr; gap:10px; }}
-            .risk-column,.exposure-row {{ background:#f8faf7; border:1px solid #d8dfd8; border-radius:12px; padding:15px 13px; min-width:0; }} .risk-column strong,.exposure-row strong {{ display:block; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; margin-top:7px; letter-spacing:-.02em; }} .risk-column small,.exposure-row small {{ display:block; margin-top:6px; color:var(--muted); font-size:12px; line-height:1.45; }}
-            .risk-card-label {{ display:block; color:var(--muted); font-size:12px; font-weight:700; }} .risk-card-value {{ display:block; margin-top:7px; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; letter-spacing:-.02em; }} .risk-divider {{ border:0; border-top:1px solid #d5ddd5; margin:12px 0 10px; }} .risk-card-detail,.risk-card-subdetail,.risk-card-status {{ display:block; line-height:1.45; }} .risk-card-detail {{ color:var(--ink); font-size:13px; font-weight:700; }} .risk-card-subdetail {{ margin-top:4px; color:var(--muted); font-size:12px; }} .risk-card-status {{ margin-top:8px; font-size:12px; font-weight:700; white-space:normal; }} .risk-evidence {{ margin-top:9px; color:var(--muted); font-size:11px; }} .risk-evidence summary {{ cursor:pointer; color:var(--navy); font-weight:700; }}
+            .risk-column,.exposure-row {{ background:#f8faf7; border:1px solid #d8dfd8; border-radius:12px; padding:15px 13px; min-width:0; }} .risk-column {{ display:flex; flex-direction:column; }} .risk-column strong,.exposure-row strong {{ display:block; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; margin-top:7px; letter-spacing:-.02em; }} .risk-column small,.exposure-row small {{ display:block; margin-top:6px; color:var(--muted); font-size:12px; line-height:1.45; }}
+            .risk-card-label {{ display:block; color:var(--muted); font-size:12px; font-weight:700; }} .risk-card-value {{ display:block; margin-top:7px; color:var(--navy); font-size:clamp(22px, 5.3vw, 26px); line-height:1.15; letter-spacing:-.02em; }} .risk-divider {{ border:0; border-top:1px solid #d5ddd5; margin:12px 0 10px; }} .risk-card-detail,.risk-card-subdetail,.risk-card-status {{ display:block; line-height:1.45; }} .risk-card-detail {{ color:var(--ink); font-size:13px; font-weight:700; }} .risk-card-subdetail {{ margin-top:4px; color:var(--muted); font-size:12px; }} .risk-card-status {{ margin-top:auto; padding-top:8px; font-size:12px; font-weight:700; white-space:normal; }}
         </style>
     </head>
     <body>
@@ -1753,7 +1747,7 @@ def main():
             <div class="risk-section">
                 <div class="sec-title" style="margin-bottom:10px;">槓桿 <span class="sec-note">Leverage &amp; collateral</span></div>
                 <div class="risk-pair">
-                    <div class="risk-column"><span class="risk-card-label">Beta(NAV)</span><strong class="risk-card-value">{nav_beta_display} ×</strong><hr class="risk-divider"><span class="risk-card-detail">半凱利邊界: {half_kelly_limit:.2f} ×</span><span class="risk-card-subdetail">(容量：{beta_capacity_display}；使用率：{beta_usage_display})</span><span class="risk-card-status {beta_status_class}">{beta_status}</span><details class="risk-evidence"><summary>計算依據</summary><span class="risk-card-subdetail">政策版本：{beta_policy_version_display} · 資料截止：{beta_cutoff_display}</span><span class="risk-card-subdetail">覆蓋率：{beta_coverage_display} · 資產 Beta：{asset_beta_display} × · 總資產/NAV：{gross_leverage_display} ×</span></details></div>
+                    <div class="risk-column"><span class="risk-card-label">Beta(NAV)</span><strong class="risk-card-value">{nav_beta_display} ×</strong><hr class="risk-divider"><span class="risk-card-detail">半凱利邊界: {half_kelly_limit:.2f} ×</span><span class="risk-card-subdetail">(使用率：{beta_usage_display})</span><span class="risk-card-status {beta_status_class}">{beta_status}</span></div>
                     <div class="risk-column"><span class="risk-card-label">質押維持率</span><strong class="risk-card-value {maintenance_status_class}">{maintenance_ratio:.1f}%</strong><hr class="risk-divider"><span class="risk-card-detail">借款: ${debt_principal:,.0f}</span><span class="risk-card-subdetail">(含息負債 ${total_debt:,.0f})</span><span class="risk-card-status {maintenance_status_class}">{ratio_status}</span></div>
                 </div>
             </div>

@@ -112,10 +112,10 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertIn("risk-card-label", private_html)
             self.assertIn("半凱利邊界:", private_html)
             self.assertIn('class="risk-card-label">Beta(NAV)', private_html)
-            self.assertIn("計算依據", private_html)
+            self.assertNotIn("計算依據", private_html)
             self.assertNotIn("半凱利安全上限（凱利安全邊界）", private_html)
             self.assertNotIn("資料不足，禁止增加風險", private_html)
-            self.assertIn("(容量：", private_html)
+            self.assertNotIn("(容量：", private_html)
             self.assertIn("借款:", private_html)
             self.assertIn("(含息負債", private_html)
             self.assertIn("risk-divider", private_html)
@@ -190,7 +190,7 @@ class PublicSiteSecurityTests(unittest.TestCase):
             private_html = (Path(directory) / "private" / "index.html").read_text(encoding="utf-8")
             risk_html = private_html[private_html.index('<section id="risk"'):private_html.index('<section id="growth"')]
             self.assertLess(risk_html.index('class="risk-card-label">Beta'), risk_html.index('class="risk-card-label">質押維持率'))
-            self.assertLess(risk_html.index("半凱利邊界:"), risk_html.index("(容量："))
+            self.assertLess(risk_html.index("半凱利邊界:"), risk_html.index("(使用率："))
             self.assertLess(risk_html.index("借款:"), risk_html.index("(含息負債"))
             self.assertIn('class="risk-divider"', risk_html)
             for removed in ("有效Beta", "質押借款本金", "Guardrail：", "含利息 — · 風控負債 —"):
@@ -199,12 +199,29 @@ class PublicSiteSecurityTests(unittest.TestCase):
             public_html = (Path(directory) / "index.html").read_text(encoding="utf-8")
             public_risk = public_html[public_html.index('<section class="card" aria-labelledby="risk-title">'):public_html.index('<footer>')]
             self.assertIn('class="risk-card-label">Beta(NAV)', public_risk)
-            self.assertIn("計算依據", public_risk)
+            self.assertNotIn("計算依據", public_risk)
             self.assertIn('class="risk-card-label">質押維持率', public_risk)
             self.assertIn("僅示範", public_risk)
             self.assertNotIn("1.32", public_risk)
             self.assertNotIn("1,870,000", public_risk)
 
+    def test_nav_beta_card_is_minimal_but_audit_payload_remains(self):
+        with tempfile.TemporaryDirectory() as directory:
+            write_public_site(directory, "2026-08-12T10:37:00+08:00")
+            private_html = (Path(directory) / "private" / "index.html").read_text(encoding="utf-8")
+            beta_card = private_html[private_html.index('<div class="risk-box"><label class="risk-card-label">Beta(NAV)'):private_html.index('<div class="risk-box"><label class="risk-card-label">質押維持率')]
+            self.assertIn("Beta(NAV)", beta_card)
+            self.assertIn("半凱利邊界:", beta_card)
+            self.assertIn("(使用率：", beta_card)
+            self.assertIn('id="betaStatus"', beta_card)
+            for removed in ("容量：", "計算依據", "risk-evidence", "betaEvidence", "betaDetail", "betaCoverage", 'id="capacity"'):
+                self.assertNotIn(removed, private_html)
+
+            pipeline = Path("dashboard_pipeline.py").read_text(encoding="utf-8")
+            self.assertIn('"remainingCapacity":', pipeline)
+            self.assertNotIn("risk-evidence", pipeline)
+            self.assertNotIn("計算依據", pipeline)
+            self.assertNotIn("(容量：", pipeline)
     def test_buy_hold_demo_is_unavailable_and_private_template_has_placement(self):
         with tempfile.TemporaryDirectory() as directory:
             write_public_site(directory, "2026-08-12T10:37:00+08:00")
