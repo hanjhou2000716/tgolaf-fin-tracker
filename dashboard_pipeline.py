@@ -1552,7 +1552,7 @@ def main():
         bh_next_label = "距下一燈"
     buy_hold_section_html = f'''<div class="risk-section buyhold-section" id="buyhold">
                 <div class="sec-title">Buy&amp;Hold 紅綠燈 <span class="sec-note">Market opportunity</span></div>
-                <div class="buyhold-primary"><div class="buyhold-primary-content"><div class="buyhold-primary-heading">{bh_lamp_html}</div><div class="buyhold-copy"><span class="buyhold-meaning">{bh_meaning}</span><small class="buyhold-action">({bh_action_text})</small></div></div><div class="buyhold-metrics-panel {bh_metrics_panel_class}"><div class="buyhold-metric buyhold-metric--drawdown"><span>TX目前回撤</span><b>{bh_dd_text}</b></div><div class="buyhold-metric buyhold-metric--next"><span>{bh_next_label}</span><b>{bh_distance_text}</b></div></div></div>
+                <div class="buyhold-primary"><div class="buyhold-primary-content"><div class="buyhold-primary-heading">{bh_lamp_html}</div><div class="buyhold-copy"><span class="buyhold-meaning">{bh_meaning}</span><small class="buyhold-action">({bh_action_text})</small></div></div><div class="buyhold-metrics-panel {bh_metrics_panel_class}"><div class="buyhold-metric buyhold-metric--drawdown"><span>加權高點刻度</span><b>{bh_dd_text}</b></div><div class="buyhold-metric buyhold-metric--next"><span>{bh_next_label}</span><b>{bh_distance_text}</b></div></div></div>
             </div>'''
 
     nav_beta_display = f"{nav_beta:.2f}" if nav_beta is not None else "—"
