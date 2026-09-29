@@ -109,14 +109,11 @@ def evaluate_skynet_v2(name, payload, now):
         expected_window = (now.date().isoformat(), "morning")
     if expected_window:
         actual_window_date = service.get("windowDate")
-        cutoff_hour, cutoff_minute = (7, 55) if expected_window[1] == "morning" else (16, 0)
-        completed_by = now.replace(hour=cutoff_hour, minute=cutoff_minute, second=0, microsecond=0)
-        try:
-            generated_for_window = _as_taipei(generated_value)
-        except (TypeError, ValueError):
-            generated_for_window = None
-        if (actual_window_date != expected_window[0] or not generated_for_window
-                or generated_for_window < completed_by or service.get("status") != "ok"):
+        actual_window = service.get("window")
+        # The fallback time determines when we report a missed window, not
+        # whether an earlier successful primary run counts for that window.
+        if (actual_window_date != expected_window[0] or actual_window != expected_window[1]
+                or service.get("status") != "ok"):
             issues.append(
                 f"{name} UPDATE_WINDOW_MISSED: expected {expected_window[0]} {expected_window[1]} update"
             )
