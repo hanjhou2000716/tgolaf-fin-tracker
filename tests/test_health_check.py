@@ -116,6 +116,11 @@ class HealthCheckTests(unittest.TestCase):
         now = datetime.datetime(2026, 9, 29, 9, 23, tzinfo=TAIPEI)
         self.assertEqual(evaluate_status("Skynet Monitoring", self._skynet_v2(), now), [])
 
+    def test_successful_primary_run_satisfies_window_before_fallback_time(self):
+        now = datetime.datetime(2026, 9, 29, 8, 0, tzinfo=TAIPEI)
+        payload = self._skynet_v2(generated="2026-09-29T06:40:00+08:00")
+        self.assertEqual(evaluate_status("Skynet Monitoring", payload, now), [])
+
     def test_v2_replays_service_outage_even_when_holiday_data_is_valid(self):
         now = datetime.datetime(2026, 9, 29, 9, 23, tzinfo=TAIPEI)
         payload = self._skynet_v2(generated="2026-09-28T07:56:00+08:00", window_date="2026-09-28")
