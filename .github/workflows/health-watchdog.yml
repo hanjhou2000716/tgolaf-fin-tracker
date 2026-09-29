@@ -2,10 +2,16 @@ name: Portfolio Data Freshness Watchdog
 
 on:
   workflow_dispatch:
-  # 06:00 and 17:00 Asia/Taipei, after the US and Taiwan update windows.
+    inputs:
+      dry_run:
+        description: "Evaluate health without sending a Telegram alert"
+        type: boolean
+        required: true
+        default: true
+  # 08:00 and 17:00 Asia/Taipei every calendar day.
   schedule:
-    - cron: "0 22 * * 0-4"
-    - cron: "0 9 * * 1-5"
+    - cron: "0 0 * * *"
+    - cron: "0 9 * * *"
 
 permissions:
   contents: read
@@ -24,4 +30,5 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          HEALTH_CHECK_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
         run: python health_check.py

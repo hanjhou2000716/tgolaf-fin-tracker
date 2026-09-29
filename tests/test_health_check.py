@@ -93,6 +93,69 @@ class HealthCheckTests(unittest.TestCase):
         self.assertEqual(button["text"], "🌱 SFC.e Growth")
         self.assertEqual(button["web_app"]["url"], GROWTH_URL)
 
+    def _skynet_v2(self, *, generated="2026-09-29T07:56:00+08:00", window="morning",
+                   window_date="2026-09-29", tw_latest="2026-09-24", tw_expected="2026-09-24",
+                   tw_status="market_closed", tw_due="2026-09-29T14:30:00+08:00"):
+        return {
+            "schemaVersion": 2,
+            "status": "ok",
+            "generatedAt": generated,
+            "service": {"status": "ok", "generatedAt": generated,
+                        "windowDate": window_date, "window": window, "commit": "abc123"},
+            "calendar": {"status": "verified"},
+            "markets": {
+                "taiwan": {"status": tw_status, "latestSessionDate": tw_latest,
+                           "expectedSessionDate": tw_expected, "nextDueAt": tw_due},
+                "us": {"status": "fresh", "latestSessionDate": "2026-09-28",
+                       "expectedSessionDate": "2026-09-28", "nextDueAt": "2026-09-29T21:30:00+08:00"},
+            },
+            "sources": {"taiex": "ok", "vix": "ok", "006208": "ok"},
+        }
+
+    def test_v2_holiday_closure_is_healthy_when_latest_session_is_current(self):
+        now = datetime.datetime(2026, 9, 29, 9, 23, tzinfo=TAIPEI)
+        self.assertEqual(evaluate_status("Skynet Monitoring", self._skynet_v2(), now), [])
+
+    def test_v2_replays_service_outage_even_when_holiday_data_is_valid(self):
+        now = datetime.datetime(2026, 9, 29, 9, 23, tzinfo=TAIPEI)
+        payload = self._skynet_v2(generated="2026-09-28T07:56:00+08:00", window_date="2026-09-28")
+        issues = evaluate_status("Skynet Monitoring", payload, now)
+        stale_issue = next(issue for issue in issues if "SERVICE_STALE" in issue)
+        self.assertRegex(stale_issue, r"25\.4[0-9]?h|25\.5h")
+        self.assertTrue(any("UPDATE_WINDOW_MISSED" in issue for issue in issues))
+        self.assertFalse(any("Taiwan MARKET_DATA_STALE" in issue for issue in issues))
+
+    def test_v2_market_stuck_after_close_buffer_is_stale(self):
+        now = datetime.datetime(2026, 9, 29, 14, 31, tzinfo=TAIPEI)
+        payload = self._skynet_v2(
+            generated="2026-09-29T14:00:00+08:00", window="morning",
+            tw_due="2026-09-29T14:30:00+08:00",
+        )
+        issues = evaluate_status("Skynet Monitoring", payload, now)
+        self.assertTrue(any("Taiwan MARKET_DATA_STALE" in issue for issue in issues))
+
+    def test_v2_calendar_failure_is_not_holiday_exempt(self):
+        payload = self._skynet_v2()
+        payload["calendar"]["status"] = "unavailable"
+        issues = evaluate_status("Skynet Monitoring", payload, self.now)
+        self.assertTrue(any("CALENDAR_UNVERIFIED" in issue for issue in issues))
+
+    def test_v2_degraded_detail_is_not_duplicated_by_generic_status(self):
+        payload = self._skynet_v2()
+        payload["status"] = "degraded"
+        payload["service"]["status"] = "degraded"
+        payload["markets"]["us"]["status"] = "unavailable"
+        issues = evaluate_status("Skynet Monitoring", payload, self.now)
+        self.assertFalse(any("status=degraded" in issue for issue in issues))
+        self.assertEqual(sum("US SOURCE_UNAVAILABLE" in issue for issue in issues), 1)
+
+    def test_dry_run_suppresses_telegram_even_when_issues_exist(self):
+        with patch("health_check.fetch_status", return_value=["Skynet SERVICE_STALE"]), \
+             patch("health_check.send_alert") as send_alert, \
+             patch.dict("os.environ", {"HEALTH_CHECK_DRY_RUN": "true"}, clear=False):
+            self.assertEqual(__import__("health_check").main(), 1)
+        send_alert.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
