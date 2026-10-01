@@ -94,6 +94,7 @@ def evaluate_skynet_v2(name, payload, now):
     service = payload.get("service") if isinstance(payload.get("service"), dict) else {}
     markets = payload.get("markets") if isinstance(payload.get("markets"), dict) else {}
     calendar = payload.get("calendar") if isinstance(payload.get("calendar"), dict) else {}
+    instruments = payload.get("instruments") if isinstance(payload.get("instruments"), dict) else {}
 
     if service.get("status") not in (None, "ok") and not markets:
         issues.append(f"{name} SERVICE_DEGRADED: service status={service.get('status')}")
@@ -140,6 +141,31 @@ def evaluate_skynet_v2(name, payload, now):
     if calendar.get("status") != "verified" and not market_calendar_details:
         issues.append(f"{name} CALENDAR_UNVERIFIED: calendar status={calendar.get('status', 'missing')}")
 
+    instrument_markets = {"^TWII": "taiwan", "006208": "taiwan", "^VIX": "us"}
+    instrument_issues_by_market = set()
+    for symbol, details in instruments.items():
+        if not isinstance(details, dict):
+            continue
+        market_key = instrument_markets.get(symbol, "us" if "VIX" in symbol.upper() else "taiwan")
+        actual = details.get("latestSessionDate") or "—"
+        expected = details.get("expectedSessionDate") or "—"
+        instrument_status = details.get("status")
+        reason = details.get("reasonCode") or instrument_status or "UNKNOWN"
+        if instrument_status not in ("fresh", "market_closed") or actual != expected:
+            instrument_issues_by_market.add(market_key)
+            attempts = details.get("sourceAttempts")
+            attempts_text = f" attempts={attempts}" if isinstance(attempts, int) else ""
+            if instrument_status == "calendar_unverified":
+                category = "CALENDAR_UNVERIFIED"
+            elif instrument_status == "unavailable":
+                category = "SOURCE_UNAVAILABLE"
+            else:
+                category = "MARKET_DATA_STALE"
+            issues.append(
+                f"{name} {'Taiwan' if market_key == 'taiwan' else 'US'} {category}: "
+                f"symbol={symbol} actual={actual} expected={expected} reason={reason}{attempts_text}"
+            )
+
     for market_key, market_label in (("taiwan", "Taiwan"), ("us", "US")):
         market = markets.get(market_key)
         if not isinstance(market, dict):
@@ -149,6 +175,12 @@ def evaluate_skynet_v2(name, payload, now):
         latest = market.get("latestSessionDate")
         expected = market.get("expectedSessionDate")
         reason = market.get("reasonCode")
+
+        # Prefer per-instrument evidence when the producer supplies it. The
+        # aggregate market summary would otherwise repeat the same incident
+        # without identifying which instrument is behind.
+        if market_key in instrument_issues_by_market:
+            continue
 
         if status in ("fresh", "market_closed"):
             if not latest or not expected or latest != expected:
