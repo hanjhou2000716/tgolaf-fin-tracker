@@ -149,6 +149,31 @@ class HealthCheckTests(unittest.TestCase):
         issues = evaluate_status("Skynet Monitoring", payload, now)
         self.assertTrue(any("Taiwan MARKET_DATA_STALE" in issue for issue in issues))
 
+    def test_v2_reports_actionable_instrument_dates_without_duplicate_market_reason(self):
+        payload = self._skynet_v2(
+            generated="2026-10-01T10:22:18+08:00", window_date="2026-10-01",
+            tw_latest="2026-09-29", tw_expected="2026-09-30", tw_status="stale",
+        )
+        payload["instruments"] = {
+            "^TWII": {"status": "fresh", "latestSessionDate": "2026-09-30",
+                      "expectedSessionDate": "2026-09-30", "reasonCode": "OK", "sourceAttempts": 1},
+            "006208": {"status": "stale", "latestSessionDate": "2026-09-29",
+                       "expectedSessionDate": "2026-09-30", "reasonCode": "SOURCE_LAGGING",
+                       "sourceAttempts": 3},
+        }
+        payload["markets"]["us"]["nextDueAt"] = "2026-10-02T06:30:00+08:00"
+        issues = evaluate_status(
+            "Skynet Monitoring", payload,
+            datetime.datetime(2026, 10, 1, 13, 52, tzinfo=TAIPEI),
+        )
+        self.assertEqual(len(issues), 1)
+        self.assertIn("Taiwan MARKET_DATA_STALE", issues[0])
+        self.assertIn("symbol=006208", issues[0])
+        self.assertIn("actual=2026-09-29 expected=2026-09-30", issues[0])
+        self.assertIn("reason=SOURCE_LAGGING", issues[0])
+        self.assertIn("attempts=3", issues[0])
+        self.assertEqual(incident_key(issues[0]), "Skynet Monitoring|MARKET_DATA_STALE|taiwan")
+
     def test_v2_calendar_failure_is_not_holiday_exempt(self):
         payload = self._skynet_v2()
         payload["calendar"]["status"] = "unavailable"
