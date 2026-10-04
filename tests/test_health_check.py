@@ -174,6 +174,35 @@ class HealthCheckTests(unittest.TestCase):
         self.assertIn("attempts=3", issues[0])
         self.assertEqual(incident_key(issues[0]), "Skynet Monitoring|MARKET_DATA_STALE|taiwan")
 
+    def test_instrument_and_source_alias_are_reported_once_with_recovery_evidence(self):
+        payload = self._skynet_v2()
+        payload["markets"]["taiwan"] = {
+            "status": "market_closed", "latestSessionDate": "2026-10-02",
+            "expectedSessionDate": "2026-10-02", "nextDueAt": "2026-10-05T14:30:00+08:00",
+        }
+        payload["instruments"] = {
+            "^TWII": {"status": "fresh", "latestSessionDate": "2026-10-02",
+                      "expectedSessionDate": "2026-10-02", "reasonCode": "OK"},
+            "006208": {
+                "status": "unavailable", "latestSessionDate": None,
+                "expectedSessionDate": "2026-10-02", "reasonCode": "SOURCES_UNAVAILABLE",
+                "sourceAttempts": 7, "cacheStatus": "MISSING_OR_INVALID",
+                "sourceResults": {
+                    "TWSE": {"status": "UNAVAILABLE", "reasonCode": "SOURCE_HTTP_503", "attempts": 3},
+                    "Yahoo": {"status": "UNAVAILABLE", "reasonCode": "SOURCE_TIMEOUT", "attempts": 3},
+                },
+            },
+            "^VIX": {"status": "fresh", "latestSessionDate": "2026-10-01",
+                     "expectedSessionDate": "2026-10-01", "reasonCode": "OK"},
+        }
+        payload["sources"]["006208"] = "unavailable:SOURCES_UNAVAILABLE"
+        issues = evaluate_status("Skynet Monitoring", payload, self.now)
+        taiwan = [issue for issue in issues if "Taiwan SOURCE_UNAVAILABLE" in issue]
+        self.assertEqual(len(taiwan), 1)
+        self.assertIn("TWSE=unavailable:SOURCE_HTTP_503", taiwan[0])
+        self.assertIn("Yahoo=unavailable:SOURCE_TIMEOUT", taiwan[0])
+        self.assertIn("cache=MISSING_OR_INVALID", taiwan[0])
+
     def test_v2_calendar_failure_is_not_holiday_exempt(self):
         payload = self._skynet_v2()
         payload["calendar"]["status"] = "unavailable"
@@ -193,8 +222,18 @@ class HealthCheckTests(unittest.TestCase):
         with patch("health_check.fetch_status", return_value=["Skynet SERVICE_STALE"]), \
              patch("health_check.send_alert") as send_alert, \
              patch.dict("os.environ", {"HEALTH_CHECK_DRY_RUN": "true"}, clear=False):
-            self.assertEqual(__import__("health_check").main(), 1)
+            self.assertEqual(__import__("health_check").main(), 0)
         send_alert.assert_not_called()
+
+    def test_detected_health_incident_is_successful_watchdog_execution(self):
+        issue = "Skynet Monitoring Taiwan SOURCE_UNAVAILABLE: symbol=006208"
+        with patch("health_check.fetch_status", return_value=[issue]), \
+             patch("health_check.load_incident_state", return_value={"schemaVersion": 1, "active": {}}), \
+             patch("health_check.save_incident_state"), \
+             patch("health_check.send_alert") as send_alert:
+            result = __import__("health_check").main(dry_run=False, now=self.now)
+        self.assertEqual(result, 0)
+        send_alert.assert_called_once_with([issue])
 
     def test_incident_key_excludes_changing_stale_age(self):
         first = incident_key("Skynet Monitoring SERVICE_STALE: service stale for 25.5h (limit 18h)")

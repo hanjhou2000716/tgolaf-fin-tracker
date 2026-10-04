@@ -74,11 +74,24 @@ class NavBetaTests(unittest.TestCase):
         self.assertEqual(quarterly_half_kelly(0, 0.18)["status"], "UNAVAILABLE")
 
     def test_quarterly_candidate_excludes_future_prices(self):
-        prices = [{"date": f"2020-{index:02d}", "close": 100 + index} for index in range(1, 270)]
-        prices.append({"date": "2099-01", "close": 999999})
-        result = build_quarterly_kelly_candidate(prices, data_cutoff="2020-270")
-        self.assertNotEqual(result.get("seriesEnd"), "2099-01")
-        self.assertLess(result["observations"], 270)
+        from datetime import date, timedelta
+
+        prices = [{"date": (date(2020, 1, 3) + timedelta(days=index * 7)).isoformat(), "close": 100 + index}
+                  for index in range(269)]
+        prices.append({"date": "2099-01-02", "close": 999999})
+        result = build_quarterly_kelly_candidate(prices, data_cutoff=prices[-2]["date"])
+        self.assertNotEqual(result.get("seriesEnd"), "2099-01-02")
+        self.assertEqual(result["observations"], 269)
+
+    def test_kelly_cagr_uses_actual_elapsed_calendar_period(self):
+        from datetime import date, timedelta
+
+        rows = [{"date": (date(2021, 1, 1) + timedelta(days=index * 7)).isoformat(), "close": 100 + index}
+                for index in range(261)]
+        result = build_quarterly_kelly_candidate(rows, data_cutoff=rows[-1]["date"])
+        years = (date.fromisoformat(rows[-1]["date"]) - date.fromisoformat(rows[0]["date"])).days / 365.2425
+        self.assertEqual(result["status"], "CANDIDATE")
+        self.assertAlmostEqual(result["mu"], min(0.08, (360 / 100) ** (1 / years) - 1), places=10)
 
     def test_threshold_boundaries(self):
         self.assertEqual(beta_status(114.999)[1], "risk-watch")

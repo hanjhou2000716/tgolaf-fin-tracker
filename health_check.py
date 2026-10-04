@@ -161,9 +161,27 @@ def evaluate_skynet_v2(name, payload, now):
                 category = "SOURCE_UNAVAILABLE"
             else:
                 category = "MARKET_DATA_STALE"
+            source_results = details.get("sourceResults")
+            source_summary = []
+            if isinstance(source_results, dict):
+                for source in ("TWSE", "Yahoo"):
+                    item = source_results.get(source)
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("status") == "UNAVAILABLE":
+                        source_summary.append(
+                            f"{source}=unavailable:{item.get('reasonCode') or item.get('errorType') or 'UNKNOWN'}"
+                            f"({item.get('attempts', 0)} attempts)"
+                        )
+                    elif item.get("latestSessionDate") and item.get("latestSessionDate") != expected:
+                        source_summary.append(f"{source}=lagging:{item.get('latestSessionDate')}")
+            cache_status = details.get("cacheStatus")
+            diagnostic = ("; " + "; ".join(source_summary) if source_summary else "")
+            if cache_status:
+                diagnostic += f"; cache={cache_status}"
             issues.append(
                 f"{name} {'Taiwan' if market_key == 'taiwan' else 'US'} {category}: "
-                f"symbol={symbol} actual={actual} expected={expected} reason={reason}{attempts_text}"
+                f"symbol={symbol} actual={actual} expected={expected} reason={reason}{attempts_text}{diagnostic}"
             )
 
     for market_key, market_label in (("taiwan", "Taiwan"), ("us", "US")):
@@ -217,6 +235,10 @@ def evaluate_skynet_v2(name, payload, now):
     for source, state in source_states.items():
         if state != "ok":
             relevant_market = "taiwan" if source.lower() in ("taiex", "006208") else "us"
+            if relevant_market in instrument_issues_by_market:
+                # The instrument issue already carries its expected date and
+                # source-specific failure evidence; omit the generic alias.
+                continue
             current = markets.get(relevant_market, {})
             if current.get("status") not in ("unavailable", "stale", "calendar_unverified"):
                 issues.append(f"{name} SOURCE_UNAVAILABLE: source {source} is {state}")
@@ -442,7 +464,7 @@ def main(dry_run=None, now=None):
     print("Health watchdog found issues:\n" + "\n".join(issues))
     if dry_run:
         print("Dry run: Telegram notification suppressed")
-        return 1
+        return 0
 
     state = load_incident_state()
     due_issues, next_state = alert_plan(issues, state, now)
@@ -459,7 +481,10 @@ def main(dry_run=None, now=None):
     else:
         print("Telegram reminder suppressed; active incidents were already reported within 24 hours")
     save_incident_state(next_state)
-    return 1
+    # A healthy watchdog execution may correctly observe an unhealthy data
+    # source. Keep that incident in Telegram/state; fail the job only when
+    # evaluation, notification, or state persistence itself raises.
+    return 0
 
 
 if __name__ == "__main__":

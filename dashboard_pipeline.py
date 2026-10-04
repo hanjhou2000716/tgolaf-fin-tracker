@@ -1172,10 +1172,42 @@ def main():
         as_of=tw_now.date(),
     )
     active_kelly = kelly_policy.get("policy") or {}
-    half_kelly_limit = float(active_kelly.get("halfKellyLimit", HALF_KELLY_LIMIT)) if kelly_policy.get("status") == "READY" else HALF_KELLY_LIMIT
-    beta_capacity = calculate_beta_capacity(nav_beta, half_kelly_limit) if nav_beta is not None else None
+    reference_kelly = kelly_policy.get("referencePolicy") or {}
+    formal_kelly_limit = float(active_kelly["halfKellyLimit"]) if kelly_policy.get("status") == "READY" else None
+    reference_kelly_limit = float(reference_kelly["halfKellyLimit"]) if kelly_policy.get("quality") == "policy_stale_reference" else None
+    half_kelly_limit = formal_kelly_limit if formal_kelly_limit is not None else (reference_kelly_limit or HALF_KELLY_LIMIT)
+    beta_reference_result = None
+    if beta_policy.get("quality") == "policy_stale_reference":
+        beta_reference_result = calculate_nav_beta(
+            beta_values, total_asset, total_debt, beta_policy.get("referenceBetas", {}),
+            market_by_symbol=market_by_symbol,
+        )
+    reference_nav_beta = (
+        float(beta_reference_result["navBeta"])
+        if beta_reference_result and beta_reference_result.get("status") == "READY" else None
+    )
+    policy_stale_reference = (
+        beta_policy.get("quality") == "policy_stale_reference"
+        or kelly_policy.get("quality") == "policy_stale_reference"
+    )
+    display_nav_beta = nav_beta if nav_beta is not None else reference_nav_beta
+    display_kelly_limit = formal_kelly_limit if formal_kelly_limit is not None else reference_kelly_limit
+    display_usage = (
+        calculate_beta_capacity(display_nav_beta, display_kelly_limit)
+        if display_nav_beta is not None and display_kelly_limit is not None else None
+    )
+    beta_capacity = (
+        calculate_beta_capacity(nav_beta, formal_kelly_limit)
+        if nav_beta is not None and formal_kelly_limit is not None else None
+    )
     beta_status, beta_status_class = classify_beta_capacity(beta_capacity) if beta_capacity is not None else ("⚪ 資料不足", "risk-unavailable")
-    beta_remaining_capacity = remaining_beta_capacity(nav_beta, half_kelly_limit) if nav_beta is not None else None
+    if policy_stale_reference and display_nav_beta is not None:
+        display_beta_status, display_beta_class = "待季度核准", "risk-unavailable"
+    elif display_usage is not None:
+        display_beta_status, display_beta_class = classify_beta_capacity(display_usage)
+    else:
+        display_beta_status, display_beta_class = "⚪ 資料不足", "risk-unavailable"
+    beta_remaining_capacity = remaining_beta_capacity(nav_beta, formal_kelly_limit) if nav_beta is not None and formal_kelly_limit is not None else None
     
     debt_ratio = ((total_debt / total_asset) * 100) if total_asset > 0 else 0
     net_asset_pct = ((net_asset / total_asset) * 100) if total_asset > 0 else 0
@@ -1552,11 +1584,16 @@ def main():
         bh_next_label = "距下一燈"
     buy_hold_section_html = f'''<div class="risk-section buyhold-section" id="buyhold">
                 <div class="sec-title">Buy&amp;Hold 紅綠燈 <span class="sec-note">Market opportunity</span></div>
-                <div class="buyhold-primary"><div class="buyhold-primary-content"><div class="buyhold-primary-heading">{bh_lamp_html}</div><div class="buyhold-copy"><span class="buyhold-meaning">{bh_meaning}</span><small class="buyhold-action">({bh_action_text})</small></div></div><div class="buyhold-metrics-panel {bh_metrics_panel_class}"><div class="buyhold-metric buyhold-metric--drawdown"><span>加權高點刻度</span><b>{bh_dd_text}</b></div><div class="buyhold-metric buyhold-metric--next"><span>{bh_next_label}</span><b>{bh_distance_text}</b></div></div></div>
+                <div class="buyhold-primary"><div class="buyhold-primary-content"><div class="buyhold-primary-heading">{bh_lamp_html}</div><div class="buyhold-copy"><span class="buyhold-meaning">{bh_meaning}</span><small class="buyhold-action">({bh_action_text})</small></div></div><div class="buyhold-metrics-panel {bh_metrics_panel_class}"><div class="buyhold-metric buyhold-metric--drawdown"><span title="最新完成收盤相對近 240 個交易日最高收盤；0.0% 代表位於區間收盤高點">加權高點刻度</span><b>{bh_dd_text}</b></div><div class="buyhold-metric buyhold-metric--next"><span>{bh_next_label}</span><b>{bh_distance_text}</b></div></div></div>
             </div>'''
 
-    nav_beta_display = f"{nav_beta:.2f}" if nav_beta is not None else "—"
-    beta_usage_display = f"{beta_capacity:.1f}%" if beta_capacity is not None else "—"
+    nav_beta_display = f"{display_nav_beta:.2f}" if display_nav_beta is not None else "—"
+    beta_usage_display = f"{display_usage:.1f}%" if display_usage is not None else "—"
+    beta_boundary_display = f"{display_kelly_limit:.2f}" if display_kelly_limit is not None else "—"
+    beta_display_title = (
+        "依最後核准季度政策計算的參考值；新季度核准前禁止增加風險。"
+        if policy_stale_reference else ""
+    )
     html_content = f"""
     <!DOCTYPE html>
     <html lang="zh-TW">
@@ -1747,7 +1784,7 @@ def main():
             <div class="risk-section">
                 <div class="sec-title" style="margin-bottom:10px;">槓桿 <span class="sec-note">Leverage &amp; collateral</span></div>
                 <div class="risk-pair">
-                    <div class="risk-column"><span class="risk-card-label">Beta(NAV)</span><strong class="risk-card-value">{nav_beta_display} ×</strong><hr class="risk-divider"><span class="risk-card-detail">半凱利邊界: {half_kelly_limit:.2f} ×</span><span class="risk-card-subdetail">(使用率：{beta_usage_display})</span><span class="risk-card-status {beta_status_class}">{beta_status}</span></div>
+                    <div class="risk-column"><span class="risk-card-label">Beta(NAV)</span><strong class="risk-card-value" title="{beta_display_title}">{nav_beta_display} ×</strong><hr class="risk-divider"><span class="risk-card-detail">半凱利邊界: {beta_boundary_display} ×</span><span class="risk-card-subdetail">(使用率：{beta_usage_display})</span><span class="risk-card-status {display_beta_class}" title="{beta_display_title}">{display_beta_status}</span></div>
                     <div class="risk-column"><span class="risk-card-label">質押維持率</span><strong class="risk-card-value {maintenance_status_class}">{maintenance_ratio:.1f}%</strong><hr class="risk-divider"><span class="risk-card-detail">借款: ${debt_principal:,.0f}</span><span class="risk-card-subdetail">(含息負債 ${total_debt:,.0f})</span><span class="risk-card-status {maintenance_status_class}">{ratio_status}</span></div>
                 </div>
             </div>
@@ -2217,6 +2254,10 @@ def main():
         "sigma": kelly_candidate.get("sigma"),
         "halfKellyLimit": kelly_candidate.get("halfKellyLimit"),
         "dataCutoff": kelly_candidate.get("dataCutoff"),
+        "candidateId": kelly_candidate.get("candidateId"),
+        "inputHash": kelly_candidate.get("inputHash"),
+        "effectiveFromQuarter": kelly_candidate.get("effectiveFromQuarter"),
+        "referenceThroughQuarter": kelly_candidate.get("referenceThroughQuarter"),
         "source": kelly_candidate_source,
         "contentHash": kelly_candidate_hash,
         "corporateActionStatus": "RESEARCH_CONTRACT_REQUIRED" if kelly_candidate_source else "NOT_PROVIDED",
@@ -2230,9 +2271,19 @@ def main():
         "policyVersion": (beta_policy.get("metadata") or {}).get("policyVersion"),
         "dataCutoff": (beta_policy.get("metadata") or {}).get("dataCutoff"),
         "policyStatus": beta_policy.get("status"),
-        "kellyLimit": round(half_kelly_limit, 8) if kelly_policy.get("status") == "READY" else None,
+        "policyLifecycle": (beta_policy.get("metadata") or beta_policy.get("referenceMetadata") or {}).get("lifecycle", "UNAVAILABLE"),
+        "referencePolicyVersion": (beta_policy.get("referenceMetadata") or {}).get("policyVersion"),
+        "referenceDataCutoff": (beta_policy.get("referenceMetadata") or {}).get("dataCutoff"),
+        "kellyLimit": round(formal_kelly_limit, 8) if formal_kelly_limit is not None else None,
         "marketQuotesFresh": market_quotes_fresh,
         "navBeta": round(nav_beta, 2) if nav_beta is not None else None,
+        "referenceNavBeta": round(reference_nav_beta, 2) if reference_nav_beta is not None else None,
+        "displayNavBeta": round(display_nav_beta, 2) if display_nav_beta is not None else None,
+        "displayKellyLimit": round(display_kelly_limit, 8) if display_kelly_limit is not None else None,
+        "displayUsagePct": round(display_usage, 4) if display_usage is not None else None,
+        "displayStatus": display_beta_status,
+        "displayLifecycle": "STALE_REFERENCE" if policy_stale_reference else "CURRENT" if nav_beta is not None and formal_kelly_limit is not None else "UNAVAILABLE",
+        "displayQualityNote": beta_display_title or None,
         "assetBeta": round(asset_beta, 2) if asset_beta is not None else None,
         "betaExposureTwd": round(beta_exposure_twd, 2) if beta_exposure_twd is not None else None,
         "grossLeverage": round(gross_leverage, 2) if gross_leverage is not None else None,
@@ -2266,15 +2317,16 @@ def main():
         "effectiveLeverage": round(effective_leverage, 2),
         "portfolioBeta": round(nav_beta, 2) if nav_beta is not None else None,
         "assetBeta": round(asset_beta, 2) if asset_beta is not None else None,
-        "kellyLimit": round(half_kelly_limit, 2),
+        "kellyLimit": round(formal_kelly_limit, 2) if formal_kelly_limit is not None else None,
         "betaCapacity": round(beta_capacity, 1) if beta_capacity is not None else None,
-        "betaStatus": beta_status,
+        "betaStatus": display_beta_status,
         "beta": beta_payload,
         "kelly": {
             "activeVersion": active_kelly.get("activeVersion") if kelly_policy.get("status") == "READY" else None,
             "mu": active_kelly.get("mu") if kelly_policy.get("status") == "READY" else None,
             "sigma": active_kelly.get("sigma") if kelly_policy.get("status") == "READY" else None,
             "halfKellyLimit": round(half_kelly_limit, 8) if kelly_policy.get("status") == "READY" else None,
+            "referenceHalfKellyLimit": round(reference_kelly_limit, 8) if reference_kelly_limit is not None else None,
             "dataCutoff": active_kelly.get("dataCutoff") if kelly_policy.get("status") == "READY" else None,
             "approvalStatus": active_kelly.get("approvalStatus") if kelly_policy.get("status") == "READY" else "NOT_READY",
             "freshness": active_kelly.get("freshness") if kelly_policy.get("status") == "READY" else "unavailable",

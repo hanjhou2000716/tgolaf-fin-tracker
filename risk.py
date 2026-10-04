@@ -9,6 +9,7 @@ unit tests and prevents a pledged holding from being counted twice.
 from __future__ import annotations
 
 import math
+from datetime import date
 from typing import Mapping
 
 HALF_KELLY_LIMIT = 0.08 / (2 * (0.18 ** 2))
@@ -227,13 +228,21 @@ def build_quarterly_kelly_candidate(total_return_prices, *, data_cutoff=None, mi
     rows.sort(key=lambda item: item[0])
     if len(rows) < min_observations:
         return {"status": "INSUFFICIENT_EVIDENCE", "reason": "insufficient point-in-time weekly prices", "observations": len(rows), "dataCutoff": data_cutoff}
+    try:
+        first_date = date.fromisoformat(rows[0][0])
+        last_date = date.fromisoformat(rows[-1][0])
+    except (TypeError, ValueError):
+        return {"status": "INSUFFICIENT_EVIDENCE", "reason": "weekly research dates are invalid", "observations": len(rows), "dataCutoff": data_cutoff}
+    elapsed_days = (last_date - first_date).days
+    if elapsed_days <= 0:
+        return {"status": "INSUFFICIENT_EVIDENCE", "reason": "weekly research period is invalid", "observations": len(rows), "dataCutoff": data_cutoff}
     returns = [rows[index][1] / rows[index - 1][1] - 1 for index in range(1, len(rows))]
     # Kelly volatility is explicitly the most recent three completed years
     # (156 weekly returns), while μ uses the full five-year point-in-time span.
     recent_returns = returns[-156:] if len(returns) >= 156 else returns
     mean = sum(recent_returns) / len(recent_returns)
     sigma = math.sqrt(sum((value - mean) ** 2 for value in recent_returns) / max(1, len(recent_returns) - 1)) * math.sqrt(52)
-    years = len(rows) / 52
+    years = elapsed_days / 365.2425
     mu = (rows[-1][1] / rows[0][1]) ** (1 / years) - 1 if years > 0 else None
     candidate = quarterly_half_kelly(mu, sigma)
     return {**candidate, "observations": len(rows), "dataCutoff": data_cutoff, "seriesStart": rows[0][0], "seriesEnd": rows[-1][0]}

@@ -250,6 +250,8 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertIn('class="buyhold-metric buyhold-metric--drawdown"', private_html)
             self.assertIn('class="buyhold-metric buyhold-metric--next"', private_html)
             self.assertIn("加權高點刻度", private_html)
+            self.assertIn("0.0% 代表位於區間收盤高點", private_html)
+            self.assertIn("$('buyHoldDrawdown').title=", private_html)
             self.assertNotIn("TX目前回撤", private_html)
             self.assertNotIn('class="buyhold-metrics-divider"', private_html)
             self.assertEqual(private_html.count('class="buyhold-metrics-panel'), 1)
