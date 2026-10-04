@@ -10,6 +10,18 @@ import build_risk_candidates
 
 
 class RiskCandidateBuilderTests(unittest.TestCase):
+    def test_candidate_upload_steps_explicitly_include_hidden_build_directory(self):
+        workflow = (Path(__file__).parents[1] / ".github" / "workflows" / "cron.yml").read_text(encoding="utf-8")
+        for step_name, artifact_name in (
+            ("Upload private quarterly Kelly candidate", "kelly-quarterly-candidate"),
+            ("Upload private quarterly Beta candidate", "beta-policy-candidate"),
+        ):
+            with self.subTest(artifact=artifact_name):
+                step = workflow.split(f"- name: {step_name}", 1)[1].split("\n      - name:", 1)[0]
+                self.assertIn(f"name: {artifact_name}", step)
+                self.assertIn(f"path: .private-build/{artifact_name}*.json", step)
+                self.assertIn("include-hidden-files: true", step)
+
     @staticmethod
     def _fixture_series(symbol, *, market, start, end, variant=0):
         first_friday = start + timedelta(days=(4 - start.weekday()) % 7)

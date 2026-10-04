@@ -199,6 +199,7 @@ jobs:
         with:
           name: kelly-quarterly-candidate
           path: .private-build/kelly-quarterly-candidate*.json
+          include-hidden-files: true
           if-no-files-found: error
 
       - name: Upload private quarterly Beta candidate
@@ -208,6 +209,7 @@ jobs:
         with:
           name: beta-policy-candidate
           path: .private-build/beta-policy-candidate*.json
+          include-hidden-files: true
           if-no-files-found: error
 
       - name: Upload validated TAIEX history cache
