@@ -198,7 +198,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: kelly-quarterly-candidate
-          path: .private-build/kelly-quarterly-candidate.json
+          path: .private-build/kelly-quarterly-candidate*.json
           if-no-files-found: error
 
       - name: Upload private quarterly Beta candidate
@@ -207,7 +207,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: beta-policy-candidate
-          path: .private-build/beta-policy-candidate.json
+          path: .private-build/beta-policy-candidate*.json
           if-no-files-found: error
 
       - name: Upload validated TAIEX history cache

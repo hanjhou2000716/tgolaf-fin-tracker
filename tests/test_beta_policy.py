@@ -65,6 +65,65 @@ class BetaPolicyTests(unittest.TestCase):
         _, _, error = validate_active_policy_document(payload, as_of=date(2026, 9, 17))
         self.assertIsNotNone(error)
 
+    def test_expired_quarter_policy_is_reference_only_for_one_quarter(self):
+        payload = {
+            "schemaVersion": 1, "policyVersion": "test-q3", "status": "ACTIVE",
+            "approvalStatus": "APPROVED", "dataCutoff": "2026-06-30",
+            "effectiveFromQuarter": "2026Q3", "referenceThroughQuarter": "2026Q4",
+            "assets": {"TEST": {"beta": 0.8, "observations": 156, "source": "test", "corporateActionStatus": "PASS"}},
+        }
+        _, _, error = validate_active_policy_document(payload, as_of=date(2026, 10, 4))
+        self.assertEqual(error, "policy is stale")
+        betas, metadata, reference_error = validate_active_policy_document(
+            payload, as_of=date(2026, 10, 4), allow_stale_reference=True,
+        )
+        self.assertIsNone(reference_error)
+        self.assertEqual(betas["TEST"], 0.8)
+        self.assertEqual(metadata["lifecycle"], "STALE_REFERENCE")
+        _, _, expired_error = validate_active_policy_document(
+            payload, as_of=date(2027, 1, 1), allow_stale_reference=True,
+        )
+        self.assertEqual(expired_error, "policy is stale")
+
+    def test_loaders_expose_quarterly_reference_separately_from_formal_policy(self):
+        beta = load_active_beta_policy("config/beta-policy-active.json", as_of=date(2026, 10, 4))
+        kelly = load_active_kelly_policy("config/kelly-policy-active.json", as_of=date(2026, 10, 4))
+        self.assertEqual(beta["status"], "UNAVAILABLE")
+        self.assertEqual(beta["quality"], "policy_stale_reference")
+        self.assertNotIn("006208", beta["betas"])
+        self.assertEqual(beta["referenceMetadata"]["referenceThroughQuarter"], "2026Q4")
+        self.assertEqual(kelly["status"], "UNAVAILABLE")
+        self.assertEqual(kelly["referencePolicy"]["freshness"], "stale_reference")
+        self.assertIsNone(load_active_beta_policy("config/beta-policy-active.json", as_of=date(2027, 1, 1)).get("referenceMetadata"))
+
+    def test_beta_candidate_uses_only_last_three_completed_years(self):
+        from datetime import timedelta
+
+        cutoff = date(2026, 9, 30)
+        first_friday = date(2019, 1, 4)
+        benchmark = []
+        asset = []
+        day = first_friday
+        index = 0
+        while day <= cutoff:
+            week = (day - first_friday).days // 7
+            benchmark.append({"date": day.isoformat(), "splitAdjustedClose": 100 + week})
+            # Earlier history is deliberately unrelated; only the trailing
+            # three-year sample may affect the estimate.
+            price = 100 + week * 2 if day >= date(2023, 9, 1) else 10_000 - week * 7
+            asset.append({"date": day.isoformat(), "splitAdjustedClose": price})
+            day += timedelta(days=7)
+            index += 1
+        candidate = estimate_beta_policy(
+            {"TEST": {"rows": asset, "source": "fixture", "corporateActionStatus": "PASS"}},
+            benchmark, cutoff=cutoff,
+        )
+        record = candidate["assets"]["TEST"]
+        self.assertEqual(record["windowEnd"], "2026-09-25")
+        self.assertGreaterEqual(record["observations"], 104)
+        self.assertLess(record["observations"], 160)
+        self.assertEqual(candidate["effectiveFromQuarter"], "2026Q4")
+
     def test_weekly_research_series_is_one_row_per_iso_week(self):
         rows = [
             {"date": "2025-01-02", "totalReturnIndex": 100},

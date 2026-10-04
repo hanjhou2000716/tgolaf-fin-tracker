@@ -12,6 +12,7 @@ from datetime import date, datetime, timedelta, timezone
 import hashlib
 import json
 import math
+import re
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -240,12 +241,49 @@ def _quarter_index(value: date) -> int:
     return value.year * 4 + (value.month - 1) // 3
 
 
+def _quarter_label(index: int) -> str:
+    year, zero_based_quarter = divmod(index, 4)
+    return f"{year:04d}Q{zero_based_quarter + 1}"
+
+
+def _parse_quarter_label(value: Any) -> int | None:
+    match = re.fullmatch(r"(\d{4})Q([1-4])", str(value or "").strip().upper())
+    return int(match.group(1)) * 4 + int(match.group(2)) - 1 if match else None
+
+
+def _policy_quarter_lifecycle(payload: Mapping[str, Any], cutoff: date, today: date) -> tuple[str, str | None]:
+    cutoff_quarter = _quarter_index(cutoff)
+    effective = _parse_quarter_label(payload.get("effectiveFromQuarter"))
+    if effective is None:
+        effective = cutoff_quarter + 1
+    if effective != cutoff_quarter + 1:
+        return "INVALID", "policy effective quarter does not follow its data cutoff"
+    reference_through = _parse_quarter_label(payload.get("referenceThroughQuarter"))
+    if reference_through is None:
+        reference_through = effective + 1
+    if reference_through < effective:
+        return "INVALID", "policy reference period ends before its effective quarter"
+    current = _quarter_index(today)
+    if current < effective:
+        return "INVALID", "policy is not yet effective"
+    if current == effective:
+        return "CURRENT", None
+    if current <= reference_through:
+        return "STALE_REFERENCE", "policy is stale"
+    return "EXPIRED", "policy is stale"
+
+
 def previous_quarter_cutoff(value: date | None = None) -> date:
     """Return the last calendar day of the quarter before ``value``."""
     current = value or date.today()
     quarter_start_month = ((current.month - 1) // 3) * 3 + 1
     quarter_start = date(current.year, quarter_start_month, 1)
     return quarter_start - timedelta(days=1)
+
+
+def last_completed_week_cutoff(value: date | str | None = None) -> date:
+    cutoff = _as_date(value) or previous_quarter_cutoff()
+    return cutoff - timedelta(days=(cutoff.weekday() - 4) % 7)
 
 
 def _event_rows(events: Any, *, value_keys: tuple[str, ...]) -> dict[date, float]:
@@ -411,7 +449,11 @@ def estimate_beta_policy(
 ) -> dict[str, Any]:
     """Build a review-only candidate policy from validated research series."""
     cutoff_date = _as_date(cutoff) or previous_quarter_cutoff()
-    benchmark = _weekly_rows(benchmark_rows, price_key="splitAdjustedClose", cutoff=cutoff_date)
+    # A quarter is complete only after the Friday close. Exclude a partial
+    # final week when the calendar quarter ends earlier in the week.
+    completed_week_cutoff = cutoff_date - timedelta(days=(cutoff_date.weekday() - 4) % 7)
+    window_start = completed_week_cutoff - timedelta(days=3 * 365 + 1)
+    benchmark = _weekly_rows(benchmark_rows, price_key="splitAdjustedClose", cutoff=completed_week_cutoff)
     assets: dict[str, Any] = {}
     for raw_symbol, record in (histories or {}).items():
         symbol = _symbol(raw_symbol)
@@ -419,8 +461,11 @@ def estimate_beta_policy(
             continue
         rows = record.get("rows") if isinstance(record, Mapping) else None
         currency = str(record.get("currency", "TWD")) if isinstance(record, Mapping) else "TWD"
-        weekly = _weekly_rows(rows or [], price_key="splitAdjustedClose", currency=currency, fx_rows=fx_rows, cutoff=cutoff_date)
-        common = sorted(set(benchmark).intersection(weekly))
+        weekly = _weekly_rows(rows or [], price_key="splitAdjustedClose", currency=currency, fx_rows=fx_rows, cutoff=completed_week_cutoff)
+        common = [
+            key for key in sorted(set(benchmark).intersection(weekly))
+            if window_start <= benchmark[key][0] <= completed_week_cutoff
+        ]
         asset_prices = [weekly[key][1] for key in common]
         benchmark_prices = [benchmark[key][1] for key in common]
         asset_returns = [asset_prices[index] / asset_prices[index - 1] - 1 for index in range(1, len(asset_prices))]
@@ -433,6 +478,8 @@ def estimate_beta_policy(
                 "status": "INSUFFICIENT_EVIDENCE",
                 "reason": estimate.get("reason") or "corporate action or source evidence unavailable",
                 "observations": estimate.get("observations", len(asset_returns)),
+                "windowStart": window_start.isoformat(),
+                "windowEnd": completed_week_cutoff.isoformat(),
                 "corporateActionStatus": corporate_status,
                 "source": source or None,
             }
@@ -441,6 +488,8 @@ def estimate_beta_policy(
             "status": "CANDIDATE",
             "beta": round(float(estimate["beta"]), 8),
             "observations": int(estimate["observations"]),
+            "windowStart": window_start.isoformat(),
+            "windowEnd": completed_week_cutoff.isoformat(),
             "method": "paired_weekly_split_adjusted_twd_returns",
             "corporateActionStatus": corporate_status,
             "source": source,
@@ -454,12 +503,14 @@ def estimate_beta_policy(
         "policyVersion": f"candidate-{cutoff_date.isoformat()}",
         "benchmark": "006208.TW/TWD",
         "dataCutoff": cutoff_date.isoformat(),
+        "effectiveFromQuarter": _quarter_label(_quarter_index(cutoff_date) + 1),
+        "referenceThroughQuarter": _quarter_label(_quarter_index(cutoff_date) + 2),
         "assets": assets,
         "contentHash": hashlib.sha256(serial.encode("utf-8")).hexdigest(),
     }
 
 
-def validate_active_policy_document(payload: Mapping[str, Any], *, as_of: date | None = None, min_observations: int = MIN_WEEKLY_OBSERVATIONS) -> tuple[dict[str, float], dict[str, Any] | None, str | None]:
+def validate_active_policy_document(payload: Mapping[str, Any], *, as_of: date | None = None, min_observations: int = MIN_WEEKLY_OBSERVATIONS, allow_stale_reference: bool = False) -> tuple[dict[str, float], dict[str, Any] | None, str | None]:
     """Validate an approved policy before it can feed the live calculator."""
     if not isinstance(payload, Mapping) or payload.get("schemaVersion") != POLICY_SCHEMA_VERSION:
         return {}, None, "policy schema version mismatch"
@@ -469,7 +520,14 @@ def validate_active_policy_document(payload: Mapping[str, Any], *, as_of: date |
     today = as_of or date.today()
     if cutoff is None or cutoff > previous_quarter_cutoff(today):
         return {}, None, "policy cutoff is not point-in-time"
-    if _quarter_index(today) - _quarter_index(cutoff) > 1:
+    lifecycle, lifecycle_error = _policy_quarter_lifecycle(payload, cutoff, today)
+    if lifecycle == "STALE_REFERENCE" and allow_stale_reference:
+        lifecycle_error = None
+    if lifecycle_error:
+        return {}, None, lifecycle_error
+    if lifecycle == "STALE_REFERENCE" and not allow_stale_reference:
+        return {}, None, "policy is stale"
+    if lifecycle == "EXPIRED":
         return {}, None, "policy is stale"
     assets = payload.get("assets")
     if not isinstance(assets, Mapping):
@@ -500,6 +558,9 @@ def validate_active_policy_document(payload: Mapping[str, Any], *, as_of: date |
         "dataCutoff": cutoff.isoformat(),
         "contentHash": str(payload.get("contentHash") or ""),
         "benchmark": str(payload.get("benchmark") or "006208.TW/TWD"),
+        "effectiveFromQuarter": _quarter_label(_parse_quarter_label(payload.get("effectiveFromQuarter")) or (_quarter_index(cutoff) + 1)),
+        "referenceThroughQuarter": _quarter_label(_parse_quarter_label(payload.get("referenceThroughQuarter")) or (_quarter_index(cutoff) + 2)),
+        "lifecycle": lifecycle,
     }
     return betas, metadata, None
 
@@ -512,11 +573,21 @@ def load_active_beta_policy(path: str | Path | None = None, *, as_of: date | Non
         return {"status": "UNAVAILABLE", "quality": "policy_missing", "reason": "active Beta policy unavailable", "betas": {}, "metadata": None}
     betas, metadata, error = validate_active_policy_document(payload, as_of=as_of)
     if error:
-        return {"status": "UNAVAILABLE", "quality": "policy_invalid", "reason": error, "betas": {}, "metadata": None}
+        reference_betas, reference_metadata, reference_error = validate_active_policy_document(
+            payload, as_of=as_of, allow_stale_reference=True,
+        )
+        if error == "policy is stale" and not reference_error:
+            reference_metadata = {**(reference_metadata or {}), "lifecycle": "STALE_REFERENCE"}
+            return {"status": "UNAVAILABLE", "quality": "policy_stale_reference", "reason": error,
+                    "betas": {}, "metadata": None,
+                    "referenceBetas": {**FIXED_BETAS, **reference_betas},
+                    "referenceMetadata": reference_metadata}
+        return {"status": "UNAVAILABLE", "quality": "policy_invalid", "reason": error, "betas": {}, "metadata": None,
+                "referenceBetas": {}, "referenceMetadata": None}
     return {"status": "READY", "quality": "policy_complete", "reason": None, "betas": {**FIXED_BETAS, **betas}, "metadata": metadata}
 
 
-def validate_active_kelly_document(payload: Mapping[str, Any], *, as_of: date | None = None) -> tuple[dict[str, Any] | None, str | None]:
+def validate_active_kelly_document(payload: Mapping[str, Any], *, as_of: date | None = None, allow_stale_reference: bool = False) -> tuple[dict[str, Any] | None, str | None]:
     """Validate a manually approved quarterly Kelly parameter document."""
     if not isinstance(payload, Mapping) or payload.get("schemaVersion") != POLICY_SCHEMA_VERSION:
         return None, "Kelly policy schema version mismatch"
@@ -526,7 +597,14 @@ def validate_active_kelly_document(payload: Mapping[str, Any], *, as_of: date | 
     today = as_of or date.today()
     if cutoff is None or cutoff > previous_quarter_cutoff(today):
         return None, "Kelly policy cutoff is not point-in-time"
-    if _quarter_index(today) - _quarter_index(cutoff) > 1:
+    lifecycle, lifecycle_error = _policy_quarter_lifecycle(payload, cutoff, today)
+    if lifecycle == "STALE_REFERENCE" and allow_stale_reference:
+        lifecycle_error = None
+    if lifecycle_error:
+        return None, lifecycle_error.replace("policy", "Kelly policy")
+    if lifecycle == "STALE_REFERENCE" and not allow_stale_reference:
+        return None, "Kelly policy is stale"
+    if lifecycle == "EXPIRED":
         return None, "Kelly policy is stale"
     mu = _finite(payload.get("mu"))
     sigma = _finite(payload.get("sigma"))
@@ -546,6 +624,9 @@ def validate_active_kelly_document(payload: Mapping[str, Any], *, as_of: date | 
         "freshness": "current",
         "source": str(payload.get("source") or ""),
         "contentHash": str(payload.get("contentHash") or ""),
+        "effectiveFromQuarter": _quarter_label(_parse_quarter_label(payload.get("effectiveFromQuarter")) or (_quarter_index(cutoff) + 1)),
+        "referenceThroughQuarter": _quarter_label(_parse_quarter_label(payload.get("referenceThroughQuarter")) or (_quarter_index(cutoff) + 2)),
+        "lifecycle": lifecycle,
     }, None
 
 
@@ -557,5 +638,13 @@ def load_active_kelly_policy(path: str | Path | None = None, *, as_of: date | No
         return {"status": "UNAVAILABLE", "quality": "policy_missing", "reason": "active Kelly policy unavailable", "policy": None}
     policy, error = validate_active_kelly_document(payload, as_of=as_of)
     if error:
-        return {"status": "UNAVAILABLE", "quality": "policy_invalid", "reason": error, "policy": None}
+        reference, reference_error = validate_active_kelly_document(
+            payload, as_of=as_of, allow_stale_reference=True,
+        )
+        if error == "Kelly policy is stale" and not reference_error:
+            reference = {**(reference or {}), "lifecycle": "STALE_REFERENCE", "freshness": "stale_reference"}
+            return {"status": "UNAVAILABLE", "quality": "policy_stale_reference", "reason": error,
+                    "policy": None, "referencePolicy": reference}
+        return {"status": "UNAVAILABLE", "quality": "policy_invalid", "reason": error, "policy": None,
+                "referencePolicy": None}
     return {"status": "READY", "quality": "policy_complete", "reason": None, "policy": policy}

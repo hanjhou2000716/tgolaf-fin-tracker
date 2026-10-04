@@ -5,6 +5,8 @@
   "approvalStatus": "APPROVED",
   "benchmark": "006208.TW/TWD",
   "dataCutoff": "2026-06-30",
+  "effectiveFromQuarter": "2026Q3",
+  "referenceThroughQuarter": "2026Q4",
   "createdAt": "2026-09-17T00:00:00+00:00",
   "method": "paired_weekly_split_adjusted_twd_returns",
   "contentHash": "9ba7c6152d9213477d702c90272384ffce5eb53a9fd1311bef02fd40b920b0ba",

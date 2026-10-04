@@ -9,5 +9,7 @@
   "sigma": 0.18,
   "halfKellyLimit": 1.234567901234568,
   "dataCutoff": "2026-06-30",
+  "effectiveFromQuarter": "2026Q3",
+  "referenceThroughQuarter": "2026Q4",
   "source": "Conservative policy baseline pending first point-in-time quarterly candidate"
 }

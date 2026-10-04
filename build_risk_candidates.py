@@ -18,6 +18,7 @@ from beta_policy import (
     FIXED_BETAS,
     estimate_beta_policy,
     fetch_research_series,
+    last_completed_week_cutoff,
     previous_quarter_cutoff,
     weekly_research_series,
 )
@@ -44,7 +45,8 @@ def main() -> int:
     output = Path(os.getenv("RISK_CANDIDATE_OUTPUT_DIR", ".private-build"))
     today = datetime.now(ZoneInfo("Asia/Taipei")).date()
     cutoff = previous_quarter_cutoff(today)
-    start = cutoff - timedelta(days=8 * 365)
+    start = cutoff - timedelta(days=6 * 365)
+    completed_week_cutoff = last_completed_week_cutoff(cutoff)
 
     requested = {"006208": "tw", **SYMBOL_MARKETS}
     requested["TWD=X"] = "us"
@@ -79,20 +81,39 @@ def main() -> int:
     )
     candidate["source"] = "Yahoo Chart raw OHLC + research-price contract v1"
     candidate["fixedPolicy"] = FIXED_BETAS
+    candidate_inputs = {
+        "dataCutoff": cutoff.isoformat(),
+        "completedWeekCutoff": completed_week_cutoff.isoformat(),
+        "benchmark": benchmark,
+        "fx": fx,
+        "assets": {symbol: histories[symbol] for symbol in sorted(asset_histories)},
+    }
+    candidate_input_hash = hashlib.sha256(
+        json.dumps(candidate_inputs, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    candidate["inputHash"] = candidate_input_hash
+    candidate["candidateId"] = f"{candidate['effectiveFromQuarter']}-{candidate_input_hash[:16]}"
     _write(output / "beta-policy-candidate.json", candidate)
+    immutable_beta_path = output / f"beta-policy-candidate-{candidate['candidateId']}.json"
+    if not immutable_beta_path.exists():
+        _write(immutable_beta_path, candidate)
 
     weekly_benchmark = weekly_research_series(
         benchmark.get("rows", []),
         price_key="totalReturnIndex",
-        cutoff=cutoff,
+        cutoff=completed_week_cutoff,
     )
     # μ is the point-in-time five-year CAGR.  The fetch window is longer so
     # the latest 261 weekly points (five years including endpoints) are the
     # only observations supplied to the quarterly Kelly estimator.
     prices = weekly_benchmark[-261:]
     kelly = build_quarterly_kelly_candidate(prices, data_cutoff=cutoff.isoformat())
-    canonical = json.dumps(prices, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    _write(output / "kelly-quarterly-candidate.json", {
+    canonical = json.dumps({"prices": prices, "source": benchmark.get("source"),
+                            "corporateActionStatus": benchmark.get("corporateActionStatus"),
+                            "dataCutoff": cutoff.isoformat()},
+                           ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    kelly_content_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    kelly_candidate = {
         "schemaVersion": 1,
         "status": kelly.get("status"),
         "reason": kelly.get("reason"),
@@ -101,10 +122,18 @@ def main() -> int:
         "halfKellyLimit": kelly.get("halfKellyLimit"),
         "dataCutoff": kelly.get("dataCutoff", cutoff.isoformat()),
         "source": benchmark.get("source"),
-        "contentHash": hashlib.sha256(canonical.encode("utf-8")).hexdigest() if prices else None,
+        "contentHash": kelly_content_hash if prices else None,
+        "candidateId": f"{candidate['effectiveFromQuarter']}-{kelly_content_hash[:16]}",
+        "inputHash": kelly_content_hash if prices else None,
+        "effectiveFromQuarter": candidate["effectiveFromQuarter"],
+        "referenceThroughQuarter": candidate["referenceThroughQuarter"],
         "corporateActionStatus": benchmark.get("corporateActionStatus", "UNAVAILABLE"),
         "approvalStatus": "PENDING" if kelly.get("status") == "CANDIDATE" else "NOT_READY",
-    })
+    }
+    _write(output / "kelly-quarterly-candidate.json", kelly_candidate)
+    immutable_kelly_path = output / f"kelly-quarterly-candidate-{kelly_candidate['candidateId']}.json"
+    if not immutable_kelly_path.exists():
+        _write(immutable_kelly_path, kelly_candidate)
     return 0
 
 
