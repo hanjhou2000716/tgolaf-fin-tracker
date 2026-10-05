@@ -29,7 +29,18 @@ class OpsContractTests(unittest.TestCase):
         self.assertIn("upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02", workflow)
         self.assertIn("name: nav-beta-audit", workflow)
         self.assertIn("name: kelly-quarterly-candidate", workflow)
-        self.assertIn("Build private quarterly Beta and Kelly candidates", workflow)
+        # Quarterly parameters are built inside the tracker only after it has
+        # read the actual de-duplicated holdings. Restore happens beforehand;
+        # successful state is then persisted for the next main run.
+        self.assertIn("Restore latest validated quarterly risk policy", workflow)
+        self.assertIn("name: quarterly-risk-policy-state", workflow)
+        self.assertLess(
+            workflow.index("Restore latest validated quarterly risk policy"),
+            workflow.index("Run Tracker Script (Generate private snapshot and public Demo)"),
+        )
+        self.assertNotIn("Build private quarterly Beta and Kelly candidates", workflow)
+        pipeline = (ROOT / "dashboard_pipeline.py").read_text(encoding="utf-8")
+        self.assertIn("ensure_quarterly_risk_policies", pipeline)
         self.assertIn("name: beta-policy-candidate", workflow)
         self.assertIn("touch public-site/.nojekyll", workflow)
 

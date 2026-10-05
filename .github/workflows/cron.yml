@@ -93,13 +93,19 @@ jobs:
       - name: Run formula and data validation tests
         run: python -m unittest discover -s tests -v
 
-      - name: Build private quarterly Beta and Kelly candidates
-        # Candidate generation is review-only.  It never changes the active
-        # policy and never sends notifications or writes portfolio records.
+      - name: Restore latest validated quarterly risk policy
+        # Only successful runs from main can seed the next private state. A
+        # missing artifact is a safe cold start and causes automatic rebuild.
         env:
-          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-          RISK_CANDIDATE_OUTPUT_DIR: .private-build
-        run: python build_risk_candidates.py
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p .risk-policy-cache .private-build
+          for previous_run in $(gh run list --workflow cron.yml --branch main --status success --limit 50 --json databaseId --jq '.[].databaseId'); do
+            if gh run download "$previous_run" --name quarterly-risk-policy-state --dir .risk-policy-cache; then
+              echo "Restored quarterly risk state from successful main run $previous_run"
+              break
+            fi
+          done
 
       - name: Download latest validated TAIEX cache
         # actions/download-artifact only sees artifacts from this run.  Use
@@ -139,10 +145,32 @@ jobs:
           LEGACY_TRANSACTION_SOURCES: ${{ vars.LEGACY_TRANSACTION_SOURCES || '表單回覆 3,Form Responses 1,Form Responses 2,Form V2' }}
           HISTORY_SOURCE: ${{ vars.HISTORY_SOURCE || 'History' }}
           TAIEX_HISTORY_CACHE_PATH: .taiex-cache/taiex-history-cache.json
+          RISK_POLICY_STATE_DIR: .risk-policy-cache
+          RISK_CANDIDATE_OUTPUT_DIR: .private-build
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           SCHEDULED_WINDOW_OVERRIDE: ${{ needs.gate.outputs.window }}
           SCHEDULED_DATE_OVERRIDE: ${{ needs.gate.outputs.snapshot_date }}
         run: python main.py
+
+      - name: Upload quarterly risk policy state
+        if: always()
+        # Contains validated public-market research inputs and versioned
+        # parameters only; it is a private Actions artifact, never Pages data.
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: quarterly-risk-policy-state
+          path: .risk-policy-cache
+          include-hidden-files: true
+          if-no-files-found: ignore
+
+      - name: Upload quarterly risk policy diagnostic
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: quarterly-risk-policy-summary
+          path: .private-build/quarterly-risk-policy-summary.json
+          include-hidden-files: true
+          if-no-files-found: ignore
 
       - name: Upload Google Sheets operation summary
         if: always()
@@ -193,24 +221,24 @@ jobs:
           if-no-files-found: error
 
       - name: Upload private quarterly Kelly candidate
-        # Candidate parameters are private review evidence; activation still
-        # requires an explicit approval and versioned configuration change.
+        # Candidate parameters and source-quality evidence are private audit
+        # evidence; validated values auto-activate only after formula checks.
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: kelly-quarterly-candidate
           path: .private-build/kelly-quarterly-candidate*.json
           include-hidden-files: true
-          if-no-files-found: error
+          if-no-files-found: ignore
 
       - name: Upload private quarterly Beta candidate
-        # Per-symbol estimates are private review evidence and never enter
-        # the Pages artifact until a versioned policy is explicitly approved.
+        # Per-symbol estimates are private audit evidence and enter the active
+        # policy only after source checks and live portfolio coverage pass.
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: beta-policy-candidate
           path: .private-build/beta-policy-candidate*.json
           include-hidden-files: true
-          if-no-files-found: error
+          if-no-files-found: ignore
 
       - name: Upload validated TAIEX history cache
         # Full index sessions are private market data, never part of Pages.

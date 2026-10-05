@@ -9,7 +9,7 @@ unit tests and prevents a pledged holding from being counted twice.
 from __future__ import annotations
 
 import math
-from datetime import date
+from datetime import date, timedelta
 from typing import Mapping
 
 HALF_KELLY_LIMIT = 0.08 / (2 * (0.18 ** 2))
@@ -236,16 +236,44 @@ def build_quarterly_kelly_candidate(total_return_prices, *, data_cutoff=None, mi
     elapsed_days = (last_date - first_date).days
     if elapsed_days <= 0:
         return {"status": "INSUFFICIENT_EVIDENCE", "reason": "weekly research period is invalid", "observations": len(rows), "dataCutoff": data_cutoff}
-    returns = [rows[index][1] / rows[index - 1][1] - 1 for index in range(1, len(rows))]
+    dated_returns = []
+    for index in range(1, len(rows)):
+        try:
+            previous_date = date.fromisoformat(rows[index - 1][0])
+            current_date = date.fromisoformat(rows[index][0])
+        except ValueError:
+            continue
+        # Do not annualize a two-or-more-week price gap as if it were one
+        # ordinary weekly observation. A holiday week can still be accepted.
+        if not 0 < (current_date - previous_date).days <= 10:
+            continue
+        dated_returns.append((current_date, rows[index][1] / rows[index - 1][1] - 1))
+    recent_start = last_date - timedelta(days=3 * 365 + 1)
+    recent_returns = [value for return_date, value in dated_returns if recent_start <= return_date <= last_date]
+    if len(recent_returns) < 104:
+        return {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "reason": "insufficient contiguous weekly volatility observations",
+            "observations": len(rows),
+            "volatilityObservations": len(recent_returns),
+            "dataCutoff": data_cutoff,
+        }
     # Kelly volatility is explicitly the most recent three completed years
     # (156 weekly returns), while μ uses the full five-year point-in-time span.
-    recent_returns = returns[-156:] if len(returns) >= 156 else returns
+    recent_returns = recent_returns[-156:]
     mean = sum(recent_returns) / len(recent_returns)
     sigma = math.sqrt(sum((value - mean) ** 2 for value in recent_returns) / max(1, len(recent_returns) - 1)) * math.sqrt(52)
     years = elapsed_days / 365.2425
     mu = (rows[-1][1] / rows[0][1]) ** (1 / years) - 1 if years > 0 else None
     candidate = quarterly_half_kelly(mu, sigma)
-    return {**candidate, "observations": len(rows), "dataCutoff": data_cutoff, "seriesStart": rows[0][0], "seriesEnd": rows[-1][0]}
+    return {
+        **candidate,
+        "observations": len(rows),
+        "volatilityObservations": len(recent_returns),
+        "dataCutoff": data_cutoff,
+        "seriesStart": rows[0][0],
+        "seriesEnd": rows[-1][0],
+    }
 
 
 def beta_capacity(effective_beta, limit=HALF_KELLY_LIMIT):
