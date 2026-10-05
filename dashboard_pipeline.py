@@ -7,12 +7,12 @@ import math
 import re
 import time
 import copy
+from pathlib import Path
 from collections import Counter
 import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
 from risk import (
-    HALF_KELLY_LIMIT,
     beta_capacity as calculate_beta_capacity,
     remaining_beta_capacity,
     beta_status as classify_beta_capacity,
@@ -28,6 +28,11 @@ from beta_policy import (
     DEFAULT_ACTIVE_POLICY_PATH,
     load_active_beta_policy,
     load_active_kelly_policy,
+)
+from quarterly_risk_policy import (
+    active_policy_path,
+    ensure_quarterly_risk_policies,
+    promote_beta_candidate_if_qualified,
 )
 from validation import validate_history_sheet, validate_inventory, validate_quote
 from asset_tree import asset_tree_metadata_summary, build_asset_tree
@@ -744,6 +749,22 @@ def calculate_current_assets():
     current_transactions, current_reconciliation_events = _apply_current_transactions(inventory, current_transactions)
     accepted_transactions = tuple(accepted_transactions) + tuple(current_transactions)
     reconciliation_events = tuple(reconciliation_events) + tuple(current_reconciliation_events)
+    # Quarterly research is prepared from the in-memory, de-duplicated ledger
+    # before its immutable transaction sync is written.  A data-source outage
+    # is recorded and leaves the last validated policies untouched.
+    try:
+        ensure_quarterly_risk_policies(
+            inventory,
+            state_dir=os.getenv("RISK_POLICY_STATE_DIR", ".risk-policy-cache"),
+            candidate_dir=os.getenv("RISK_CANDIDATE_OUTPUT_DIR", ".private-build"),
+            today=datetime.datetime.now(TAIPEI).date(),
+        )
+    except Exception as error:  # noqa: BLE001 - preserve ledger processing on research-source outages
+        write_json(".private-build/quarterly-risk-policy-summary.json", {
+            "schemaVersion": 1,
+            "status": "UNAVAILABLE",
+            "reasonCode": type(error).__name__,
+        })
     ledger_sync_result = upload_private_transactions(accepted_transactions)
     sync_conflicts = tuple(getattr(ledger_sync_result, "conflicts", ()))
     sync_replays = tuple(getattr(ledger_sync_result, "replays", ()))
@@ -1071,10 +1092,33 @@ def main():
         # FUND is retained as one economic position until it reaches the
         # materiality threshold; no arbitrary Beta is assigned to it.
         beta_values["FUND"] = fund_value
-    # Formal Beta values come only from the versioned, approved policy.  No
-    # temporary environment value can unlock risk-taking in production.
+    # Formal Beta values come only from a versioned, validated quarterly
+    # policy. No temporary environment value can unlock risk-taking.
+    risk_policy_state_dir = os.getenv("RISK_POLICY_STATE_DIR", ".risk-policy-cache")
+    beta_path = os.getenv("BETA_POLICY_ACTIVE_PATH") or active_policy_path(
+        risk_policy_state_dir, "beta-policy-active.json", DEFAULT_ACTIVE_POLICY_PATH,
+    )
+    beta_activation = promote_beta_candidate_if_qualified(
+        beta_values,
+        total_asset,
+        total_debt,
+        market_by_symbol={
+            **{symbol: "tw" for symbol in tw_position_values},
+            **{symbol: "us" for symbol in us_position_values},
+        },
+        state_dir=risk_policy_state_dir,
+        today=tw_now.date(),
+        now=now_utc,
+    )
+    try:
+        quarterly_summary_path = Path(".private-build/quarterly-risk-policy-summary.json")
+        quarterly_summary = json.loads(quarterly_summary_path.read_text(encoding="utf-8"))
+        quarterly_summary.setdefault("beta", {})["activation"] = beta_activation
+        write_json(str(quarterly_summary_path), quarterly_summary)
+    except (OSError, ValueError, TypeError):
+        write_json(".private-build/quarterly-risk-policy-summary.json", {"beta": {"activation": beta_activation}})
     beta_policy = load_active_beta_policy(
-        os.getenv("BETA_POLICY_ACTIVE_PATH", DEFAULT_ACTIVE_POLICY_PATH),
+        beta_path,
         as_of=tw_now.date(),
     )
     beta_by_symbol = resolve_beta_policy(beta_policy.get("betas", {})) if beta_policy.get("status") == "READY" else resolve_beta_policy()
@@ -1167,15 +1211,21 @@ def main():
     # Keep the legacy value for API consumers during the compatibility
     # release; all new UI and gates use the canonical NAV-Beta result below.
     effective_leverage = ((invested_assets + leveraged_etf_value) / net_asset) if net_asset > 0 else 0
+    kelly_path = os.getenv("KELLY_POLICY_ACTIVE_PATH") or active_policy_path(
+        risk_policy_state_dir, "kelly-policy-active.json", DEFAULT_ACTIVE_KELLY_PATH,
+    )
     kelly_policy = load_active_kelly_policy(
-        os.getenv("KELLY_POLICY_ACTIVE_PATH", DEFAULT_ACTIVE_KELLY_PATH),
+        kelly_path,
         as_of=tw_now.date(),
     )
     active_kelly = kelly_policy.get("policy") or {}
     reference_kelly = kelly_policy.get("referencePolicy") or {}
     formal_kelly_limit = float(active_kelly["halfKellyLimit"]) if kelly_policy.get("status") == "READY" else None
     reference_kelly_limit = float(reference_kelly["halfKellyLimit"]) if kelly_policy.get("quality") == "policy_stale_reference" else None
-    half_kelly_limit = formal_kelly_limit if formal_kelly_limit is not None else (reference_kelly_limit or HALF_KELLY_LIMIT)
+    # Never present the historical constant as if it were the current
+    # quarter's verified Kelly boundary. A stale reference remains separately
+    # labelled; otherwise the boundary is unavailable until auto-validation.
+    half_kelly_limit = formal_kelly_limit if formal_kelly_limit is not None else reference_kelly_limit
     beta_reference_result = None
     if beta_policy.get("quality") == "policy_stale_reference":
         beta_reference_result = calculate_nav_beta(
@@ -1201,9 +1251,9 @@ def main():
         if nav_beta is not None and formal_kelly_limit is not None else None
     )
     beta_status, beta_status_class = classify_beta_capacity(beta_capacity) if beta_capacity is not None else ("⚪ 資料不足", "risk-unavailable")
-    if policy_stale_reference and display_nav_beta is not None:
-        display_beta_status, display_beta_class = "待季度核准", "risk-unavailable"
-    elif display_usage is not None:
+    if policy_stale_reference:
+        display_beta_status, display_beta_class = "參數更新待確認", "risk-unavailable"
+    elif display_usage is not None and nav_beta is not None and formal_kelly_limit is not None:
         display_beta_status, display_beta_class = classify_beta_capacity(display_usage)
     else:
         display_beta_status, display_beta_class = "⚪ 資料不足", "risk-unavailable"
@@ -1591,7 +1641,7 @@ def main():
     beta_usage_display = f"{display_usage:.1f}%" if display_usage is not None else "—"
     beta_boundary_display = f"{display_kelly_limit:.2f}" if display_kelly_limit is not None else "—"
     beta_display_title = (
-        "依最後核准季度政策計算的參考值；新季度核准前禁止增加風險。"
+        "依上一季度已驗證參數顯示參考值；本季度參數通過自動驗證前禁止增加風險。"
         if policy_stale_reference else ""
     )
     html_content = f"""
@@ -2243,7 +2293,7 @@ def main():
             kelly_candidate_hash = candidate_payload.get("contentHash")
         # Do not accept ad-hoc μ/σ environment overrides in production.  A
         # candidate must be derived from the point-in-time research series;
-        # the approved policy above remains the only live Kelly input.
+        # the auto-validated policy above remains the only live Kelly input.
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         kelly_candidate = {"status": "INSUFFICIENT_EVIDENCE", "reason": "invalid quarterly candidate inputs"}
     write_json(".private-build/kelly-quarterly-candidate.json", {
@@ -2261,7 +2311,7 @@ def main():
         "source": kelly_candidate_source,
         "contentHash": kelly_candidate_hash,
         "corporateActionStatus": "RESEARCH_CONTRACT_REQUIRED" if kelly_candidate_source else "NOT_PROVIDED",
-        "approvalStatus": "PENDING" if kelly_candidate.get("status") == "CANDIDATE" else "NOT_READY",
+        "approvalStatus": "AUTOMATIC_CANDIDATE" if kelly_candidate.get("status") == "CANDIDATE" else "NOT_READY",
     })
     beta_payload = {
         "schemaVersion": nav_beta_result.get("schemaVersion", 1),
@@ -2282,7 +2332,11 @@ def main():
         "displayKellyLimit": round(display_kelly_limit, 8) if display_kelly_limit is not None else None,
         "displayUsagePct": round(display_usage, 4) if display_usage is not None else None,
         "displayStatus": display_beta_status,
-        "displayLifecycle": "STALE_REFERENCE" if policy_stale_reference else "CURRENT" if nav_beta is not None and formal_kelly_limit is not None else "UNAVAILABLE",
+        "displayLifecycle": "STALE_REFERENCE" if policy_stale_reference else "CURRENT" if nav_beta is not None and formal_kelly_limit is not None else "BETA_CURRENT_KELLY_UNAVAILABLE" if nav_beta is not None else "UNAVAILABLE",
+        "betaLifecycle": (beta_policy.get("metadata") or beta_policy.get("referenceMetadata") or {}).get("lifecycle", "UNAVAILABLE"),
+        "kellyLifecycle": (active_kelly or reference_kelly).get("lifecycle", "UNAVAILABLE"),
+        "betaApprovalStatus": (beta_policy.get("metadata") or {}).get("approvalStatus", "NOT_READY"),
+        "kellyApprovalStatus": active_kelly.get("approvalStatus", "NOT_READY") if kelly_policy.get("status") == "READY" else "NOT_READY",
         "displayQualityNote": beta_display_title or None,
         "assetBeta": round(asset_beta, 2) if asset_beta is not None else None,
         "betaExposureTwd": round(beta_exposure_twd, 2) if beta_exposure_twd is not None else None,
@@ -2334,7 +2388,7 @@ def main():
             "reason": kelly_policy.get("reason"),
             "candidateStatus": kelly_candidate.get("status"),
             "candidateDataCutoff": kelly_candidate.get("dataCutoff"),
-            "candidateApprovalStatus": "PENDING" if kelly_candidate.get("status") == "CANDIDATE" else "NOT_READY",
+            "candidateApprovalStatus": "AUTOMATIC_CANDIDATE" if kelly_candidate.get("status") == "CANDIDATE" else "NOT_READY",
         },
         "largestPosition": {"symbol": largest_symbol, "value": round(largest_position_value, 2), "percent": round(largest_position_pct, 1), "status": largest_position_status},
         "nvdaExposureRatio": round(nvda_pct, 1),

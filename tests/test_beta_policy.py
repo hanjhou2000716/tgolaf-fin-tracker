@@ -1,7 +1,8 @@
 import json
+import hashlib
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 
 from beta_policy import (
@@ -15,6 +16,20 @@ from beta_policy import (
 )
 from risk import remaining_beta_capacity
 from risk import calculate_nav_beta
+from quarterly_risk_policy import _automatic_document
+
+
+def _corporate_evidence(start="2019-01-01", end="2026-09-30"):
+    return {
+        "provider": "Yahoo Chart API",
+        "eventMapPresent": True,
+        "eventsHash": "a" * 64,
+        "seriesHash": "b" * 64,
+        "requestedStart": start,
+        "requestedEnd": end,
+        "verifiedAt": "2026-10-05T00:00:00Z",
+        "requestedEvents": ["history", "splits", "dividends"],
+    }
 
 
 def _rows(values, start="2020-01-01"):
@@ -39,10 +54,10 @@ class BetaPolicyTests(unittest.TestCase):
         asset = normalize_research_price([{"date": f"2024-01-{day:02d}", "close": 50 + day * 2} for day in range(1, 29)])
         fx = [{"date": f"2024-01-{day:02d}", "close": 31} for day in range(1, 29)]
         result = estimate_beta_policy(
-            {"TEST": {"rows": asset * 40, "currency": "USD", "source": "test", "corporateActionStatus": "PASS", "market": "us"}},
+            {"TEST": {"rows": asset * 40, "currency": "USD", "source": "test", "corporateActionStatus": "PASS", "corporateActionEvidence": _corporate_evidence("2020-01-01", "2025-01-01"), "market": "us"}},
             benchmark * 40,
             fx_rows=fx * 40,
-            cutoff="2024-12-31",
+            cutoff="2024-01-31",
             min_observations=2,
         )
         self.assertIn("TEST", result["assets"])
@@ -123,6 +138,77 @@ class BetaPolicyTests(unittest.TestCase):
         self.assertGreaterEqual(record["observations"], 104)
         self.assertLess(record["observations"], 160)
         self.assertEqual(candidate["effectiveFromQuarter"], "2026Q4")
+
+    def test_weekly_beta_does_not_bridge_multiple_missing_weeks(self):
+        from datetime import timedelta
+
+        benchmark, asset = [], []
+        day = date(2022, 1, 7)
+        for index in range(165):
+            if not 35 <= index < 100:
+                benchmark.append({"date": day.isoformat(), "splitAdjustedClose": 100 + index * 0.7 + (index % 5)})
+                asset.append({"date": day.isoformat(), "splitAdjustedClose": 50 + index * 0.3 + (index % 7)})
+            day += timedelta(days=7)
+        result = estimate_beta_policy(
+            {"TEST": {"rows": asset, "source": "fixture", "corporateActionStatus": "PASS", "corporateActionEvidence": _corporate_evidence("2021-01-01", "2026-09-30")}},
+            benchmark,
+            cutoff="2026-09-30",
+        )
+        self.assertEqual(result["assets"]["TEST"]["status"], "INSUFFICIENT_EVIDENCE")
+
+    def test_beta_candidate_rejects_nonempty_but_stale_research_series(self):
+        from datetime import timedelta
+
+        cutoff = date(2026, 9, 30)
+        expected_week = date(2026, 9, 25)
+        stale_end = expected_week - timedelta(days=21)
+        benchmark, asset = [], []
+        for index in range(170):
+            session = stale_end - timedelta(days=(169 - index) * 7)
+            benchmark.append({"date": session.isoformat(), "splitAdjustedClose": 100 + index * 0.3 + (index % 5)})
+            asset.append({"date": session.isoformat(), "splitAdjustedClose": 50 + index * 0.2 + (index % 7)})
+        result = estimate_beta_policy(
+            {"TEST": {
+                "rows": asset,
+                "source": "fixture",
+                "corporateActionStatus": "PASS",
+                "corporateActionEvidence": _corporate_evidence("2020-01-01", cutoff.isoformat()),
+            }},
+            benchmark,
+            cutoff=cutoff,
+        )
+        self.assertEqual(result["assets"]["TEST"]["status"], "INSUFFICIENT_EVIDENCE")
+        self.assertEqual(result["assets"]["TEST"]["reason"], "latest paired observation is stale")
+
+    def test_auto_validated_beta_requires_integrity_and_source_evidence(self):
+        assets = {"TEST": {
+            "status": "CANDIDATE", "beta": 0.8, "observations": 120,
+            "source": "Yahoo Chart raw OHLC", "corporateActionStatus": "PASS",
+            "corporateActionEvidence": _corporate_evidence(),
+            "windowStart": "2023-09-22", "windowEnd": "2026-09-25",
+        }}
+        payload = {
+            "schemaVersion": 1, "policyVersion": "2026Q4-test", "status": "ACTIVE",
+            "approvalStatus": "AUTO_VALIDATED", "dataCutoff": "2026-09-30",
+            "effectiveFromQuarter": "2026Q4", "referenceThroughQuarter": "2027Q1",
+            "assets": assets,
+            "contentHash": hashlib.sha256(
+                json.dumps(assets, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            ).hexdigest(),
+        }
+        payload = _automatic_document(
+            payload, input_hash="c" * 64,
+            validated_at=datetime.fromisoformat("2026-10-05T00:00:00+00:00"),
+            validated_by="trusted-main-workflow",
+        )
+        betas, metadata, error = validate_active_policy_document(payload, as_of=date(2026, 10, 5))
+        self.assertIsNone(error)
+        self.assertEqual(betas["TEST"], 0.8)
+        self.assertEqual(metadata["approvalStatus"], "AUTO_VALIDATED")
+        tampered = json.loads(json.dumps(payload))
+        tampered["assets"]["TEST"]["beta"] = 1.5
+        _, _, error = validate_active_policy_document(tampered, as_of=date(2026, 10, 5))
+        self.assertIsNotNone(error)
 
     def test_weekly_research_series_is_one_row_per_iso_week(self):
         rows = [

@@ -1,0 +1,601 @@
+"""Automatic, point-in-time quarterly Beta and Kelly policy lifecycle."""
+
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from copy import deepcopy
+from datetime import date, datetime, timedelta, timezone
+import hashlib
+import json
+import math
+import os
+from pathlib import Path
+import re
+from typing import Any, Mapping
+
+from beta_policy import (
+    AUTO_VALIDATION_ALGORITHM,
+    FIXED_BETAS,
+    _as_date,
+    _canonical_hash,
+    _valid_corporate_action_evidence,
+    estimate_beta_policy,
+    fetch_research_series,
+    last_completed_week_cutoff,
+    load_active_beta_policy,
+    load_active_kelly_policy,
+    previous_quarter_cutoff,
+    validate_active_kelly_document,
+    validate_active_policy_document,
+    weekly_research_series,
+)
+from risk import build_quarterly_kelly_candidate, calculate_nav_beta
+
+
+RETRY_UNAVAILABLE_AFTER = timedelta(hours=24)
+AUTO_VALIDATION_CHECKS = [
+    "point_in_time_cutoff",
+    "completed_week_window",
+    "paired_week_observations",
+    "corporate_action_response_evidence",
+    "source_content_hash",
+    "finite_coefficients",
+    "kelly_formula",
+]
+
+
+def _now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso_utc(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _quarter_label(value: date) -> str:
+    return f"{value.year}Q{(value.month - 1) // 3 + 1}"
+
+
+def _write_json_atomic(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
+
+
+def _read_json(path: Path) -> dict[str, Any] | None:
+    try:
+        result = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return result if isinstance(result, dict) else None
+
+
+def _sealed_cache(payload: Mapping[str, Any]) -> dict[str, Any]:
+    result = deepcopy(dict(payload))
+    result.pop("cacheHash", None)
+    result["cacheHash"] = _canonical_hash(result)
+    return result
+
+
+def _valid_sealed_cache(payload: Mapping[str, Any] | None) -> bool:
+    if not isinstance(payload, Mapping):
+        return False
+    supplied = str(payload.get("cacheHash", ""))
+    if not re.fullmatch(r"[0-9a-f]{64}", supplied):
+        return False
+    unsigned = dict(payload)
+    unsigned.pop("cacheHash", None)
+    return _canonical_hash(unsigned) == supplied
+
+
+def _history_is_valid(payload: Mapping[str, Any] | None) -> bool:
+    if not isinstance(payload, Mapping) or payload.get("status") not in {None, "READY"}:
+        return False
+    rows = payload.get("rows")
+    evidence = payload.get("corporateActionEvidence")
+    if not isinstance(rows, list) or not rows or not _valid_corporate_action_evidence(evidence):
+        return False
+    row_hash = _canonical_hash(rows)
+    if row_hash != payload.get("seriesHash"):
+        return False
+    events = payload.get("corporateActionEvents")
+    if not isinstance(events, Mapping) or _canonical_hash(events) != evidence.get("eventsHash"):
+        return False
+    return True
+
+
+def _research_cache_path(state_dir: Path, cutoff: date, symbol: str) -> Path:
+    safe_symbol = re.sub(r"[^A-Z0-9._-]", "_", symbol.upper())
+    return state_dir / "research" / cutoff.isoformat() / f"{safe_symbol}.json"
+
+
+def _load_research(state_dir: Path, cutoff: date, symbol: str) -> dict[str, Any] | None:
+    payload = _read_json(_research_cache_path(state_dir, cutoff, symbol))
+    if not _valid_sealed_cache(payload) or payload.get("dataCutoff") != cutoff.isoformat():
+        return None
+    result = payload.get("series")
+    return result if _history_is_valid(result) else None
+
+
+def _save_research(state_dir: Path, cutoff: date, symbol: str, series: Mapping[str, Any]) -> None:
+    if not _history_is_valid(series):
+        return
+    _write_json_atomic(
+        _research_cache_path(state_dir, cutoff, symbol),
+        _sealed_cache({"schemaVersion": 1, "dataCutoff": cutoff.isoformat(), "series": series}),
+    )
+
+
+def inventory_symbol_markets(inventory: Mapping[str, Any]) -> dict[str, str]:
+    """Return unique positive holdings by market, excluding cash and collateral annotations."""
+    result: dict[str, str] = {}
+    for category, market in (("台股", "tw"), ("美股", "us"), ("基金", "other")):
+        positions = inventory.get(category, {}) if isinstance(inventory, Mapping) else {}
+        if not isinstance(positions, Mapping):
+            continue
+        for raw_symbol, raw_units in positions.items():
+            symbol = str(raw_symbol or "").strip().upper()
+            if not symbol or symbol == "HISTORY":
+                continue
+            try:
+                units = float(raw_units)
+            except (TypeError, ValueError):
+                continue
+            if units > 0:
+                result[symbol] = market
+    return result
+
+
+def _automatic_document(payload: dict[str, Any], *, input_hash: str, validated_at: datetime, validated_by: str) -> dict[str, Any]:
+    payload["autoValidation"] = {
+        "algorithmVersion": AUTO_VALIDATION_ALGORITHM,
+        "validationStatus": "PASS",
+        "validatedAt": _iso_utc(validated_at),
+        "validatedBy": validated_by,
+        "inputHash": input_hash,
+        "checks": list(AUTO_VALIDATION_CHECKS),
+    }
+    payload["autoValidation"]["payloadHash"] = _canonical_hash(payload)
+    return payload
+
+
+def _automatic_policy_current(path: Path, *, today: date, expected_cutoff: date, product: str) -> tuple[bool, dict[str, Any] | None]:
+    payload = _read_json(path)
+    if not payload or str(payload.get("approvalStatus", "")).upper() != "AUTO_VALIDATED":
+        return False, payload
+    if payload.get("dataCutoff") != expected_cutoff.isoformat():
+        return False, payload
+    if product == "beta":
+        _, metadata, error = validate_active_policy_document(payload, as_of=today)
+    else:
+        metadata, error = validate_active_kelly_document(payload, as_of=today)
+    return error is None and bool(metadata) and metadata.get("lifecycle") == "CURRENT", payload
+
+
+def _candidate_cache(path: Path, *, cutoff: date) -> dict[str, Any] | None:
+    payload = _read_json(path)
+    if not _valid_sealed_cache(payload) or payload.get("dataCutoff") != cutoff.isoformat():
+        return None
+    assets = payload.get("assets")
+    if not isinstance(assets, Mapping):
+        return None
+    return payload
+
+
+def _candidate_record_ready(record: Any) -> bool:
+    if not isinstance(record, Mapping) or record.get("status") != "CANDIDATE":
+        return False
+    try:
+        beta = float(record.get("beta"))
+        observations = int(record.get("observations"))
+    except (TypeError, ValueError):
+        return False
+    return math.isfinite(beta) and beta >= 0 and observations >= 104 and _valid_corporate_action_evidence(
+        record.get("corporateActionEvidence"),
+        window_start=_as_date(record.get("windowStart")),
+        window_end=_as_date(record.get("windowEnd")),
+    )
+
+
+def _retry_due(record: Any, now: datetime) -> bool:
+    if not isinstance(record, Mapping):
+        return True
+    try:
+        last_attempt = datetime.fromisoformat(str(record.get("attemptedAt", "")).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if last_attempt.tzinfo is None:
+        return True
+    return now - last_attempt.astimezone(timezone.utc) >= RETRY_UNAVAILABLE_AFTER
+
+
+def _fetch_research_set(
+    symbols: Mapping[str, str], *, start: date, cutoff: date, token: str | None, fetcher: Any,
+) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    if not symbols:
+        return result
+    with ThreadPoolExecutor(max_workers=min(6, len(symbols))) as pool:
+        futures = {
+            pool.submit(fetcher, symbol, market=market, start=start, end=cutoff, token=token): (symbol, market)
+            for symbol, market in symbols.items()
+        }
+        for future in as_completed(futures):
+            symbol, market = futures[future]
+            try:
+                payload = future.result()
+            except Exception as error:  # noqa: BLE001 - sanitized source boundary
+                payload = {
+                    "symbol": symbol,
+                    "market": market,
+                    "currency": "USD" if market == "us" else "TWD",
+                    "rows": [],
+                    "source": None,
+                    "corporateActionStatus": "UNAVAILABLE",
+                    "status": "UNAVAILABLE",
+                    "reason": type(error).__name__,
+                }
+            normalized = dict(payload) if isinstance(payload, Mapping) else {}
+            normalized.setdefault("symbol", symbol)
+            normalized.setdefault("market", market)
+            normalized["status"] = "READY" if _history_is_valid(normalized) else "UNAVAILABLE"
+            result[symbol] = normalized
+    return result
+
+
+def ensure_quarterly_risk_policies(
+    inventory: Mapping[str, Any],
+    *,
+    state_dir: str | Path = ".risk-policy-cache",
+    candidate_dir: str | Path = ".private-build",
+    today: date | None = None,
+    now: datetime | None = None,
+    fetcher: Any = fetch_research_series,
+) -> dict[str, Any]:
+    """Prepare a verified Beta candidate and automatically activate independent Kelly policy."""
+    current_date = today or datetime.now(timezone.utc).astimezone().date()
+    now_utc = (now or _now_utc()).astimezone(timezone.utc)
+    cutoff = previous_quarter_cutoff(current_date)
+    completed_week_cutoff = last_completed_week_cutoff(cutoff)
+    effective_quarter = _quarter_label(current_date)
+    state = Path(state_dir)
+    candidates = Path(candidate_dir)
+    state.mkdir(parents=True, exist_ok=True)
+    candidates.mkdir(parents=True, exist_ok=True)
+    beta_active_path = state / "beta-policy-active.json"
+    kelly_active_path = state / "kelly-policy-active.json"
+    beta_candidate_cache_path = state / "beta-policy-candidate-cache.json"
+    beta_candidate_output = candidates / "beta-policy-candidate.json"
+    kelly_candidate_output = candidates / "kelly-quarterly-candidate.json"
+
+    held_markets = inventory_symbol_markets(inventory)
+    beta_symbols = {symbol: market for symbol, market in held_markets.items() if symbol not in FIXED_BETAS}
+    beta_source_path = beta_active_path if beta_active_path.exists() else Path("config/beta-policy-active.json")
+    kelly_source_path = kelly_active_path if kelly_active_path.exists() else Path("config/kelly-policy-active.json")
+    beta_is_current, beta_doc = _automatic_policy_current(
+        beta_source_path, today=current_date, expected_cutoff=cutoff, product="beta",
+    )
+    kelly_is_current, kelly_doc = _automatic_policy_current(
+        kelly_source_path, today=current_date, expected_cutoff=cutoff, product="kelly",
+    )
+    cached_candidate = _candidate_cache(beta_candidate_cache_path, cutoff=cutoff)
+    same_quarter_base: dict[str, Any] = {}
+    if beta_is_current and isinstance(beta_doc, Mapping):
+        same_quarter_base.update(beta_doc.get("assets", {}))
+    if cached_candidate:
+        for symbol, record in cached_candidate.get("assets", {}).items():
+            if symbol not in same_quarter_base or not _candidate_record_ready(same_quarter_base[symbol]):
+                same_quarter_base[symbol] = record
+
+    retry_symbols = {
+        symbol: market for symbol, market in beta_symbols.items()
+        if not _candidate_record_ready(same_quarter_base.get(symbol))
+        and _retry_due(same_quarter_base.get(symbol), now_utc)
+    }
+    beta_refresh_needed = not beta_is_current or bool(retry_symbols)
+    kelly_refresh_needed = not kelly_is_current
+    benchmark_needed = bool(retry_symbols) or kelly_refresh_needed
+    histories: dict[str, dict[str, Any]] = {}
+    benchmark = _load_research(state, cutoff, "006208")
+    fx_history = _load_research(state, cutoff, "TWD=X")
+
+    fetch_symbols: dict[str, str] = {}
+    if benchmark_needed and benchmark is None:
+        fetch_symbols["006208"] = "tw"
+    if beta_refresh_needed and retry_symbols:
+        fetch_symbols.update(retry_symbols)
+    if fx_history is None and any(market == "us" for market in retry_symbols.values()):
+        fetch_symbols["TWD=X"] = "us"
+    token = os.getenv("FINMIND_TOKEN", "").strip() or None
+    if fetch_symbols:
+        start = cutoff - timedelta(days=6 * 365 + 2)
+        fetched = _fetch_research_set(fetch_symbols, start=start, cutoff=cutoff, token=token, fetcher=fetcher)
+        for symbol, payload in fetched.items():
+            if payload.get("status") == "READY":
+                _save_research(state, cutoff, symbol, payload)
+            histories[symbol] = payload
+        benchmark = benchmark or histories.get("006208")
+        fx_history = fx_history or histories.get("TWD=X")
+
+    if beta_refresh_needed:
+        fresh_asset_symbols = set(retry_symbols)
+        fresh_histories = {symbol: histories[symbol] for symbol in fresh_asset_symbols if symbol in histories}
+        benchmark_rows = benchmark.get("rows", []) if isinstance(benchmark, Mapping) else []
+        fx_rows = fx_history.get("rows", []) if isinstance(fx_history, Mapping) else []
+        estimates = estimate_beta_policy(
+            fresh_histories,
+            benchmark_rows,
+            fx_rows=fx_rows,
+            cutoff=cutoff,
+        ) if fresh_asset_symbols else {"assets": {}}
+        candidate_assets = deepcopy(same_quarter_base)
+        for symbol in fresh_asset_symbols:
+            record = deepcopy(estimates.get("assets", {}).get(symbol) or {
+                "status": "INSUFFICIENT_EVIDENCE", "reason": "research series unavailable", "observations": 0,
+            })
+            record["attemptedAt"] = _iso_utc(now_utc)
+            candidate_assets[symbol] = record
+        for symbol in beta_symbols:
+            if symbol not in candidate_assets:
+                candidate_assets[symbol] = {
+                    "status": "INSUFFICIENT_EVIDENCE",
+                    "reason": "no verified estimate for current holding",
+                    "observations": 0,
+                    "attemptedAt": _iso_utc(now_utc),
+                }
+        evidence_hashes = {
+            symbol: (record.get("corporateActionEvidence") or {}).get("seriesHash")
+            for symbol, record in sorted(candidate_assets.items())
+            if isinstance(record, Mapping)
+        }
+        input_hash = _canonical_hash({
+            "dataCutoff": cutoff.isoformat(),
+            "completedWeekCutoff": completed_week_cutoff.isoformat(),
+            "benchmarkSeriesHash": (benchmark or {}).get("seriesHash") if isinstance(benchmark, Mapping) else None,
+            "fxSeriesHash": (fx_history or {}).get("seriesHash") if isinstance(fx_history, Mapping) else None,
+            "assetSeriesHashes": evidence_hashes,
+            "holdings": sorted(beta_symbols),
+        })
+        candidate_payload = {
+            "schemaVersion": 1,
+            "status": "CANDIDATE" if any(_candidate_record_ready(record) for record in candidate_assets.values()) or not beta_symbols else "INSUFFICIENT_EVIDENCE",
+            "approvalStatus": "AUTOMATIC_CANDIDATE",
+            "policyVersion": f"candidate-{effective_quarter}-{input_hash[:12]}",
+            "algorithmVersion": AUTO_VALIDATION_ALGORITHM,
+            "benchmark": "006208.TW/TWD",
+            "dataCutoff": cutoff.isoformat(),
+            "completedWeekCutoff": completed_week_cutoff.isoformat(),
+            "effectiveFromQuarter": effective_quarter,
+            "referenceThroughQuarter": _quarter_label(date(current_date.year + (1 if current_date.month >= 10 else 0), ((current_date.month - 1 + 3) % 12) + 1, 1)),
+            "assets": candidate_assets,
+            "contentHash": _canonical_hash(candidate_assets),
+            "inputHash": input_hash,
+            "updatedAt": _iso_utc(now_utc),
+        }
+        _write_json_atomic(beta_candidate_output, candidate_payload)
+        _write_json_atomic(beta_candidate_cache_path, _sealed_cache(candidate_payload))
+        _write_json_atomic(state / "beta-policy-candidate.json", _sealed_cache(candidate_payload))
+        immutable_candidate = candidates / f"beta-policy-candidate-{effective_quarter}-{input_hash[:16]}.json"
+        if not immutable_candidate.exists():
+            _write_json_atomic(immutable_candidate, candidate_payload)
+
+    kelly_summary: dict[str, Any] = {"status": "REUSED" if kelly_is_current else "NOT_READY"}
+    if kelly_refresh_needed:
+        benchmark = benchmark or _load_research(state, cutoff, "006208")
+        benchmark_evidence = (benchmark or {}).get("corporateActionEvidence") if isinstance(benchmark, Mapping) else None
+        benchmark_rows = (benchmark or {}).get("rows", []) if isinstance(benchmark, Mapping) else []
+        weeklies = weekly_research_series(
+            benchmark_rows,
+            price_key="totalReturnIndex",
+            cutoff=completed_week_cutoff,
+        )
+        five_year_start = completed_week_cutoff - timedelta(days=5 * 365)
+        prices = [
+            row for row in weeklies
+            if (_as_date(row.get("date")) or date.min) >= five_year_start - timedelta(days=7)
+        ]
+        kelly_result = build_quarterly_kelly_candidate(prices, data_cutoff=cutoff.isoformat())
+        window_start = _as_date(prices[0].get("date")) if prices else None
+        window_end = _as_date(prices[-1].get("date")) if prices else None
+        kelly_window_complete = bool(
+            window_start is not None
+            and window_end is not None
+            and window_start <= five_year_start + timedelta(days=7)
+            and completed_week_cutoff - window_end <= timedelta(days=10)
+        )
+        kelly_evidence_ok = _valid_corporate_action_evidence(
+            benchmark_evidence,
+            window_start=window_start,
+            window_end=window_end,
+        )
+        kelly_ready = (
+            kelly_result.get("status") == "CANDIDATE"
+            and kelly_evidence_ok
+            and len(prices) >= 261
+            and kelly_window_complete
+            and all(_as_date(row.get("date")) is not None and _as_date(row.get("date")) <= completed_week_cutoff for row in prices)
+        )
+        kelly_reason = None
+        if not kelly_ready:
+            if kelly_result.get("status") != "CANDIDATE":
+                kelly_reason = kelly_result.get("reason") or "completed five-year sample unavailable"
+            elif not kelly_window_complete:
+                kelly_reason = "benchmark completed-week window is stale or does not cover five years"
+            elif not kelly_evidence_ok:
+                kelly_reason = "benchmark corporate-action evidence unavailable"
+            else:
+                kelly_reason = "completed five-year weekly sample unavailable"
+        input_hash = _canonical_hash({
+            "dataCutoff": cutoff.isoformat(),
+            "completedWeekCutoff": completed_week_cutoff.isoformat(),
+            "benchmarkSeriesHash": (benchmark or {}).get("seriesHash") if isinstance(benchmark, Mapping) else None,
+            "corporateActionEventsHash": (benchmark_evidence or {}).get("eventsHash") if isinstance(benchmark_evidence, Mapping) else None,
+            "weeklyTotalReturnPrices": prices,
+        })
+        kelly_candidate = {
+            "schemaVersion": 1,
+            "status": "CANDIDATE" if kelly_ready else "INSUFFICIENT_EVIDENCE",
+            "reason": kelly_reason,
+            "mu": kelly_result.get("mu") if kelly_ready else None,
+            "sigma": kelly_result.get("sigma") if kelly_ready else None,
+            "halfKellyLimit": kelly_result.get("halfKellyLimit") if kelly_ready else None,
+            "dataCutoff": cutoff.isoformat(),
+            "windowStart": window_start.isoformat() if window_start else None,
+            "windowEnd": window_end.isoformat() if window_end else None,
+            "observations": kelly_result.get("observations", len(prices)),
+            "source": (benchmark or {}).get("source") if isinstance(benchmark, Mapping) else None,
+            "corporateActionEvidence": benchmark_evidence,
+            "inputHash": input_hash,
+            "effectiveFromQuarter": effective_quarter,
+            "referenceThroughQuarter": candidate_payload.get("referenceThroughQuarter") if beta_refresh_needed else _quarter_label(date(current_date.year + (1 if current_date.month >= 10 else 0), ((current_date.month - 1 + 3) % 12) + 1, 1)),
+            "updatedAt": _iso_utc(now_utc),
+        }
+        _write_json_atomic(kelly_candidate_output, kelly_candidate)
+        immutable_kelly = candidates / f"kelly-quarterly-candidate-{effective_quarter}-{input_hash[:16]}.json"
+        if not immutable_kelly.exists():
+            _write_json_atomic(immutable_kelly, kelly_candidate)
+        if kelly_ready:
+            active_kelly = {
+                **kelly_candidate,
+                "status": "ACTIVE",
+                "approvalStatus": "AUTO_VALIDATED",
+                "activeVersion": f"{effective_quarter}-{input_hash[:12]}",
+                "policyVersion": f"{effective_quarter}-{input_hash[:12]}",
+                "contentHash": _canonical_hash({key: value for key, value in kelly_candidate.items() if key not in {"updatedAt", "status", "reason"}}),
+            }
+            active_kelly = _automatic_document(
+                active_kelly,
+                input_hash=input_hash,
+                validated_at=now_utc,
+                validated_by="trusted-main-workflow",
+            )
+            _, error = validate_active_kelly_document(active_kelly, as_of=current_date)
+            if error is None:
+                _write_json_atomic(kelly_active_path, active_kelly)
+                kelly_summary = {"status": "AUTO_VALIDATED", "policyVersion": active_kelly["activeVersion"], "dataCutoff": cutoff.isoformat()}
+            else:
+                kelly_summary = {"status": "REJECTED", "reasonCode": error}
+        else:
+            kelly_summary = {"status": "INSUFFICIENT_EVIDENCE", "reasonCode": kelly_candidate["reason"]}
+
+    summary = {
+        "schemaVersion": 1,
+        "algorithmVersion": AUTO_VALIDATION_ALGORITHM,
+        "effectiveQuarter": effective_quarter,
+        "dataCutoff": cutoff.isoformat(),
+        "completedWeekCutoff": completed_week_cutoff.isoformat(),
+        "beta": {
+            "status": "CANDIDATE_READY" if beta_refresh_needed and beta_candidate_output.exists() else "REUSED" if beta_is_current else "WAITING_FOR_PORTFOLIO_QUALIFICATION",
+            "symbolsRequested": sorted(beta_symbols),
+            "retryAfterHours": 24,
+            "candidatePath": str(beta_candidate_output),
+        },
+        "kelly": kelly_summary,
+        "sourceFailures": sorted(
+            symbol for symbol, value in histories.items()
+            if value.get("status") != "READY"
+        ),
+    }
+    _write_json_atomic(candidates / "quarterly-risk-policy-summary.json", summary)
+    return summary
+
+
+def promote_beta_candidate_if_qualified(
+    asset_values_twd: Mapping[str, float],
+    total_asset: float,
+    total_debt: float,
+    *,
+    market_by_symbol: Mapping[str, str],
+    state_dir: str | Path = ".risk-policy-cache",
+    today: date | None = None,
+    now: datetime | None = None,
+    validated_by: str = "trusted-main-workflow",
+) -> dict[str, Any]:
+    """Promote the quarterly Beta only after this run's actual NAV coverage passes."""
+    current_date = today or datetime.now(timezone.utc).astimezone().date()
+    now_utc = (now or _now_utc()).astimezone(timezone.utc)
+    state = Path(state_dir)
+    candidate_path = state / "beta-policy-candidate.json"
+    active_path = state / "beta-policy-active.json"
+    candidate = _read_json(candidate_path)
+    if (
+        not isinstance(candidate, Mapping)
+        or not _valid_sealed_cache(candidate)
+        or candidate.get("dataCutoff") != previous_quarter_cutoff(current_date).isoformat()
+    ):
+        return {"status": "NO_CURRENT_CANDIDATE", "reasonCode": "quarter_candidate_missing"}
+    input_hash = str(candidate.get("inputHash", ""))
+    if not re.fullmatch(r"[0-9a-f]{64}", input_hash):
+        return {"status": "REJECTED", "reasonCode": "candidate_input_hash_invalid"}
+    assets = candidate.get("assets")
+    if not isinstance(assets, Mapping) or candidate.get("contentHash") != _canonical_hash(assets):
+        return {"status": "REJECTED", "reasonCode": "candidate_content_hash_invalid"}
+    existing = _read_json(active_path)
+    if (
+        isinstance(existing, Mapping)
+        and existing.get("dataCutoff") == candidate.get("dataCutoff")
+        and existing.get("inputHash") == input_hash
+        and str(existing.get("approvalStatus", "")).upper() == "AUTO_VALIDATED"
+    ):
+        existing_betas, _, existing_error = validate_active_policy_document(existing, as_of=current_date)
+        if existing_error is None:
+            existing_result = calculate_nav_beta(
+                asset_values_twd,
+                total_asset,
+                total_debt,
+                {**FIXED_BETAS, **existing_betas},
+                market_by_symbol=market_by_symbol,
+            )
+            if existing_result.get("status") == "READY":
+                return {
+                    "status": "ALREADY_ACTIVE",
+                    "policyVersion": existing.get("policyVersion"),
+                    "dataCutoff": existing.get("dataCutoff"),
+                    "coveragePct": existing_result.get("coveragePct"),
+                }
+    active = {
+        key: deepcopy(value) for key, value in candidate.items()
+        if key not in {"cacheHash", "updatedAt", "attemptedAt"}
+    }
+    active.update({
+        "status": "ACTIVE",
+        "approvalStatus": "AUTO_VALIDATED",
+        "policyVersion": str(candidate.get("policyVersion") or f"{_quarter_label(current_date)}-{input_hash[:12]}"),
+        "activeVersion": f"{_quarter_label(current_date)}-{input_hash[:12]}",
+    })
+    active = _automatic_document(
+        active,
+        input_hash=input_hash,
+        validated_at=now_utc,
+        validated_by=validated_by,
+    )
+    beta_map, _, error = validate_active_policy_document(active, as_of=current_date)
+    if error:
+        return {"status": "REJECTED", "reasonCode": error}
+    result = calculate_nav_beta(
+        asset_values_twd,
+        total_asset,
+        total_debt,
+        {**FIXED_BETAS, **beta_map},
+        market_by_symbol=market_by_symbol,
+    )
+    if result.get("status") != "READY":
+        return {
+            "status": "WAITING_FOR_PORTFOLIO_QUALIFICATION",
+            "reasonCode": result.get("quality") or "beta_coverage_unavailable",
+            "coveragePct": result.get("coveragePct"),
+            "missingSymbols": sorted(item.get("symbol", "") for item in result.get("missing", [])),
+        }
+    _write_json_atomic(active_path, active)
+    return {
+        "status": "AUTO_ACTIVATED",
+        "policyVersion": active["policyVersion"],
+        "dataCutoff": active["dataCutoff"],
+        "coveragePct": result.get("coveragePct"),
+    }
+
+
+def active_policy_path(state_dir: str | Path, filename: str, fallback: str) -> str:
+    path = Path(state_dir) / filename
+    return str(path) if path.exists() else fallback

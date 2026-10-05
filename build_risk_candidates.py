@@ -1,7 +1,8 @@
-"""Build private quarterly Beta and Kelly review artifacts.
+"""Build private quarterly Beta and Kelly research candidates.
 
-This command is intentionally review-only: it never changes the active
-policy, portfolio ledger, Telegram markers, or public Pages files.
+Production activation is performed inside the settlement pipeline after the
+actual holdings and NAV coverage pass. This standalone command never promotes
+a candidate or writes portfolio data.
 """
 
 from __future__ import annotations
@@ -128,7 +129,7 @@ def main() -> int:
         "effectiveFromQuarter": candidate["effectiveFromQuarter"],
         "referenceThroughQuarter": candidate["referenceThroughQuarter"],
         "corporateActionStatus": benchmark.get("corporateActionStatus", "UNAVAILABLE"),
-        "approvalStatus": "PENDING" if kelly.get("status") == "CANDIDATE" else "NOT_READY",
+        "approvalStatus": "AUTOMATIC_CANDIDATE" if kelly.get("status") == "CANDIDATE" else "NOT_READY",
     }
     _write(output / "kelly-quarterly-candidate.json", kelly_candidate)
     immutable_kelly_path = output / f"kelly-quarterly-candidate-{kelly_candidate['candidateId']}.json"

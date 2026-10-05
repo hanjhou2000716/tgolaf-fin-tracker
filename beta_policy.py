@@ -1,9 +1,10 @@
 """Versioned, point-in-time Beta policy and research-price helpers.
 
-The dashboard consumes only an approved policy document.  Candidate building
-is deliberately separate so a new estimate can never silently become a live
-risk input.  Prices are normalised from raw executable closes plus explicit
-split/dividend events; provider ``Adj Close`` values are never accepted.
+The dashboard consumes a human-approved legacy policy or a policy carrying
+verified automatic-validation evidence. Candidate research stays separate
+until source quality and live portfolio coverage pass. Prices are normalised
+from raw closes plus explicit split/dividend events; provider ``Adj Close``
+values are never accepted.
 """
 
 from __future__ import annotations
@@ -23,6 +24,16 @@ from risk import estimate_beta_from_returns, quarterly_half_kelly
 
 
 POLICY_SCHEMA_VERSION = 1
+AUTO_VALIDATION_ALGORITHM = "quarterly-risk-v2"
+AUTO_VALIDATION_REQUIRED_CHECKS = frozenset({
+    "point_in_time_cutoff",
+    "completed_week_window",
+    "paired_week_observations",
+    "corporate_action_response_evidence",
+    "source_content_hash",
+    "finite_coefficients",
+    "kelly_formula",
+})
 MIN_WEEKLY_OBSERVATIONS = 104
 DEFAULT_ACTIVE_POLICY_PATH = "config/beta-policy-active.json"
 DEFAULT_ACTIVE_KELLY_PATH = "config/kelly-policy-active.json"
@@ -54,6 +65,74 @@ def _as_date(value: Any) -> date | None:
 
 def _symbol(value: Any) -> str:
     return str(value or "").strip().upper()
+
+
+def _canonical_hash(payload: Any) -> str:
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _auto_validation_error(payload: Mapping[str, Any]) -> str | None:
+    validation = payload.get("autoValidation")
+    if not isinstance(validation, Mapping):
+        return "automatic validation evidence missing"
+    if validation.get("algorithmVersion") != AUTO_VALIDATION_ALGORITHM:
+        return "automatic validation algorithm mismatch"
+    if str(validation.get("validationStatus", "")).upper() != "PASS":
+        return "automatic validation did not pass"
+    checks = validation.get("checks")
+    if not isinstance(checks, (list, tuple)) or not AUTO_VALIDATION_REQUIRED_CHECKS.issubset(
+        {str(item) for item in checks}
+    ):
+        return "automatic validation checks incomplete"
+    if not str(validation.get("validatedBy", "")).strip():
+        return "automatic validation source missing"
+    try:
+        validated_at = datetime.fromisoformat(str(validation.get("validatedAt", "")).replace("Z", "+00:00"))
+    except ValueError:
+        return "automatic validation timestamp invalid"
+    if validated_at.tzinfo is None:
+        return "automatic validation timestamp has no timezone"
+    input_hash = str(validation.get("inputHash", ""))
+    payload_hash = str(validation.get("payloadHash", ""))
+    if not re.fullmatch(r"[0-9a-f]{64}", input_hash) or not re.fullmatch(r"[0-9a-f]{64}", payload_hash):
+        return "automatic validation hash missing"
+    unsigned = dict(payload)
+    unsigned_validation = dict(validation)
+    unsigned_validation.pop("payloadHash", None)
+    unsigned["autoValidation"] = unsigned_validation
+    if _canonical_hash(unsigned) != payload_hash:
+        return "automatic policy content hash mismatch"
+    return None
+
+
+def _valid_corporate_action_evidence(value: Any, *, window_start: date | None = None, window_end: date | None = None) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    if value.get("provider") != "Yahoo Chart API" or value.get("eventMapPresent") is not True:
+        return False
+    if not re.fullmatch(r"[0-9a-f]{64}", str(value.get("eventsHash", ""))):
+        return False
+    if not re.fullmatch(r"[0-9a-f]{64}", str(value.get("seriesHash", ""))):
+        return False
+    requested_events = value.get("requestedEvents")
+    if not isinstance(requested_events, (list, tuple)) or not {"history", "splits", "dividends"}.issubset(
+        {str(item).lower() for item in requested_events}
+    ):
+        return False
+    requested_start = _as_date(value.get("requestedStart"))
+    requested_end = _as_date(value.get("requestedEnd"))
+    if requested_start is None or requested_end is None or requested_start > requested_end:
+        return False
+    if window_start is not None and requested_start > window_start:
+        return False
+    if window_end is not None and requested_end < window_end:
+        return False
+    try:
+        verified_at = datetime.fromisoformat(str(value.get("verifiedAt", "")).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return verified_at.tzinfo is not None
 
 
 def yahoo_chart_symbols(symbol: str, market: str) -> tuple[str, ...]:
@@ -119,32 +198,61 @@ def fetch_yahoo_research_series(
                         "low": quote.get("low", [None] * len(timestamps))[index] if index < len(quote.get("low", [])) else None,
                         "close": closes[index],
                     })
-                events = result.get("events") or {}
+                raw_events = result.get("events")
+                events = raw_events if isinstance(raw_events, Mapping) else {}
                 splits = []
                 for item in (events.get("splits") or {}).values():
-                    if isinstance(item, Mapping):
-                        splits.append({
-                            "date": datetime.fromtimestamp(float(item.get("date")), tz=timezone.utc).date().isoformat(),
-                            "numerator": item.get("numerator"),
-                            "denominator": item.get("denominator"),
-                        })
+                    if not isinstance(item, Mapping):
+                        raise ValueError("invalid split event evidence")
+                    event_timestamp = _finite(item.get("date"))
+                    numerator, denominator = _finite(item.get("numerator")), _finite(item.get("denominator"))
+                    if event_timestamp is None or numerator is None or denominator is None or numerator <= 0 or denominator <= 0:
+                        raise ValueError("invalid split event evidence")
+                    splits.append({
+                        "date": datetime.fromtimestamp(event_timestamp, tz=timezone.utc).date().isoformat(),
+                        "numerator": numerator,
+                        "denominator": denominator,
+                    })
                 dividends = []
                 for item in (events.get("dividends") or {}).values():
-                    if isinstance(item, Mapping):
-                        dividends.append({
-                            "date": datetime.fromtimestamp(float(item.get("date")), tz=timezone.utc).date().isoformat(),
-                            "amount": item.get("amount"),
-                        })
+                    if not isinstance(item, Mapping):
+                        raise ValueError("invalid dividend event evidence")
+                    event_timestamp = _finite(item.get("date"))
+                    amount = _finite(item.get("amount"))
+                    if event_timestamp is None or amount is None or amount < 0:
+                        raise ValueError("invalid dividend event evidence")
+                    dividends.append({
+                        "date": datetime.fromtimestamp(event_timestamp, tz=timezone.utc).date().isoformat(),
+                        "amount": amount,
+                    })
                 normalized = normalize_research_price(rows, splits=splits, dividends=dividends)
                 if not normalized:
                     raise ValueError("empty normalized research series")
+                events_hash = _canonical_hash(raw_events) if isinstance(raw_events, Mapping) else None
+                series_hash = _canonical_hash(normalized)
+                corporate_evidence = None
+                if events_hash:
+                    corporate_evidence = {
+                        "provider": "Yahoo Chart API",
+                        "eventMapPresent": True,
+                        "eventsHash": events_hash,
+                        "seriesHash": series_hash,
+                        "requestedStart": start.isoformat(),
+                        "requestedEnd": end.isoformat(),
+                        "verifiedAt": datetime.now(timezone.utc).isoformat(),
+                        "requestedEvents": ["history", "splits", "dividends"],
+                        "eventCounts": {"splits": len(splits), "dividends": len(dividends)},
+                    }
                 return {
                     "symbol": _symbol(symbol),
                     "market": str(market).lower(),
                     "currency": "USD" if str(market).lower() in {"us", "usa", "usd"} else "TWD",
                     "rows": normalized,
+                    "corporateActionEvents": dict(events),
                     "source": f"Yahoo Chart raw OHLC ({chart_symbol}) + research-price contract v1",
-                    "corporateActionStatus": "PASS",
+                    "corporateActionStatus": "PASS" if corporate_evidence else "UNAVAILABLE",
+                    "corporateActionEvidence": corporate_evidence,
+                    "seriesHash": series_hash,
                     "attempts": attempt + 1,
                 }
             except Exception as error:  # noqa: BLE001 - diagnostic boundary
@@ -212,7 +320,10 @@ def fetch_finmind_research_series(
             "currency": "TWD",
             "rows": normalized,
             "source": "FinMind TaiwanStockPrice raw OHLC + research-price contract v1",
-            "corporateActionStatus": "PASS",
+            # FinMind's price endpoint does not return the split/dividend
+            # evidence required by the automatic quarterly policy. The
+            # selector will use the raw-chart fallback for research inputs.
+            "corporateActionStatus": "UNAVAILABLE",
             "attempts": 1,
         }
     except Exception as error:  # noqa: BLE001 - source boundary
@@ -232,7 +343,7 @@ def fetch_research_series(symbol: str, *, market: str, start: date, end: date, t
     """Apply the primary Taiwan source and raw-chart fallback policy."""
     if str(market).lower() in {"tw", "taiwan", "twd"} and token:
         primary = fetch_finmind_research_series(symbol, token=token, start=start, end=end, http_get=http_get)
-        if primary and primary.get("rows"):
+        if primary and primary.get("rows") and primary.get("corporateActionStatus") == "PASS":
             return primary
     return fetch_yahoo_research_series(symbol, market=market, start=start, end=end, http_get=http_get)
 
@@ -402,7 +513,10 @@ def _weekly_rows(rows: list[Mapping[str, Any]], *, price_key: str, currency: str
             candidates = [item for item in fx if item <= item_date]
             if not candidates:
                 continue
-            value *= fx[max(candidates)]
+            fx_date = max(candidates)
+            if (item_date - fx_date).days > 7:
+                continue
+            value *= fx[fx_date]
         key = item_date.isocalendar()[:2]
         previous = result.get(key)
         if previous is None or item_date > previous[0]:
@@ -447,7 +561,7 @@ def estimate_beta_policy(
     cutoff: date | str | None = None,
     min_observations: int = MIN_WEEKLY_OBSERVATIONS,
 ) -> dict[str, Any]:
-    """Build a review-only candidate policy from validated research series."""
+    """Build a point-in-time candidate from contiguous, validated weekly data."""
     cutoff_date = _as_date(cutoff) or previous_quarter_cutoff()
     # A quarter is complete only after the Friday close. Exclude a partial
     # final week when the calendar quarter ends earlier in the week.
@@ -466,21 +580,55 @@ def estimate_beta_policy(
             key for key in sorted(set(benchmark).intersection(weekly))
             if window_start <= benchmark[key][0] <= completed_week_cutoff
         ]
-        asset_prices = [weekly[key][1] for key in common]
-        benchmark_prices = [benchmark[key][1] for key in common]
-        asset_returns = [asset_prices[index] / asset_prices[index - 1] - 1 for index in range(1, len(asset_prices))]
-        benchmark_returns = [benchmark_prices[index] / benchmark_prices[index - 1] - 1 for index in range(1, len(benchmark_prices))]
+        latest_pair_fresh = False
+        if common:
+            latest_key = common[-1]
+            benchmark_latest = benchmark[latest_key][0]
+            asset_latest = weekly[latest_key][0]
+            latest_pair_fresh = (
+                timedelta(0) <= completed_week_cutoff - benchmark_latest <= timedelta(days=10)
+                and timedelta(0) <= completed_week_cutoff - asset_latest <= timedelta(days=10)
+            )
+        pair_start = max(benchmark[common[0]][0], weekly[common[0]][0]) if common else window_start
+        pair_end = min(benchmark[common[-1]][0], weekly[common[-1]][0]) if common else completed_week_cutoff
+        asset_returns, benchmark_returns = [], []
+        for previous_key, current_key in zip(common, common[1:]):
+            previous_date, previous_asset = weekly[previous_key]
+            current_date, current_asset = weekly[current_key]
+            previous_benchmark_date = benchmark[previous_key][0]
+            current_benchmark_date = benchmark[current_key][0]
+            previous_benchmark = benchmark[previous_key][1]
+            current_benchmark = benchmark[current_key][1]
+            # Do not disguise a skipped market week as one weekly return.
+            if not (
+                0 < (current_date - previous_date).days <= 10
+                and 0 < (current_benchmark_date - previous_benchmark_date).days <= 10
+            ):
+                continue
+            asset_returns.append(current_asset / previous_asset - 1)
+            benchmark_returns.append(current_benchmark / previous_benchmark - 1)
         estimate = estimate_beta_from_returns(asset_returns, benchmark_returns, min_observations=min_observations)
         corporate_status = str(record.get("corporateActionStatus", "UNAVAILABLE")) if isinstance(record, Mapping) else "UNAVAILABLE"
+        corporate_evidence = record.get("corporateActionEvidence") if isinstance(record, Mapping) else None
         source = str(record.get("source", "")) if isinstance(record, Mapping) else ""
-        if estimate.get("status") != "READY" or corporate_status != "PASS" or not source:
+        evidence_ok = _valid_corporate_action_evidence(
+            corporate_evidence,
+            window_start=pair_start,
+            window_end=pair_end,
+        )
+        if estimate.get("status") != "READY" or not latest_pair_fresh or corporate_status != "PASS" or not evidence_ok or not source:
+            if not latest_pair_fresh:
+                reason = "latest paired observation is stale"
+            else:
+                reason = estimate.get("reason") or "corporate action or source evidence unavailable"
             assets[symbol] = {
                 "status": "INSUFFICIENT_EVIDENCE",
-                "reason": estimate.get("reason") or "corporate action or source evidence unavailable",
+                "reason": reason,
                 "observations": estimate.get("observations", len(asset_returns)),
-                "windowStart": window_start.isoformat(),
-                "windowEnd": completed_week_cutoff.isoformat(),
+                "windowStart": pair_start.isoformat(),
+                "windowEnd": pair_end.isoformat(),
                 "corporateActionStatus": corporate_status,
+                "corporateActionEvidence": corporate_evidence,
                 "source": source or None,
             }
             continue
@@ -488,10 +636,11 @@ def estimate_beta_policy(
             "status": "CANDIDATE",
             "beta": round(float(estimate["beta"]), 8),
             "observations": int(estimate["observations"]),
-            "windowStart": window_start.isoformat(),
-            "windowEnd": completed_week_cutoff.isoformat(),
+            "windowStart": pair_start.isoformat(),
+            "windowEnd": pair_end.isoformat(),
             "method": "paired_weekly_split_adjusted_twd_returns",
             "corporateActionStatus": corporate_status,
+            "corporateActionEvidence": corporate_evidence,
             "source": source,
             "market": str(record.get("market", "other")).lower(),
         }
@@ -499,7 +648,7 @@ def estimate_beta_policy(
     return {
         "schemaVersion": POLICY_SCHEMA_VERSION,
         "status": "CANDIDATE" if any(item.get("status") == "CANDIDATE" for item in assets.values()) else "INSUFFICIENT_EVIDENCE",
-        "approvalStatus": "PENDING",
+        "approvalStatus": "AUTOMATIC_CANDIDATE",
         "policyVersion": f"candidate-{cutoff_date.isoformat()}",
         "benchmark": "006208.TW/TWD",
         "dataCutoff": cutoff_date.isoformat(),
@@ -511,11 +660,16 @@ def estimate_beta_policy(
 
 
 def validate_active_policy_document(payload: Mapping[str, Any], *, as_of: date | None = None, min_observations: int = MIN_WEEKLY_OBSERVATIONS, allow_stale_reference: bool = False) -> tuple[dict[str, float], dict[str, Any] | None, str | None]:
-    """Validate an approved policy before it can feed the live calculator."""
+    """Validate a human-approved legacy or automatically validated policy."""
     if not isinstance(payload, Mapping) or payload.get("schemaVersion") != POLICY_SCHEMA_VERSION:
         return {}, None, "policy schema version mismatch"
-    if str(payload.get("status", "")).upper() != "ACTIVE" or str(payload.get("approvalStatus", "")).upper() != "APPROVED":
-        return {}, None, "policy is not approved and active"
+    approval_status = str(payload.get("approvalStatus", "")).upper()
+    if str(payload.get("status", "")).upper() != "ACTIVE" or approval_status not in {"APPROVED", "AUTO_VALIDATED"}:
+        return {}, None, "policy is not validated and active"
+    if approval_status == "AUTO_VALIDATED":
+        auto_error = _auto_validation_error(payload)
+        if auto_error:
+            return {}, None, auto_error
     cutoff = _as_date(payload.get("dataCutoff"))
     today = as_of or date.today()
     if cutoff is None or cutoff > previous_quarter_cutoff(today):
@@ -537,6 +691,8 @@ def validate_active_policy_document(payload: Mapping[str, Any], *, as_of: date |
     supplied_hash = str(payload.get("contentHash") or "")
     if supplied_hash and supplied_hash != expected_hash:
         return {}, None, "policy content hash mismatch"
+    if approval_status == "AUTO_VALIDATED" and not supplied_hash:
+        return {}, None, "automatically validated Beta content hash missing"
     betas: dict[str, float] = {}
     for raw_symbol, record in assets.items():
         symbol = _symbol(raw_symbol)
@@ -544,12 +700,28 @@ def validate_active_policy_document(payload: Mapping[str, Any], *, as_of: date |
             continue
         if not isinstance(record, Mapping):
             return {}, None, f"invalid policy record for {symbol}"
+        record_status = str(record.get("status", "CANDIDATE" if approval_status == "APPROVED" else "")).upper()
+        if record_status == "INSUFFICIENT_EVIDENCE":
+            continue
+        if record_status not in {"CANDIDATE", "AUTO_VALIDATED", "READY"}:
+            return {}, None, f"invalid Beta status for {symbol}"
         beta = _finite(record.get("beta"))
         observations = record.get("observations")
         if beta is None or beta < 0 or not isinstance(observations, int) or observations < min_observations:
             return {}, None, f"invalid Beta evidence for {symbol}"
         if str(record.get("corporateActionStatus", "")).upper() != "PASS":
             return {}, None, f"corporate action not validated for {symbol}"
+        if approval_status == "AUTO_VALIDATED":
+            window_start = _as_date(record.get("windowStart"))
+            window_end = _as_date(record.get("windowEnd"))
+            if window_start is None or window_end is None or window_end > last_completed_week_cutoff(cutoff):
+                return {}, None, f"Beta point-in-time window invalid for {symbol}"
+            if not _valid_corporate_action_evidence(
+                record.get("corporateActionEvidence"),
+                window_start=window_start,
+                window_end=window_end,
+            ):
+                return {}, None, f"corporate action evidence invalid for {symbol}"
         if not str(record.get("source", "")).strip():
             return {}, None, f"source missing for {symbol}"
         betas[symbol] = beta
@@ -561,6 +733,8 @@ def validate_active_policy_document(payload: Mapping[str, Any], *, as_of: date |
         "effectiveFromQuarter": _quarter_label(_parse_quarter_label(payload.get("effectiveFromQuarter")) or (_quarter_index(cutoff) + 1)),
         "referenceThroughQuarter": _quarter_label(_parse_quarter_label(payload.get("referenceThroughQuarter")) or (_quarter_index(cutoff) + 2)),
         "lifecycle": lifecycle,
+        "approvalStatus": approval_status,
+        "algorithmVersion": (payload.get("autoValidation") or {}).get("algorithmVersion") if isinstance(payload.get("autoValidation"), Mapping) else "legacy-manual",
     }
     return betas, metadata, None
 
@@ -588,11 +762,16 @@ def load_active_beta_policy(path: str | Path | None = None, *, as_of: date | Non
 
 
 def validate_active_kelly_document(payload: Mapping[str, Any], *, as_of: date | None = None, allow_stale_reference: bool = False) -> tuple[dict[str, Any] | None, str | None]:
-    """Validate a manually approved quarterly Kelly parameter document."""
+    """Validate a human-approved legacy or automatically validated Kelly policy."""
     if not isinstance(payload, Mapping) or payload.get("schemaVersion") != POLICY_SCHEMA_VERSION:
         return None, "Kelly policy schema version mismatch"
-    if str(payload.get("status", "")).upper() != "ACTIVE" or str(payload.get("approvalStatus", "")).upper() != "APPROVED":
-        return None, "Kelly policy is not approved and active"
+    approval_status = str(payload.get("approvalStatus", "")).upper()
+    if str(payload.get("status", "")).upper() != "ACTIVE" or approval_status not in {"APPROVED", "AUTO_VALIDATED"}:
+        return None, "Kelly policy is not validated and active"
+    if approval_status == "AUTO_VALIDATED":
+        auto_error = _auto_validation_error(payload)
+        if auto_error:
+            return None, auto_error.replace("policy", "Kelly policy")
     cutoff = _as_date(payload.get("dataCutoff"))
     today = as_of or date.today()
     if cutoff is None or cutoff > previous_quarter_cutoff(today):
@@ -614,19 +793,31 @@ def validate_active_kelly_document(payload: Mapping[str, Any], *, as_of: date | 
     expected = quarterly_half_kelly(mu, sigma)
     if expected.get("status") != "CANDIDATE" or abs(float(expected["halfKellyLimit"]) - limit) > 1e-8:
         return None, "Kelly policy formula mismatch"
+    if approval_status == "AUTO_VALIDATED":
+        window_start = _as_date(payload.get("windowStart"))
+        window_end = _as_date(payload.get("windowEnd"))
+        if window_start is None or window_end is None or window_end > last_completed_week_cutoff(cutoff):
+            return None, "Kelly point-in-time window invalid"
+        if not _valid_corporate_action_evidence(
+            payload.get("corporateActionEvidence"),
+            window_start=window_start,
+            window_end=window_end,
+        ):
+            return None, "Kelly corporate action evidence invalid"
     return {
         "activeVersion": str(payload.get("activeVersion") or payload.get("policyVersion") or ""),
         "mu": float(expected["mu"]),
         "sigma": float(expected["sigma"]),
         "halfKellyLimit": float(expected["halfKellyLimit"]),
         "dataCutoff": cutoff.isoformat(),
-        "approvalStatus": "APPROVED",
+        "approvalStatus": approval_status,
         "freshness": "current",
         "source": str(payload.get("source") or ""),
         "contentHash": str(payload.get("contentHash") or ""),
         "effectiveFromQuarter": _quarter_label(_parse_quarter_label(payload.get("effectiveFromQuarter")) or (_quarter_index(cutoff) + 1)),
         "referenceThroughQuarter": _quarter_label(_parse_quarter_label(payload.get("referenceThroughQuarter")) or (_quarter_index(cutoff) + 2)),
         "lifecycle": lifecycle,
+        "algorithmVersion": (payload.get("autoValidation") or {}).get("algorithmVersion") if isinstance(payload.get("autoValidation"), Mapping) else "legacy-manual",
     }, None
 
 
