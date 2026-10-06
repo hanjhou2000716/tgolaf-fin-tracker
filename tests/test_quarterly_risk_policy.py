@@ -6,6 +6,11 @@ from pathlib import Path
 
 from beta_policy import _canonical_hash, load_active_beta_policy, load_active_kelly_policy
 from quarterly_risk_policy import (
+    _candidate_cache,
+    _load_research,
+    _save_research,
+    _sealed_cache,
+    active_policy_path,
     ensure_quarterly_risk_policies,
     inventory_symbol_markets,
     promote_beta_candidate_if_qualified,
@@ -28,10 +33,32 @@ def _research_series(symbol, market, start, cutoff):
             "totalReturnIndex": price,
         })
     series_hash = _canonical_hash(rows)
-    events = {"splits": {}, "dividends": {}}
+    if symbol == "TWD=X":
+        return {
+            "symbol": symbol,
+            "market": "fx",
+            "currency": "TWD_PER_USD",
+            "quotePair": "USD/TWD",
+            "rows": rows,
+            "source": "Yahoo Chart raw FX fixture",
+            "seriesHash": series_hash,
+            "fxEvidence": {
+                "provider": "Yahoo Chart API",
+                "baseCurrency": "USD",
+                "quoteCurrency": "TWD",
+                "requestedStart": start.isoformat(),
+                "requestedEnd": cutoff.isoformat(),
+                "verifiedAt": "2026-10-05T01:00:00Z",
+                "coverageComplete": True,
+                "sourceHash": series_hash,
+            },
+        }
+    events = {"splits": {"fixture": {"ratio": 1.0}}, "dividends": {}}
     evidence = {
         "provider": "Yahoo Chart API",
         "eventMapPresent": True,
+        "verificationStatus": "EVENTS_VERIFIED",
+        "eventCount": 1,
         "eventsHash": _canonical_hash(events),
         "seriesHash": series_hash,
         "requestedStart": start.isoformat(),
@@ -117,6 +144,10 @@ class QuarterlyRiskPolicyTests(unittest.TestCase):
             beta = load_active_beta_policy(state_dir / "beta-policy-active.json", as_of=date(2026, 10, 5))
             self.assertEqual(beta["status"], "READY")
             self.assertEqual(beta["metadata"]["approvalStatus"], "AUTO_VALIDATED")
+            self.assertEqual(
+                Path(active_policy_path(state_dir, "beta-policy-active.json", "config/beta-policy-active.json")),
+                state_dir / "beta-policy-active.json",
+            )
             self.assertAlmostEqual(beta["betas"]["006208"], 1.0)
 
             previous_calls = list(calls)
@@ -144,6 +175,71 @@ class QuarterlyRiskPolicyTests(unittest.TestCase):
             payload["series"]["rows"][0]["close"] += 1
             cache.write_text(json.dumps(payload), encoding="utf-8")
             self.assertIsNone(_load_research(state, date(2026, 9, 30), "006208"))
+
+    def test_fx_cache_uses_currency_pair_contract_not_stock_action_evidence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state = Path(directory) / "state"
+            cutoff = date(2026, 9, 30)
+            fx = _research_series("TWD=X", "fx", cutoff - timedelta(days=2400), cutoff)
+            _save_research(state, cutoff, "TWD=X", {**fx, "status": "READY"})
+            self.assertIsNotNone(_load_research(state, cutoff, "TWD=X"))
+            cache = state / "research" / cutoff.isoformat() / "TWD_X.json"
+            payload = json.loads(cache.read_text(encoding="utf-8"))
+            payload["series"]["quotePair"] = "TWD/USD"
+            payload = _sealed_cache({key: value for key, value in payload.items() if key != "cacheHash"})
+            cache.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertIsNone(_load_research(state, cutoff, "TWD=X"))
+
+    def test_v2_candidate_cache_is_rejected_after_algorithm_upgrade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "candidate.json"
+            payload = _sealed_cache({
+                "dataCutoff": "2026-09-30", "algorithmVersion": "quarterly-risk-v2", "assets": {},
+            })
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            self.assertIsNone(_candidate_cache(path, cutoff=date(2026, 9, 30)))
+
+    def test_v2_sealed_activation_candidate_cannot_be_promoted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir = Path(directory)
+            candidate = _sealed_cache({
+                "dataCutoff": "2026-09-30",
+                "algorithmVersion": "quarterly-risk-v2",
+                "inputHash": "a" * 64,
+                "assets": {},
+            })
+            (state_dir / "beta-policy-candidate.json").write_text(json.dumps(candidate), encoding="utf-8")
+            result = promote_beta_candidate_if_qualified(
+                {"006208": 1_000_000}, 1_000_000, 0,
+                market_by_symbol={"006208": "tw"}, state_dir=state_dir,
+                today=date(2026, 10, 5),
+            )
+            self.assertEqual(result["status"], "NO_CURRENT_CANDIDATE")
+            self.assertEqual(result["reasonCode"], "quarter_candidate_missing_or_algorithm_mismatch")
+
+    def test_fund_bucket_is_not_queried_as_a_ticker_and_stays_unmodeled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_dir, audit_dir = Path(directory) / "state", Path(directory) / "audit"
+            calls = []
+
+            def fetcher(symbol, *, market, start, end, token=None):
+                calls.append((symbol, market))
+                return _research_series(symbol, market, start, end)
+
+            summary = ensure_quarterly_risk_policies(
+                {"台股": {"006208": 100}, "美股": {}, "基金": {"FUND": 1}},
+                state_dir=state_dir, candidate_dir=audit_dir,
+                today=date(2026, 10, 5), fetcher=fetcher,
+            )
+            self.assertFalse(any(symbol == "FUND" for symbol, _ in calls))
+            self.assertEqual(summary["beta"]["unmodeledSymbols"], ["FUND"])
+            blocked = promote_beta_candidate_if_qualified(
+                {"006208": 980_000, "FUND": 20_000}, 1_000_000, 0,
+                market_by_symbol={"006208": "tw"}, state_dir=state_dir,
+                today=date(2026, 10, 5),
+            )
+            self.assertEqual(blocked["status"], "WAITING_FOR_PORTFOLIO_QUALIFICATION")
+            self.assertIn("FUND", blocked["missingSymbols"])
 
     def test_new_us_holding_fetches_fx_even_when_kelly_policy_is_current(self):
         with tempfile.TemporaryDirectory() as directory:

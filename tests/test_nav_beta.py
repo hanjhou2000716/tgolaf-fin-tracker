@@ -93,6 +93,38 @@ class NavBetaTests(unittest.TestCase):
         self.assertEqual(result["status"], "CANDIDATE")
         self.assertAlmostEqual(result["mu"], min(0.08, (360 / 100) ** (1 / years) - 1), places=10)
 
+    def test_kelly_accepts_258_complete_five_year_weekly_prices(self):
+        from datetime import date, timedelta
+
+        first = date(2021, 9, 24)
+        rows = []
+        for index in range(261):
+            session = first + timedelta(days=index * 7)
+            if index in {40, 120, 200}:
+                continue  # full-week exchange closures, not missing weekly returns
+            rows.append({"date": session.isoformat(), "close": 100 + index * 0.35 + index % 5})
+        self.assertEqual(len(rows), 258)
+        result = build_quarterly_kelly_candidate(rows, data_cutoff="2026-09-30")
+        self.assertEqual(result["status"], "CANDIDATE")
+        self.assertEqual(result["observations"], 258)
+        self.assertGreaterEqual(result["volatilityObservations"], 104)
+        self.assertEqual(result["seriesEnd"], rows[-1]["date"])
+
+    def test_kelly_rejects_duplicate_or_short_weekly_history(self):
+        from datetime import date, timedelta
+
+        start = date(2023, 1, 6)
+        short = [{"date": (start + timedelta(days=index * 7)).isoformat(), "close": 100 + index} for index in range(160)]
+        self.assertEqual(build_quarterly_kelly_candidate(short)["status"], "INSUFFICIENT_EVIDENCE")
+        long = [{"date": (date(2021, 9, 24) + timedelta(days=index * 7)).isoformat(), "close": 100 + index} for index in range(261)]
+        long.append(dict(long[100]))
+        self.assertIn("duplicate", build_quarterly_kelly_candidate(long)["reason"])
+
+    def test_kelly_empty_or_nonpositive_research_prices_fail_closed(self):
+        self.assertEqual(build_quarterly_kelly_candidate([])["status"], "INSUFFICIENT_EVIDENCE")
+        bad = [{"date": "2021-01-01", "close": 100}, {"date": "2021-01-08", "close": float("nan")}]
+        self.assertIn("finite and positive", build_quarterly_kelly_candidate(bad)["reason"])
+
     def test_threshold_boundaries(self):
         self.assertEqual(beta_status(114.999)[1], "risk-watch")
         self.assertEqual(beta_status(115)[1], "risk-alert")

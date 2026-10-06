@@ -4,9 +4,14 @@ import tempfile
 import unittest
 from datetime import date, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from beta_policy import (
+    _canonical_hash,
+    _valid_corporate_action_evidence,
     estimate_beta_policy,
+    fetch_official_taiwan_corporate_actions,
+    fetch_yahoo_research_series,
     load_active_beta_policy,
     load_active_kelly_policy,
     normalize_research_price,
@@ -23,6 +28,8 @@ def _corporate_evidence(start="2019-01-01", end="2026-09-30"):
     return {
         "provider": "Yahoo Chart API",
         "eventMapPresent": True,
+        "verificationStatus": "EVENTS_VERIFIED",
+        "eventCount": 1,
         "eventsHash": "a" * 64,
         "seriesHash": "b" * 64,
         "requestedStart": start,
@@ -40,6 +47,118 @@ def _rows(values, start="2020-01-01"):
 
 
 class BetaPolicyTests(unittest.TestCase):
+    def test_official_complete_no_event_response_is_distinct_from_missing_yahoo_events(self):
+        class Response:
+            status_code = 200
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        def getter(url, *, params, **kwargs):
+            return Response({"aaData": [], "iTotalRecords": 0})
+
+        result = fetch_official_taiwan_corporate_actions(
+            "00886", market="otc", start=date(2021, 9, 24), end=date(2026, 9, 30), http_get=getter,
+        )
+        self.assertEqual(result["status"], "NO_EVENTS_VERIFIED")
+        events = result["events"]
+        evidence = {
+            "provider": result["provider"],
+            "verificationStatus": result["status"],
+            "coverageComplete": result["coverageComplete"],
+            "sourceFamilies": result["sourceFamilies"],
+            "sourceResponseHashes": result["sourceResponseHashes"],
+            "eventCount": 0,
+            "eventsHash": _canonical_hash(events),
+            "seriesHash": "a" * 64,
+            "requestedStart": "2021-09-24",
+            "requestedEnd": "2026-09-30",
+            "verifiedAt": "2026-10-05T00:00:00Z",
+            "requestedEvents": ["history", "splits", "dividends"],
+        }
+        self.assertTrue(_valid_corporate_action_evidence(
+            evidence, window_start=date(2023, 9, 22), window_end=date(2026, 9, 25),
+        ))
+        evidence["coverageComplete"] = False
+        self.assertFalse(_valid_corporate_action_evidence(evidence))
+
+    def test_official_verified_cash_dividend_is_normalized_from_tpex_result(self):
+        class Response:
+            status_code = 200
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        dividend = ["115/04/01", "00886", "ETF"] + ["0"] * 18
+        dividend[13] = "0.50"
+        dividend[14] = "0"
+
+        def getter(url, *, params, **kwargs):
+            return Response({"aaData": [dividend], "iTotalRecords": 1} if "exDailyQ_result" in url else {"aaData": [], "iTotalRecords": 0})
+
+        result = fetch_official_taiwan_corporate_actions(
+            "00886", market="otc", start=date(2021, 9, 24), end=date(2026, 9, 30), http_get=getter,
+        )
+        self.assertEqual(result["status"], "EVENTS_VERIFIED")
+        self.assertEqual(result["events"]["dividends"], [{"date": "2026-04-01", "amount": 0.5}])
+
+    def test_yahoo_omitted_events_are_recovered_through_official_tpex_evidence(self):
+        from datetime import datetime, timezone
+
+        class Response:
+            status_code = 200
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        sessions = [date(2026, 4, 1), date(2026, 4, 2)]
+        timestamps = [int(datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc).timestamp()) for day in sessions]
+        chart = {"chart": {"result": [{
+            "timestamp": timestamps,
+            "indicators": {"quote": [{"open": [100, 99.5], "high": [100, 99.5], "low": [100, 99.5], "close": [100, 99.5]}]},
+            # Yahoo omitted events entirely; a successful chart response is not enough.
+        }]}}
+        dividend = ["115/04/02", "00886", "ETF"] + ["0"] * 18
+        dividend[13] = "0.50"
+        dividend[14] = "0"
+
+        def getter(url, *, params, **kwargs):
+            parsed_url = urlsplit(url)
+            if parsed_url.hostname == "query1.finance.yahoo.com":
+                return Response(chart)
+            return Response({"aaData": [dividend], "iTotalRecords": 1} if parsed_url.path.endswith("exDailyQ_result.php") else {"aaData": [], "iTotalRecords": 0})
+
+        result = fetch_yahoo_research_series(
+            "00886", market="tw", start=date(2026, 4, 1), end=date(2026, 4, 3), http_get=getter,
+            attempts=1,
+        )
+        self.assertEqual(result["corporateActionStatus"], "PASS")
+        self.assertEqual(result["corporateActionEvidence"]["verificationStatus"], "EVENTS_VERIFIED")
+        self.assertAlmostEqual(result["rows"][-1]["totalReturnIndex"], result["rows"][0]["totalReturnIndex"])
+
+    def test_empty_yahoo_event_map_is_not_no_event_evidence(self):
+        evidence = _corporate_evidence()
+        evidence["eventCount"] = 0
+        self.assertFalse(_valid_corporate_action_evidence(evidence))
+
     def test_split_adjusted_series_is_continuous_and_keeps_raw_close(self):
         rows = normalize_research_price(
             [{"date": "2024-01-01", "close": 100}, {"date": "2024-01-02", "close": 50}],

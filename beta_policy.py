@@ -24,7 +24,7 @@ from risk import estimate_beta_from_returns, quarterly_half_kelly
 
 
 POLICY_SCHEMA_VERSION = 1
-AUTO_VALIDATION_ALGORITHM = "quarterly-risk-v2"
+AUTO_VALIDATION_ALGORITHM = "quarterly-risk-v3"
 AUTO_VALIDATION_REQUIRED_CHECKS = frozenset({
     "point_in_time_cutoff",
     "completed_week_window",
@@ -109,11 +109,43 @@ def _auto_validation_error(payload: Mapping[str, Any]) -> str | None:
 def _valid_corporate_action_evidence(value: Any, *, window_start: date | None = None, window_end: date | None = None) -> bool:
     if not isinstance(value, Mapping):
         return False
-    if value.get("provider") != "Yahoo Chart API" or value.get("eventMapPresent") is not True:
-        return False
     if not re.fullmatch(r"[0-9a-f]{64}", str(value.get("eventsHash", ""))):
         return False
     if not re.fullmatch(r"[0-9a-f]{64}", str(value.get("seriesHash", ""))):
+        return False
+    verification_status = str(value.get("verificationStatus", "")).upper()
+    provider = str(value.get("provider", ""))
+    if provider == "Yahoo Chart API":
+        # Yahoo is acceptable for observed events, but an omitted/empty events
+        # object is not proof that no actions occurred. Taiwan no-event claims
+        # must be backed by a complete exchange query below.
+        if verification_status != "EVENTS_VERIFIED" or value.get("eventMapPresent") is not True:
+            return False
+        try:
+            if int(value.get("eventCount", 0)) <= 0:
+                return False
+        except (TypeError, ValueError):
+            return False
+    elif provider in {"TWSE official corporate-action API", "TPEx official corporate-action API"}:
+        if verification_status not in {"EVENTS_VERIFIED", "NO_EVENTS_VERIFIED"}:
+            return False
+        if value.get("coverageComplete") is not True:
+            return False
+        expected_families = {"twt49u", "twtaau", "twtb8u"} if provider.startswith("TWSE") else {"exDailyQ", "revivt", "pvChgRslt"}
+        if not expected_families.issubset({str(item) for item in value.get("sourceFamilies", [])}):
+            return False
+        response_hashes = value.get("sourceResponseHashes")
+        if not isinstance(response_hashes, Mapping) or not expected_families.issubset(response_hashes):
+            return False
+        if any(not re.fullmatch(r"[0-9a-f]{64}", str(response_hashes.get(name, ""))) for name in expected_families):
+            return False
+        if verification_status == "NO_EVENTS_VERIFIED":
+            try:
+                if int(value.get("eventCount", -1)) != 0:
+                    return False
+            except (TypeError, ValueError):
+                return False
+    else:
         return False
     requested_events = value.get("requestedEvents")
     if not isinstance(requested_events, (list, tuple)) or not {"history", "splits", "dividends"}.issubset(
@@ -133,6 +165,172 @@ def _valid_corporate_action_evidence(value: Any, *, window_start: date | None = 
     except ValueError:
         return False
     return verified_at.tzinfo is not None
+
+
+def _parse_taiwan_date(value: Any) -> date | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    roc_match = re.fullmatch(r"(\d{2,3})[年/](\d{1,2})[月/](\d{1,2})日?", text)
+    if roc_match:
+        try:
+            return date(int(roc_match.group(1)) + 1911, int(roc_match.group(2)), int(roc_match.group(3)))
+        except ValueError:
+            return None
+    return _as_date(text)
+
+
+def _official_action_specs(market: str, start: date, end: date) -> tuple[str, list[tuple[str, str, dict[str, str]]]]:
+    if market == "otc":
+        roc_start = f"{start.year - 1911}/{start.month:02d}/{start.day:02d}"
+        roc_end = f"{end.year - 1911}/{end.month:02d}/{end.day:02d}"
+        return "TPEx official corporate-action API", [
+            ("exDailyQ", "https://www.tpex.org.tw/web/stock/exright/dailyquo/exDailyQ_result.php", {"l": "zh-tw", "d": roc_start, "ed": roc_end}),
+            ("revivt", "https://www.tpex.org.tw/web/stock/exright/revivt/revivt_result.php", {"l": "zh-tw", "d": roc_start, "ed": roc_end, "o": "data"}),
+            ("pvChgRslt", "https://www.tpex.org.tw/web/stock/exright/pvChgRslt/pvChgRslt_result.php", {"l": "zh-tw", "d": roc_start, "ed": roc_end, "o": "data"}),
+        ]
+    return "TWSE official corporate-action API", [
+        ("twt49u", "https://www.twse.com.tw/rwd/zh/exRight/TWT49U", {"strDate": start.strftime("%Y%m%d"), "endDate": end.strftime("%Y%m%d"), "response": "json"}),
+        ("twtaau", "https://www.twse.com.tw/exchangeReport/TWTAUU", {"strDate": start.strftime("%Y%m%d"), "endDate": end.strftime("%Y%m%d"), "response": "json"}),
+        ("twtb8u", "https://www.twse.com.tw/exchangeReport/TWTB8U", {"strDate": start.strftime("%Y%m%d"), "endDate": end.strftime("%Y%m%d"), "response": "json"}),
+    ]
+
+
+def _official_rows(payload: Any, *, provider: str, family: str) -> list[tuple[dict[str, Any], str]]:
+    """Parse only complete, recognizable official range-query responses."""
+    if not isinstance(payload, Mapping):
+        raise ValueError(f"{family}: official response is not an object")
+    if provider.startswith("TWSE"):
+        status = str(payload.get("stat", "")).strip()
+        fields, data = payload.get("fields"), payload.get("data")
+        if isinstance(fields, list) and isinstance(data, list):
+            if status not in {"OK", "查詢日期範圍內無資料", "無符合條件資料"}:
+                raise ValueError(f"{family}: official response status is not complete")
+            if data and (
+                not any("代號" in str(field) for field in fields)
+                or not any("日期" in str(field) for field in fields)
+            ):
+                raise ValueError(f"{family}: official symbol/date fields missing")
+            if not data and status == "OK" and (
+                not fields
+                or not any("代號" in str(field) for field in fields)
+                or not any("日期" in str(field) for field in fields)
+            ):
+                raise ValueError(f"{family}: empty official response has no verifiable schema")
+            rows = []
+            for raw in data:
+                if not isinstance(raw, (list, tuple)) or len(raw) != len(fields):
+                    raise ValueError(f"{family}: official row schema mismatch")
+                rows.append(({str(key): value for key, value in zip(fields, raw)}, status))
+            return rows
+        if status in {"查詢日期範圍內無資料", "無符合條件資料"}:
+            return []
+        raise ValueError(f"{family}: official fields/data missing")
+    data = payload.get("aaData")
+    if not isinstance(data, list):
+        raise ValueError(f"{family}: TPEx result rows missing")
+    raw_total = payload.get("iTotalRecords", payload.get("iTotalDisplayRecords"))
+    try:
+        total = int(raw_total)
+    except (TypeError, ValueError):
+        raise ValueError(f"{family}: TPEx result count missing")
+    if total != len(data):
+        raise ValueError(f"{family}: TPEx range result is truncated")
+    result = []
+    for raw in data:
+        if not isinstance(raw, (list, tuple)) or len(raw) < 3:
+            raise ValueError(f"{family}: TPEx row schema mismatch")
+        result.append(({"日期": raw[0], "代號": raw[1], "名稱": raw[2], "欄位": list(raw)}, "OK"))
+    return result
+
+
+def fetch_official_taiwan_corporate_actions(
+    symbol: str,
+    *,
+    market: str,
+    start: date,
+    end: date,
+    http_get: Any = None,
+    timeout: float = 15,
+) -> dict[str, Any]:
+    """Verify Taiwan actions over the full research window using exchange data.
+
+    Cash dividends are supported in the total-return normalization. Stock
+    rights, reductions, and par-value changes remain unavailable until their
+    exact price-adjustment factor is independently supported.
+    """
+    getter = http_get or requests.get
+    otc = _symbol(symbol) in OTC_SYMBOLS
+    provider, specs = _official_action_specs("otc" if otc else "twse", start, end)
+    matched: dict[str, list[dict[str, Any]]] = {family: [] for family, _, _ in specs}
+    response_hashes: dict[str, str] = {}
+    try:
+        for family, url, params in specs:
+            response = getter(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
+            response.raise_for_status()
+            raw_payload = response.json()
+            parsed = _official_rows(raw_payload, provider=provider, family=family)
+            response_hashes[family] = _canonical_hash(raw_payload)
+            for row, _ in parsed:
+                code_key = next((key for key in row if "代號" in key), None)
+                event_key = next((key for key in row if "日期" in key), None)
+                code = str(row.get(code_key, "")).strip() if code_key else ""
+                event_date = _parse_taiwan_date(row.get(event_key)) if event_key else None
+                if code != _symbol(symbol) or event_date is None or not start <= event_date <= end:
+                    continue
+                row["__eventDate"] = event_date.isoformat()
+                matched[family].append(row)
+
+        unsupported = [family for family, rows in matched.items() if rows and family != "twt49u" and family != "exDailyQ"]
+        dividends: list[dict[str, Any]] = []
+        events: list[dict[str, Any]] = []
+        for row in matched.get("twt49u", []) + matched.get("exDailyQ", []):
+            if "欄位" in row:
+                fields = row["欄位"]
+                try:
+                    cash = _finite(str(fields[13]).replace(",", "")) if len(fields) > 13 else None
+                    bonus_shares = _finite(str(fields[14]).replace(",", "")) if len(fields) > 14 else None
+                except (TypeError, ValueError):
+                    cash = bonus_shares = None
+                if cash is None or bonus_shares is None:
+                    unsupported.append("exDailyQ_schema")
+                    continue
+                if bonus_shares > 0:
+                    unsupported.append("stock_distribution")
+                if cash > 0:
+                    dividends.append({"date": row["__eventDate"], "amount": cash})
+            else:
+                event_kind = " ".join(str(value) for key, value in row.items() if "權息" in key or "權/息" in key)
+                right_value = next((_finite(str(value).replace(",", "")) for key, value in row.items() if "權值" in key), None)
+                cash_value = next((_finite(str(value).replace(",", "")) for key, value in row.items() if "息值" in key), None)
+                if (right_value is not None and right_value > 0) or "權" in event_kind:
+                    unsupported.append("stock_rights")
+                if cash_value is None:
+                    unsupported.append("twt49u_schema")
+                    continue
+                if cash_value > 0:
+                    dividends.append({"date": row["__eventDate"], "amount": cash_value})
+            events.append(row)
+        if unsupported:
+            raise ValueError("unsupported official capital-action type")
+        normalized_events = {"dividends": sorted(dividends, key=lambda item: item["date"]), "splits": [], "officialRows": events}
+        return {
+            "status": "NO_EVENTS_VERIFIED" if not events else "EVENTS_VERIFIED",
+            "provider": provider,
+            "events": normalized_events,
+            "sourceFamilies": sorted(response_hashes),
+            "sourceResponseHashes": response_hashes,
+            "coverageComplete": len(response_hashes) == len(specs),
+        }
+    except Exception as error:  # noqa: BLE001 - callers retain a reason code, never a false pass
+        message = str(error).lower()
+        if "unsupported official" in message or "stock_rights" in message or "stock_distribution" in message:
+            reason_code = "OFFICIAL_ACTION_TYPE_UNSUPPORTED"
+        elif "schema" in message or "count" in message or "truncated" in message or "status is not complete" in message:
+            reason_code = "OFFICIAL_ACTION_RESPONSE_INVALID"
+        else:
+            reason_code = "OFFICIAL_ACTION_SOURCE_UNAVAILABLE"
+        return {"status": "UNVERIFIED", "provider": provider, "reasonCode": reason_code}
 
 
 def yahoo_chart_symbols(symbol: str, market: str) -> tuple[str, ...]:
@@ -198,6 +396,32 @@ def fetch_yahoo_research_series(
                         "low": quote.get("low", [None] * len(timestamps))[index] if index < len(quote.get("low", [])) else None,
                         "close": closes[index],
                     })
+                if _symbol(symbol) == "TWD=X" or str(market).lower() == "fx":
+                    fx_rows = normalize_research_price(rows)
+                    if not fx_rows:
+                        raise ValueError("empty normalized FX series")
+                    series_hash = _canonical_hash(fx_rows)
+                    return {
+                        "symbol": "TWD=X",
+                        "market": "fx",
+                        "currency": "TWD_PER_USD",
+                        "quotePair": "USD/TWD",
+                        "rows": fx_rows,
+                        "source": f"Yahoo Chart raw FX ({chart_symbol})",
+                        "seriesHash": series_hash,
+                        "fxEvidence": {
+                            "provider": "Yahoo Chart API",
+                            "baseCurrency": "USD",
+                            "quoteCurrency": "TWD",
+                            "requestedStart": start.isoformat(),
+                            "requestedEnd": end.isoformat(),
+                            "verifiedAt": datetime.now(timezone.utc).isoformat(),
+                            "coverageComplete": True,
+                            "sourceHash": series_hash,
+                        },
+                        "status": "READY",
+                        "attempts": attempt + 1,
+                    }
                 raw_events = result.get("events")
                 events = raw_events if isinstance(raw_events, Mapping) else {}
                 splits = []
@@ -225,15 +449,48 @@ def fetch_yahoo_research_series(
                         "date": datetime.fromtimestamp(event_timestamp, tz=timezone.utc).date().isoformat(),
                         "amount": amount,
                     })
+                event_count = len(splits) + len(dividends)
+                official_evidence = None
+                if not event_count and str(market).lower() in {"tw", "taiwan", "twd"}:
+                    official_evidence = fetch_official_taiwan_corporate_actions(
+                        symbol, market="otc" if _symbol(symbol) in OTC_SYMBOLS else "twse",
+                        start=start, end=end, http_get=getter, timeout=timeout,
+                    )
+                    if official_evidence.get("status") in {"EVENTS_VERIFIED", "NO_EVENTS_VERIFIED"}:
+                        official_events = official_evidence["events"]
+                        dividends = official_events.get("dividends", [])
+                        splits = official_events.get("splits", [])
+                        action_payload = official_events
+                    else:
+                        action_payload = dict(events)
+                else:
+                    action_payload = dict(events)
                 normalized = normalize_research_price(rows, splits=splits, dividends=dividends)
                 if not normalized:
                     raise ValueError("empty normalized research series")
-                events_hash = _canonical_hash(raw_events) if isinstance(raw_events, Mapping) else None
                 series_hash = _canonical_hash(normalized)
                 corporate_evidence = None
-                if events_hash:
+                if official_evidence and official_evidence.get("status") in {"EVENTS_VERIFIED", "NO_EVENTS_VERIFIED"}:
+                    events_hash = _canonical_hash(action_payload)
+                    corporate_evidence = {
+                        "provider": official_evidence["provider"],
+                        "verificationStatus": official_evidence["status"],
+                        "coverageComplete": official_evidence["coverageComplete"],
+                        "sourceFamilies": official_evidence["sourceFamilies"],
+                        "sourceResponseHashes": official_evidence["sourceResponseHashes"],
+                        "eventCount": len(action_payload.get("officialRows", [])),
+                        "eventsHash": events_hash,
+                        "seriesHash": series_hash,
+                        "requestedStart": start.isoformat(),
+                        "requestedEnd": end.isoformat(),
+                        "verifiedAt": datetime.now(timezone.utc).isoformat(),
+                        "requestedEvents": ["history", "splits", "dividends"],
+                    }
+                elif event_count and isinstance(raw_events, Mapping):
+                    events_hash = _canonical_hash(raw_events)
                     corporate_evidence = {
                         "provider": "Yahoo Chart API",
+                        "verificationStatus": "EVENTS_VERIFIED",
                         "eventMapPresent": True,
                         "eventsHash": events_hash,
                         "seriesHash": series_hash,
@@ -241,6 +498,7 @@ def fetch_yahoo_research_series(
                         "requestedEnd": end.isoformat(),
                         "verifiedAt": datetime.now(timezone.utc).isoformat(),
                         "requestedEvents": ["history", "splits", "dividends"],
+                        "eventCount": event_count,
                         "eventCounts": {"splits": len(splits), "dividends": len(dividends)},
                     }
                 return {
@@ -248,11 +506,13 @@ def fetch_yahoo_research_series(
                     "market": str(market).lower(),
                     "currency": "USD" if str(market).lower() in {"us", "usa", "usd"} else "TWD",
                     "rows": normalized,
-                    "corporateActionEvents": dict(events),
+                    "corporateActionEvents": action_payload,
                     "source": f"Yahoo Chart raw OHLC ({chart_symbol}) + research-price contract v1",
                     "corporateActionStatus": "PASS" if corporate_evidence else "UNAVAILABLE",
                     "corporateActionEvidence": corporate_evidence,
                     "seriesHash": series_hash,
+                    "reason": None if corporate_evidence else (official_evidence or {}).get("reason", "corporate action evidence unavailable"),
+                    "reasonCode": None if corporate_evidence else (official_evidence or {}).get("reasonCode", "CORPORATE_ACTION_EVIDENCE_UNAVAILABLE"),
                     "attempts": attempt + 1,
                 }
             except Exception as error:  # noqa: BLE001 - diagnostic boundary
@@ -341,6 +601,8 @@ def fetch_finmind_research_series(
 
 def fetch_research_series(symbol: str, *, market: str, start: date, end: date, token: str | None = None, http_get: Any = None) -> dict[str, Any]:
     """Apply the primary Taiwan source and raw-chart fallback policy."""
+    if _symbol(symbol) == "TWD=X" or str(market).lower() == "fx":
+        return fetch_yahoo_research_series("TWD=X", market="fx", start=start, end=end, http_get=http_get)
     if str(market).lower() in {"tw", "taiwan", "twd"} and token:
         primary = fetch_finmind_research_series(symbol, token=token, start=start, end=end, http_get=http_get)
         if primary and primary.get("rows") and primary.get("corporateActionStatus") == "PASS":
@@ -576,6 +838,33 @@ def estimate_beta_policy(
         rows = record.get("rows") if isinstance(record, Mapping) else None
         currency = str(record.get("currency", "TWD")) if isinstance(record, Mapping) else "TWD"
         weekly = _weekly_rows(rows or [], price_key="splitAdjustedClose", currency=currency, fx_rows=fx_rows, cutoff=completed_week_cutoff)
+        if currency.upper() != "TWD":
+            fx_by_date = {
+                _as_date(row.get("date")): _finite(row.get("close", row.get("price")))
+                for row in fx_rows or []
+                if _as_date(row.get("date")) is not None
+            }
+            unconverted_weekly = _weekly_rows(
+                rows or [], price_key="splitAdjustedClose", currency="TWD", cutoff=completed_week_cutoff,
+            )
+            fx_missing = len(weekly) != len(unconverted_weekly)
+            for item_date, _ in weekly.values():
+                prior = [fx_date for fx_date, value in fx_by_date.items() if fx_date and fx_date <= item_date and value and value > 0]
+                if not prior or (item_date - max(prior)).days > 7:
+                    fx_missing = True
+                    break
+            if not fx_rows or fx_missing:
+                assets[symbol] = {
+                    "status": "INSUFFICIENT_EVIDENCE",
+                    "reason": "verified USD/TWD observations do not cover paired weeks",
+                    "observations": 0,
+                    "windowStart": window_start.isoformat(),
+                    "windowEnd": completed_week_cutoff.isoformat(),
+                    "corporateActionStatus": record.get("corporateActionStatus", "UNAVAILABLE") if isinstance(record, Mapping) else "UNAVAILABLE",
+                    "corporateActionEvidence": record.get("corporateActionEvidence") if isinstance(record, Mapping) else None,
+                    "source": record.get("source") if isinstance(record, Mapping) else None,
+                }
+                continue
         common = [
             key for key in sorted(set(benchmark).intersection(weekly))
             if window_start <= benchmark[key][0] <= completed_week_cutoff
@@ -620,7 +909,11 @@ def estimate_beta_policy(
             if not latest_pair_fresh:
                 reason = "latest paired observation is stale"
             else:
-                reason = estimate.get("reason") or "corporate action or source evidence unavailable"
+                reason = (
+                    (record.get("reasonCode") or record.get("reason"))
+                    if isinstance(record, Mapping) and (corporate_status != "PASS" or not evidence_ok)
+                    else None
+                ) or estimate.get("reason") or "corporate action or source evidence unavailable"
             assets[symbol] = {
                 "status": "INSUFFICIENT_EVIDENCE",
                 "reason": reason,
