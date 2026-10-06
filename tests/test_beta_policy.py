@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import date, datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from beta_policy import (
     _canonical_hash,
@@ -140,9 +141,10 @@ class BetaPolicyTests(unittest.TestCase):
         dividend[14] = "0"
 
         def getter(url, *, params, **kwargs):
-            if "query1.finance.yahoo.com" in url:
+            parsed_url = urlsplit(url)
+            if parsed_url.hostname == "query1.finance.yahoo.com":
                 return Response(chart)
-            return Response({"aaData": [dividend], "iTotalRecords": 1} if "exDailyQ_result" in url else {"aaData": [], "iTotalRecords": 0})
+            return Response({"aaData": [dividend], "iTotalRecords": 1} if parsed_url.path.endswith("exDailyQ_result.php") else {"aaData": [], "iTotalRecords": 0})
 
         result = fetch_yahoo_research_series(
             "00886", market="tw", start=date(2026, 4, 1), end=date(2026, 4, 3), http_get=getter,
