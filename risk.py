@@ -204,7 +204,7 @@ def quarterly_half_kelly(mu, sigma, *, mu_cap=0.08, sigma_floor=0.18):
     return {"status": "CANDIDATE", "mu": expected, "sigma": volatility, "halfKellyLimit": limit}
 
 
-def build_quarterly_kelly_candidate(total_return_prices, *, data_cutoff=None, min_observations=260):
+def build_quarterly_kelly_candidate(total_return_prices, *, data_cutoff=None, min_observations=0):
     """Build a point-in-time quarterly candidate from completed weekly prices.
 
     The caller supplies a split/dividend-normalised research series; this
@@ -212,6 +212,12 @@ def build_quarterly_kelly_candidate(total_return_prices, *, data_cutoff=None, mi
     after ``data_cutoff`` are excluded before either statistic is computed.
     """
     rows = []
+    cutoff_date = None
+    if data_cutoff is not None:
+        try:
+            cutoff_date = date.fromisoformat(str(data_cutoff)[:10])
+        except (TypeError, ValueError):
+            return {"status": "INSUFFICIENT_EVIDENCE", "reason": "data cutoff is invalid", "observations": 0, "dataCutoff": data_cutoff}
     for row in total_return_prices or []:
         if isinstance(row, Mapping):
             raw_date, raw_price = row.get("date"), row.get("close", row.get("price"))
@@ -220,12 +226,31 @@ def build_quarterly_kelly_candidate(total_return_prices, *, data_cutoff=None, mi
                 raw_date, raw_price = row
             except (TypeError, ValueError):
                 continue
-        if data_cutoff is not None and str(raw_date) > str(data_cutoff):
+        try:
+            parsed_date = date.fromisoformat(str(raw_date)[:10])
+        except (TypeError, ValueError):
+            return {"status": "INSUFFICIENT_EVIDENCE", "reason": "weekly research dates are invalid", "observations": len(rows), "dataCutoff": data_cutoff}
+        if cutoff_date is not None and parsed_date > cutoff_date:
             continue
         price = _finite_number(raw_price)
-        if price is not None and price > 0:
-            rows.append((str(raw_date), price))
+        if price is None or price <= 0:
+            return {
+                "status": "INSUFFICIENT_EVIDENCE",
+                "reason": "weekly research price is not finite and positive",
+                "observations": len(rows),
+                "dataCutoff": data_cutoff,
+            }
+        rows.append((parsed_date.isoformat(), price))
     rows.sort(key=lambda item: item[0])
+    if not rows:
+        return {
+            "status": "INSUFFICIENT_EVIDENCE",
+            "reason": "weekly research prices are unavailable",
+            "observations": 0,
+            "dataCutoff": data_cutoff,
+        }
+    if len({item[0] for item in rows}) != len(rows):
+        return {"status": "INSUFFICIENT_EVIDENCE", "reason": "duplicate weekly research dates", "observations": len(rows), "dataCutoff": data_cutoff}
     if len(rows) < min_observations:
         return {"status": "INSUFFICIENT_EVIDENCE", "reason": "insufficient point-in-time weekly prices", "observations": len(rows), "dataCutoff": data_cutoff}
     try:
@@ -234,8 +259,8 @@ def build_quarterly_kelly_candidate(total_return_prices, *, data_cutoff=None, mi
     except (TypeError, ValueError):
         return {"status": "INSUFFICIENT_EVIDENCE", "reason": "weekly research dates are invalid", "observations": len(rows), "dataCutoff": data_cutoff}
     elapsed_days = (last_date - first_date).days
-    if elapsed_days <= 0:
-        return {"status": "INSUFFICIENT_EVIDENCE", "reason": "weekly research period is invalid", "observations": len(rows), "dataCutoff": data_cutoff}
+    if elapsed_days < 5 * 365 - 14:
+        return {"status": "INSUFFICIENT_EVIDENCE", "reason": "point-in-time weekly prices do not cover five years", "observations": len(rows), "dataCutoff": data_cutoff}
     dated_returns = []
     for index in range(1, len(rows)):
         try:

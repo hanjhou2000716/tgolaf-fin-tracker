@@ -1110,10 +1110,27 @@ def main():
         today=tw_now.date(),
         now=now_utc,
     )
+    # Promotion writes the trusted state artifact. Resolve the path again
+    # after promotion so this same settlement immediately consumes the new
+    # version instead of the fallback/default path chosen before activation.
+    beta_path = os.getenv("BETA_POLICY_ACTIVE_PATH") or active_policy_path(
+        risk_policy_state_dir, "beta-policy-active.json", DEFAULT_ACTIVE_POLICY_PATH,
+    )
     try:
         quarterly_summary_path = Path(".private-build/quarterly-risk-policy-summary.json")
         quarterly_summary = json.loads(quarterly_summary_path.read_text(encoding="utf-8"))
-        quarterly_summary.setdefault("beta", {})["activation"] = beta_activation
+        beta_diagnostic = quarterly_summary.setdefault("beta", {})
+        beta_diagnostic["candidateStatus"] = beta_diagnostic.get("status")
+        beta_diagnostic["activation"] = beta_activation
+        beta_diagnostic["activationReady"] = beta_activation.get("status") in {"AUTO_ACTIVATED", "ALREADY_ACTIVE"}
+        if beta_activation.get("status") in {"AUTO_ACTIVATED", "ALREADY_ACTIVE"}:
+            beta_diagnostic["status"] = "ACTIVE"
+        elif beta_activation.get("status") in {"WAITING_FOR_PORTFOLIO_QUALIFICATION", "NO_CURRENT_CANDIDATE", "REJECTED"}:
+            beta_diagnostic["status"] = beta_activation.get("status")
+        if beta_activation.get("status") == "WAITING_FOR_PORTFOLIO_QUALIFICATION":
+            beta_diagnostic["reasonCode"] = beta_activation.get("reasonCode")
+            beta_diagnostic["coveragePct"] = beta_activation.get("coveragePct")
+            beta_diagnostic["missingSymbols"] = beta_activation.get("missingSymbols", [])
         write_json(str(quarterly_summary_path), quarterly_summary)
     except (OSError, ValueError, TypeError):
         write_json(".private-build/quarterly-risk-policy-summary.json", {"beta": {"activation": beta_activation}})
@@ -1251,8 +1268,16 @@ def main():
         if nav_beta is not None and formal_kelly_limit is not None else None
     )
     beta_status, beta_status_class = classify_beta_capacity(beta_capacity) if beta_capacity is not None else ("⚪ 資料不足", "risk-unavailable")
-    if policy_stale_reference:
-        display_beta_status, display_beta_class = "參數更新待確認", "risk-unavailable"
+    beta_stale_reference = beta_policy.get("quality") == "policy_stale_reference"
+    kelly_stale_reference = kelly_policy.get("quality") == "policy_stale_reference"
+    if beta_stale_reference:
+        display_beta_status, display_beta_class = "Beta參數更新待確認", "risk-unavailable"
+    elif kelly_stale_reference:
+        display_beta_status, display_beta_class = "凱利參數更新待確認", "risk-unavailable"
+    elif beta_policy.get("status") != "READY":
+        display_beta_status, display_beta_class = "Beta資料待確認", "risk-unavailable"
+    elif kelly_policy.get("status") != "READY":
+        display_beta_status, display_beta_class = "凱利資料待確認", "risk-unavailable"
     elif display_usage is not None and nav_beta is not None and formal_kelly_limit is not None:
         display_beta_status, display_beta_class = classify_beta_capacity(display_usage)
     else:
@@ -1641,8 +1666,12 @@ def main():
     beta_usage_display = f"{display_usage:.1f}%" if display_usage is not None else "—"
     beta_boundary_display = f"{display_kelly_limit:.2f}" if display_kelly_limit is not None else "—"
     beta_display_title = (
-        "依上一季度已驗證參數顯示參考值；本季度參數通過自動驗證前禁止增加風險。"
-        if policy_stale_reference else ""
+        "Beta 參數為上一季度參考值；本季 Beta 重新驗證完成前禁止增加風險。"
+        if beta_stale_reference else
+        "凱利邊界為上一季度參考值；本季凱利重新驗證完成前禁止增加風險。"
+        if kelly_stale_reference else
+        str(beta_policy.get("reason") or kelly_policy.get("reason") or "資料品質驗證未完成；禁止增加風險。")
+        if beta_policy.get("status") != "READY" or kelly_policy.get("status") != "READY" else ""
     )
     html_content = f"""
     <!DOCTYPE html>
@@ -2319,6 +2348,9 @@ def main():
         "quality": nav_beta_result.get("quality"),
         "asOf": generated_at,
         "policyVersion": (beta_policy.get("metadata") or {}).get("policyVersion"),
+        "algorithmVersion": (beta_policy.get("metadata") or beta_policy.get("referenceMetadata") or {}).get("algorithmVersion"),
+        "validationStatus": (beta_policy.get("metadata") or {}).get("approvalStatus", "NOT_READY"),
+        "reasonCode": beta_policy.get("reason"),
         "dataCutoff": (beta_policy.get("metadata") or {}).get("dataCutoff"),
         "policyStatus": beta_policy.get("status"),
         "policyLifecycle": (beta_policy.get("metadata") or beta_policy.get("referenceMetadata") or {}).get("lifecycle", "UNAVAILABLE"),
@@ -2332,7 +2364,12 @@ def main():
         "displayKellyLimit": round(display_kelly_limit, 8) if display_kelly_limit is not None else None,
         "displayUsagePct": round(display_usage, 4) if display_usage is not None else None,
         "displayStatus": display_beta_status,
-        "displayLifecycle": "STALE_REFERENCE" if policy_stale_reference else "CURRENT" if nav_beta is not None and formal_kelly_limit is not None else "BETA_CURRENT_KELLY_UNAVAILABLE" if nav_beta is not None else "UNAVAILABLE",
+        "displayLifecycle": (
+            "BETA_STALE_REFERENCE" if beta_stale_reference else
+            "KELLY_STALE_REFERENCE" if kelly_stale_reference else
+            "CURRENT" if nav_beta is not None and formal_kelly_limit is not None else
+            "BETA_CURRENT_KELLY_UNAVAILABLE" if nav_beta is not None else "UNAVAILABLE"
+        ),
         "betaLifecycle": (beta_policy.get("metadata") or beta_policy.get("referenceMetadata") or {}).get("lifecycle", "UNAVAILABLE"),
         "kellyLifecycle": (active_kelly or reference_kelly).get("lifecycle", "UNAVAILABLE"),
         "betaApprovalStatus": (beta_policy.get("metadata") or {}).get("approvalStatus", "NOT_READY"),
@@ -2389,6 +2426,10 @@ def main():
             "candidateStatus": kelly_candidate.get("status"),
             "candidateDataCutoff": kelly_candidate.get("dataCutoff"),
             "candidateApprovalStatus": "AUTOMATIC_CANDIDATE" if kelly_candidate.get("status") == "CANDIDATE" else "NOT_READY",
+            "algorithmVersion": (active_kelly or reference_kelly).get("algorithmVersion"),
+            "validationStatus": active_kelly.get("approvalStatus", "NOT_READY") if kelly_policy.get("status") == "READY" else "NOT_READY",
+            "reasonCode": kelly_policy.get("reason"),
+            "lifecycle": (active_kelly or reference_kelly).get("lifecycle", "UNAVAILABLE"),
         },
         "largestPosition": {"symbol": largest_symbol, "value": round(largest_position_value, 2), "percent": round(largest_position_pct, 1), "status": largest_position_status},
         "nvdaExposureRatio": round(nvda_pct, 1),

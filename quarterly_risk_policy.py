@@ -97,11 +97,57 @@ def _history_is_valid(payload: Mapping[str, Any] | None) -> bool:
     if not isinstance(rows, list) or not rows or not _valid_corporate_action_evidence(evidence):
         return False
     row_hash = _canonical_hash(rows)
-    if row_hash != payload.get("seriesHash"):
+    if row_hash != payload.get("seriesHash") or row_hash != evidence.get("seriesHash"):
         return False
     events = payload.get("corporateActionEvents")
     if not isinstance(events, Mapping) or _canonical_hash(events) != evidence.get("eventsHash"):
         return False
+    return True
+
+
+def _fx_history_is_valid(payload: Mapping[str, Any] | None, *, cutoff: date | None = None) -> bool:
+    if not isinstance(payload, Mapping) or payload.get("status") not in {None, "READY"}:
+        return False
+    rows = payload.get("rows")
+    evidence = payload.get("fxEvidence")
+    if (
+        payload.get("symbol") != "TWD=X"
+        or payload.get("quotePair") != "USD/TWD"
+        or payload.get("currency") != "TWD_PER_USD"
+        or not isinstance(rows, list)
+        or not rows
+        or not isinstance(evidence, Mapping)
+        or evidence.get("provider") != "Yahoo Chart API"
+        or evidence.get("baseCurrency") != "USD"
+        or evidence.get("quoteCurrency") != "TWD"
+        or evidence.get("coverageComplete") is not True
+    ):
+        return False
+    try:
+        requested_start = date.fromisoformat(str(evidence.get("requestedStart", "")))
+        requested_end = date.fromisoformat(str(evidence.get("requestedEnd", "")))
+        verified_at = datetime.fromisoformat(str(evidence.get("verifiedAt", "")).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if requested_start > requested_end or (cutoff is not None and requested_end < cutoff) or verified_at.tzinfo is None:
+        return False
+    row_hash = _canonical_hash(rows)
+    if payload.get("seriesHash") != row_hash or evidence.get("sourceHash") != row_hash:
+        return False
+    previous: date | None = None
+    for row in rows:
+        if not isinstance(row, Mapping):
+            return False
+        try:
+            item_date = date.fromisoformat(str(row.get("date", "")))
+            price = float(row.get("close"))
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(price) or price <= 0 or (previous is not None and item_date <= previous):
+            return False
+        if item_date < requested_start or item_date > requested_end:
+            return False
+        previous = item_date
     return True
 
 
@@ -115,11 +161,13 @@ def _load_research(state_dir: Path, cutoff: date, symbol: str) -> dict[str, Any]
     if not _valid_sealed_cache(payload) or payload.get("dataCutoff") != cutoff.isoformat():
         return None
     result = payload.get("series")
-    return result if _history_is_valid(result) else None
+    valid = _fx_history_is_valid(result, cutoff=cutoff) if symbol == "TWD=X" else _history_is_valid(result)
+    return result if valid else None
 
 
 def _save_research(state_dir: Path, cutoff: date, symbol: str, series: Mapping[str, Any]) -> None:
-    if not _history_is_valid(series):
+    valid = _fx_history_is_valid(series, cutoff=cutoff) if symbol == "TWD=X" else _history_is_valid(series)
+    if not valid:
         return
     _write_json_atomic(
         _research_cache_path(state_dir, cutoff, symbol),
@@ -175,7 +223,11 @@ def _automatic_policy_current(path: Path, *, today: date, expected_cutoff: date,
 
 def _candidate_cache(path: Path, *, cutoff: date) -> dict[str, Any] | None:
     payload = _read_json(path)
-    if not _valid_sealed_cache(payload) or payload.get("dataCutoff") != cutoff.isoformat():
+    if (
+        not _valid_sealed_cache(payload)
+        or payload.get("dataCutoff") != cutoff.isoformat()
+        or payload.get("algorithmVersion") != AUTO_VALIDATION_ALGORITHM
+    ):
         return None
     assets = payload.get("assets")
     if not isinstance(assets, Mapping):
@@ -229,7 +281,7 @@ def _fetch_research_set(
                 payload = {
                     "symbol": symbol,
                     "market": market,
-                    "currency": "USD" if market == "us" else "TWD",
+                    "currency": "TWD_PER_USD" if market == "fx" else "USD" if market == "us" else "TWD",
                     "rows": [],
                     "source": None,
                     "corporateActionStatus": "UNAVAILABLE",
@@ -239,7 +291,13 @@ def _fetch_research_set(
             normalized = dict(payload) if isinstance(payload, Mapping) else {}
             normalized.setdefault("symbol", symbol)
             normalized.setdefault("market", market)
-            normalized["status"] = "READY" if _history_is_valid(normalized) else "UNAVAILABLE"
+            is_valid = _fx_history_is_valid(normalized) if symbol == "TWD=X" else _history_is_valid(normalized)
+            normalized["status"] = "READY" if is_valid else "UNAVAILABLE"
+            if not is_valid:
+                if not normalized.get("reason"):
+                    normalized["reason"] = "research evidence failed validation"
+                if not normalized.get("reasonCode"):
+                    normalized["reasonCode"] = "RESEARCH_EVIDENCE_INVALID"
             result[symbol] = normalized
     return result
 
@@ -270,7 +328,14 @@ def ensure_quarterly_risk_policies(
     kelly_candidate_output = candidates / "kelly-quarterly-candidate.json"
 
     held_markets = inventory_symbol_markets(inventory)
-    beta_symbols = {symbol: market for symbol, market in held_markets.items() if symbol not in FIXED_BETAS}
+    # FUND is a private accounting bucket, not a market ticker. Keep it
+    # visible as unmodeled for coverage/Gate diagnostics; never query a stock
+    # provider for a ticker literally named "FUND".
+    unmodeled_symbols = sorted(symbol for symbol, market in held_markets.items() if market == "other")
+    beta_symbols = {
+        symbol: market for symbol, market in held_markets.items()
+        if symbol not in FIXED_BETAS and market in {"tw", "us"}
+    }
     beta_source_path = beta_active_path if beta_active_path.exists() else Path("config/beta-policy-active.json")
     kelly_source_path = kelly_active_path if kelly_active_path.exists() else Path("config/kelly-policy-active.json")
     beta_is_current, beta_doc = _automatic_policy_current(
@@ -306,7 +371,7 @@ def ensure_quarterly_risk_policies(
     if beta_refresh_needed and retry_symbols:
         fetch_symbols.update(retry_symbols)
     if fx_history is None and any(market == "us" for market in retry_symbols.values()):
-        fetch_symbols["TWD=X"] = "us"
+        fetch_symbols["TWD=X"] = "fx"
     token = os.getenv("FINMIND_TOKEN", "").strip() or None
     if fetch_symbols:
         start = cutoff - timedelta(days=6 * 365 + 2)
@@ -322,7 +387,7 @@ def ensure_quarterly_risk_policies(
         fresh_asset_symbols = set(retry_symbols)
         fresh_histories = {symbol: histories[symbol] for symbol in fresh_asset_symbols if symbol in histories}
         benchmark_rows = benchmark.get("rows", []) if isinstance(benchmark, Mapping) else []
-        fx_rows = fx_history.get("rows", []) if isinstance(fx_history, Mapping) else []
+        fx_rows = fx_history.get("rows", []) if isinstance(fx_history, Mapping) and _fx_history_is_valid(fx_history, cutoff=cutoff) else []
         estimates = estimate_beta_policy(
             fresh_histories,
             benchmark_rows,
@@ -359,7 +424,12 @@ def ensure_quarterly_risk_policies(
         })
         candidate_payload = {
             "schemaVersion": 1,
-            "status": "CANDIDATE" if any(_candidate_record_ready(record) for record in candidate_assets.values()) or not beta_symbols else "INSUFFICIENT_EVIDENCE",
+            "status": (
+                "CANDIDATE"
+                if all(_candidate_record_ready(candidate_assets.get(symbol)) for symbol in beta_symbols)
+                and (isinstance(benchmark, Mapping) and _history_is_valid(benchmark))
+                else "PARTIAL_CANDIDATE_BLOCKED"
+            ),
             "approvalStatus": "AUTOMATIC_CANDIDATE",
             "policyVersion": f"candidate-{effective_quarter}-{input_hash[:12]}",
             "algorithmVersion": AUTO_VALIDATION_ALGORITHM,
@@ -369,6 +439,7 @@ def ensure_quarterly_risk_policies(
             "effectiveFromQuarter": effective_quarter,
             "referenceThroughQuarter": _quarter_label(date(current_date.year + (1 if current_date.month >= 10 else 0), ((current_date.month - 1 + 3) % 12) + 1, 1)),
             "assets": candidate_assets,
+            "unmodeledSymbols": unmodeled_symbols,
             "contentHash": _canonical_hash(candidate_assets),
             "inputHash": input_hash,
             "updatedAt": _iso_utc(now_utc),
@@ -395,7 +466,7 @@ def ensure_quarterly_risk_policies(
             row for row in weeklies
             if (_as_date(row.get("date")) or date.min) >= five_year_start - timedelta(days=7)
         ]
-        kelly_result = build_quarterly_kelly_candidate(prices, data_cutoff=cutoff.isoformat())
+        kelly_result = build_quarterly_kelly_candidate(prices, data_cutoff=cutoff.isoformat(), min_observations=0)
         window_start = _as_date(prices[0].get("date")) if prices else None
         window_end = _as_date(prices[-1].get("date")) if prices else None
         kelly_window_complete = bool(
@@ -412,7 +483,7 @@ def ensure_quarterly_risk_policies(
         kelly_ready = (
             kelly_result.get("status") == "CANDIDATE"
             and kelly_evidence_ok
-            and len(prices) >= 261
+            and int(kelly_result.get("volatilityObservations", 0)) >= 104
             and kelly_window_complete
             and all(_as_date(row.get("date")) is not None and _as_date(row.get("date")) <= completed_week_cutoff for row in prices)
         )
@@ -425,7 +496,7 @@ def ensure_quarterly_risk_policies(
             elif not kelly_evidence_ok:
                 kelly_reason = "benchmark corporate-action evidence unavailable"
             else:
-                kelly_reason = "completed five-year weekly sample unavailable"
+                kelly_reason = "completed five-year weekly sample or 104 return observations unavailable"
         input_hash = _canonical_hash({
             "dataCutoff": cutoff.isoformat(),
             "completedWeekCutoff": completed_week_cutoff.isoformat(),
@@ -486,8 +557,43 @@ def ensure_quarterly_risk_policies(
         "dataCutoff": cutoff.isoformat(),
         "completedWeekCutoff": completed_week_cutoff.isoformat(),
         "beta": {
-            "status": "CANDIDATE_READY" if beta_refresh_needed and beta_candidate_output.exists() else "REUSED" if beta_is_current else "WAITING_FOR_PORTFOLIO_QUALIFICATION",
+            "status": (
+                "CANDIDATE_READY_FOR_LIVE_COVERAGE"
+                if beta_refresh_needed and beta_candidate_output.exists()
+                and _read_json(beta_candidate_output)
+                and _read_json(beta_candidate_output).get("status") == "CANDIDATE"
+                else "PARTIAL_CANDIDATE_BLOCKED"
+                if beta_refresh_needed and beta_candidate_output.exists()
+                else "REUSED" if beta_is_current else "WAITING_FOR_PORTFOLIO_QUALIFICATION"
+            ),
             "symbolsRequested": sorted(beta_symbols),
+            "unmodeledSymbols": unmodeled_symbols,
+            "symbolsUnresolved": sorted(
+                symbol for symbol in beta_symbols
+                if not _candidate_record_ready(((_read_json(beta_candidate_output) or {}).get("assets") or {}).get(symbol))
+            ) if beta_candidate_output.exists() else sorted(beta_symbols),
+            "failedSymbols": [
+                {
+                    "symbol": symbol,
+                    "status": record.get("status"),
+                    "reasonCode": record.get("reasonCode") or record.get("reason") or "BETA_EVIDENCE_UNAVAILABLE",
+                    "observations": record.get("observations", 0),
+                    "attemptedAt": record.get("attemptedAt"),
+                }
+                for symbol, record in sorted(((_read_json(beta_candidate_output) or {}).get("assets") or {}).items())
+                if isinstance(record, Mapping) and not _candidate_record_ready(record)
+            ] if beta_candidate_output.exists() else [],
+            "activationReady": bool(
+                beta_is_current or (
+                    beta_candidate_output.exists()
+                    and (_read_json(beta_candidate_output) or {}).get("status") == "CANDIDATE"
+                    and not unmodeled_symbols
+                    and not any(
+                        not _candidate_record_ready(((_read_json(beta_candidate_output) or {}).get("assets") or {}).get(symbol))
+                        for symbol in beta_symbols
+                    )
+                )
+            ),
             "retryAfterHours": 24,
             "candidatePath": str(beta_candidate_output),
         },
@@ -522,9 +628,10 @@ def promote_beta_candidate_if_qualified(
     if (
         not isinstance(candidate, Mapping)
         or not _valid_sealed_cache(candidate)
+        or candidate.get("algorithmVersion") != AUTO_VALIDATION_ALGORITHM
         or candidate.get("dataCutoff") != previous_quarter_cutoff(current_date).isoformat()
     ):
-        return {"status": "NO_CURRENT_CANDIDATE", "reasonCode": "quarter_candidate_missing"}
+        return {"status": "NO_CURRENT_CANDIDATE", "reasonCode": "quarter_candidate_missing_or_algorithm_mismatch"}
     input_hash = str(candidate.get("inputHash", ""))
     if not re.fullmatch(r"[0-9a-f]{64}", input_hash):
         return {"status": "REJECTED", "reasonCode": "candidate_input_hash_invalid"}
