@@ -9,6 +9,7 @@ import time
 import copy
 from pathlib import Path
 from collections import Counter
+from typing import Mapping
 import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
@@ -24,6 +25,7 @@ from risk import (
     composite_guardrails,
 )
 from beta_policy import (
+    AUTO_VALIDATION_ALGORITHM,
     DEFAULT_ACTIVE_KELLY_PATH,
     DEFAULT_ACTIVE_POLICY_PATH,
     load_active_beta_policy,
@@ -1116,6 +1118,7 @@ def main():
     beta_path = os.getenv("BETA_POLICY_ACTIVE_PATH") or active_policy_path(
         risk_policy_state_dir, "beta-policy-active.json", DEFAULT_ACTIVE_POLICY_PATH,
     )
+    quarterly_summary: dict[str, Any] = {}
     try:
         quarterly_summary_path = Path(".private-build/quarterly-risk-policy-summary.json")
         quarterly_summary = json.loads(quarterly_summary_path.read_text(encoding="utf-8"))
@@ -1270,8 +1273,25 @@ def main():
     beta_status, beta_status_class = classify_beta_capacity(beta_capacity) if beta_capacity is not None else ("⚪ 資料不足", "risk-unavailable")
     beta_stale_reference = beta_policy.get("quality") == "policy_stale_reference"
     kelly_stale_reference = kelly_policy.get("quality") == "policy_stale_reference"
+    quarterly_beta = quarterly_summary.get("beta", {}) if isinstance(quarterly_summary, Mapping) else {}
+    beta_validation_reasons = [
+        str(item.get("reasonCode") or item.get("reason") or "BETA_EVIDENCE_UNAVAILABLE")
+        for item in quarterly_beta.get("failedSymbols", [])
+        if isinstance(item, Mapping)
+    ] if isinstance(quarterly_beta, Mapping) else []
+    normalized_beta_reasons = " ".join(beta_validation_reasons).upper()
     if beta_stale_reference:
-        display_beta_status, display_beta_class = "Beta參數更新待確認", "risk-unavailable"
+        if "FX_" in normalized_beta_reasons or "USD/TWD" in normalized_beta_reasons:
+            display_beta_status = "匯率資料待更新"
+        elif "OFFICIAL_ACTION" in normalized_beta_reasons or "CORPORATE_ACTION" in normalized_beta_reasons:
+            display_beta_status = "事件資料待驗證"
+        elif "INSUFFICIENT PAIRED" in normalized_beta_reasons or "INSUFFICIENT_BETA" in normalized_beta_reasons:
+            display_beta_status = "Beta歷史不足"
+        elif beta_activation.get("status") == "WAITING_FOR_PORTFOLIO_QUALIFICATION":
+            display_beta_status = "Beta覆蓋率待確認"
+        else:
+            display_beta_status = "Beta參數更新待確認"
+        display_beta_class = "risk-unavailable"
     elif kelly_stale_reference:
         display_beta_status, display_beta_class = "凱利參數更新待確認", "risk-unavailable"
     elif beta_policy.get("status") != "READY":
@@ -1670,7 +1690,12 @@ def main():
         if beta_stale_reference else
         "凱利邊界為上一季度參考值；本季凱利重新驗證完成前禁止增加風險。"
         if kelly_stale_reference else
-        str(beta_policy.get("reason") or kelly_policy.get("reason") or "資料品質驗證未完成；禁止增加風險。")
+        str(
+            beta_validation_reasons[0]
+            if beta_validation_reasons and beta_policy.get("status") != "READY"
+            else beta_policy.get("reason") or kelly_policy.get("reason")
+            or "資料品質驗證未完成；禁止增加風險。"
+        )
         if beta_policy.get("status") != "READY" or kelly_policy.get("status") != "READY" else ""
     )
     html_content = f"""
@@ -2373,6 +2398,16 @@ def main():
         "betaLifecycle": (beta_policy.get("metadata") or beta_policy.get("referenceMetadata") or {}).get("lifecycle", "UNAVAILABLE"),
         "kellyLifecycle": (active_kelly or reference_kelly).get("lifecycle", "UNAVAILABLE"),
         "betaApprovalStatus": (beta_policy.get("metadata") or {}).get("approvalStatus", "NOT_READY"),
+        "automaticValidation": {
+            "algorithmVersion": AUTO_VALIDATION_ALGORITHM,
+            "candidateStatus": quarterly_beta.get("candidateStatus", quarterly_beta.get("status")) if isinstance(quarterly_beta, Mapping) else "UNAVAILABLE",
+            "activationStatus": beta_activation.get("status"),
+            "failureReasons": beta_validation_reasons,
+            "failedSymbols": [
+                item.get("symbol") for item in quarterly_beta.get("failedSymbols", [])
+                if isinstance(item, Mapping) and item.get("symbol")
+            ] if isinstance(quarterly_beta, Mapping) else [],
+        },
         "kellyApprovalStatus": active_kelly.get("approvalStatus", "NOT_READY") if kelly_policy.get("status") == "READY" else "NOT_READY",
         "displayQualityNote": beta_display_title or None,
         "assetBeta": round(asset_beta, 2) if asset_beta is not None else None,

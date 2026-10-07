@@ -15,6 +15,7 @@ from quarterly_risk_policy import (
     inventory_symbol_markets,
     promote_beta_candidate_if_qualified,
 )
+from quarterly_risk_validation import validate_snapshot_readonly
 
 
 def _research_series(symbol, market, start, cutoff):
@@ -51,6 +52,8 @@ def _research_series(symbol, market, start, cutoff):
                 "verifiedAt": "2026-10-05T01:00:00Z",
                 "coverageComplete": True,
                 "sourceHash": series_hash,
+                "exchangeTimezoneName": "Europe/London",
+                "clippedOutOfRangeRows": 0,
             },
         }
     events = {"splits": {"fixture": {"ratio": 1.0}}, "dividends": {}}
@@ -199,6 +202,42 @@ class QuarterlyRiskPolicyTests(unittest.TestCase):
             path.write_text(json.dumps(payload), encoding="utf-8")
             self.assertIsNone(_candidate_cache(path, cutoff=date(2026, 9, 30)))
 
+    def test_v3_recent_failure_does_not_cool_down_v4_candidate_rebuild(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_dir, candidate_dir = root / "state", root / "audit"
+            state_dir.mkdir()
+            failed = {
+                "status": "INSUFFICIENT_EVIDENCE",
+                "reason": "stale v3 result",
+                "attemptedAt": "2026-10-07T00:00:00Z",
+                "observations": 0,
+            }
+            old = _sealed_cache({
+                "dataCutoff": "2026-09-30",
+                "algorithmVersion": "quarterly-risk-v3",
+                "assets": {"TEST": failed},
+            })
+            (state_dir / "beta-policy-candidate-cache.json").write_text(json.dumps(old), encoding="utf-8")
+            calls = []
+
+            def fetcher(symbol, *, market, start, end, token=None):
+                calls.append(symbol)
+                return _research_series(symbol, market, start, end)
+
+            summary = ensure_quarterly_risk_policies(
+                {"台股": {"006208": 100, "TEST": 50}, "美股": {}, "基金": {}},
+                state_dir=state_dir,
+                candidate_dir=candidate_dir,
+                today=date(2026, 10, 7),
+                now=datetime(2026, 10, 7, tzinfo=timezone.utc),
+                fetcher=fetcher,
+            )
+            self.assertIn("TEST", calls)
+            self.assertEqual(summary["algorithmVersion"], "quarterly-risk-v4")
+            candidate = json.loads((candidate_dir / "beta-policy-candidate.json").read_text(encoding="utf-8"))
+            self.assertEqual(candidate["algorithmVersion"], "quarterly-risk-v4")
+
     def test_v2_sealed_activation_candidate_cannot_be_promoted(self):
         with tempfile.TemporaryDirectory() as directory:
             state_dir = Path(directory)
@@ -291,6 +330,40 @@ class QuarterlyRiskPolicyTests(unittest.TestCase):
             )
             self.assertEqual(result["status"], "NO_CURRENT_CANDIDATE")
             self.assertFalse((state_dir / "beta-policy-active.json").exists())
+
+    def test_readonly_parameter_validation_uses_staged_state_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_dir = root / "trusted-state"
+            state_dir.mkdir()
+            marker = state_dir / "preserve.txt"
+            marker.write_text("unchanged", encoding="utf-8")
+
+            def fetcher(symbol, *, market, start, end, token=None):
+                return _research_series(symbol, market, start, end)
+
+            result = validate_snapshot_readonly(
+                {
+                    "inventory": {"台股": {"006208": 100, "TEST": 50}, "美股": {}, "基金": {}},
+                    "assetValuesTwd": {"006208": 900_000, "TEST": 100_000},
+                    "totalAsset": 1_000_000,
+                    "totalDebt": 0,
+                    "marketBySymbol": {"006208": "tw", "TEST": "tw"},
+                },
+                state_dir=state_dir,
+                today=date(2026, 10, 7),
+                now=datetime(2026, 10, 7, tzinfo=timezone.utc),
+                fetcher=fetcher,
+            )
+            self.assertEqual(result["status"], "PASS")
+            self.assertEqual(result["beta"]["formalStatus"], "READY")
+            self.assertIsNotNone(result["beta"]["navBeta"])
+            self.assertEqual(result["beta"]["coveragePct"], 100.0)
+            self.assertEqual(result["kelly"]["status"], "AUTO_VALIDATED")
+            self.assertIsNotNone(result["kelly"]["halfKellyLimit"])
+            self.assertFalse((state_dir / "beta-policy-active.json").exists())
+            self.assertEqual(marker.read_text(encoding="utf-8"), "unchanged")
+            self.assertEqual(result["sideEffects"]["telegram"], False)
 
 
 if __name__ == "__main__":
