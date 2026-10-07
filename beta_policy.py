@@ -15,8 +15,10 @@ import json
 import math
 import re
 import time
+import threading
 from pathlib import Path
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 
@@ -24,12 +26,15 @@ from risk import estimate_beta_from_returns, quarterly_half_kelly
 
 
 POLICY_SCHEMA_VERSION = 1
-AUTO_VALIDATION_ALGORITHM = "quarterly-risk-v3"
+AUTO_VALIDATION_ALGORITHM = "quarterly-risk-v4"
 AUTO_VALIDATION_REQUIRED_CHECKS = frozenset({
     "point_in_time_cutoff",
     "completed_week_window",
     "paired_week_observations",
     "corporate_action_response_evidence",
+    "official_action_range_and_schema",
+    "fx_timezone_quote_direction_and_coverage",
+    "research_rows_cropped_to_point_in_time_window",
     "source_content_hash",
     "finite_coefficients",
     "kelly_formula",
@@ -39,6 +44,14 @@ DEFAULT_ACTIVE_POLICY_PATH = "config/beta-policy-active.json"
 DEFAULT_ACTIVE_KELLY_PATH = "config/kelly-policy-active.json"
 FIXED_BETAS = {"006208": 1.0, "00685L": 2.0}
 OTC_SYMBOLS = {"00886", "3455"}
+
+# One run may estimate many Taiwan holdings against the same official range
+# tables. Share only successful responses inside an explicit run scope; never
+# carry official event responses between settlements.
+_OFFICIAL_QUERY_GUARD = threading.RLock()
+_OFFICIAL_QUERY_CACHE: dict[tuple[str, tuple[tuple[str, str], ...]], tuple[Any, str]] | None = None
+_OFFICIAL_QUERY_LOCKS: dict[tuple[str, tuple[tuple[str, str], ...]], threading.Lock] = {}
+_OFFICIAL_SOURCE_SEMAPHORE = threading.BoundedSemaphore(2)
 
 
 def _finite(value: Any) -> float | None:
@@ -131,7 +144,7 @@ def _valid_corporate_action_evidence(value: Any, *, window_start: date | None = 
             return False
         if value.get("coverageComplete") is not True:
             return False
-        expected_families = {"twt49u", "twtaau", "twtb8u"} if provider.startswith("TWSE") else {"exDailyQ", "revivt", "pvChgRslt"}
+        expected_families = {"twt49u", "twtaau", "twtb8u", "twtcau"} if provider.startswith("TWSE") else {"exDailyQ", "revivt", "pvChgRslt"}
         if not expected_families.issubset({str(item) for item in value.get("sourceFamilies", [])}):
             return False
         response_hashes = value.get("sourceResponseHashes")
@@ -139,12 +152,28 @@ def _valid_corporate_action_evidence(value: Any, *, window_start: date | None = 
             return False
         if any(not re.fullmatch(r"[0-9a-f]{64}", str(response_hashes.get(name, ""))) for name in expected_families):
             return False
-        if verification_status == "NO_EVENTS_VERIFIED":
-            try:
-                if int(value.get("eventCount", -1)) != 0:
-                    return False
-            except (TypeError, ValueError):
-                return False
+        try:
+            event_count = int(value.get("eventCount", -1))
+        except (TypeError, ValueError):
+            return False
+        if event_count < 0 or (verification_status == "NO_EVENTS_VERIFIED" and event_count != 0):
+            return False
+        if verification_status == "EVENTS_VERIFIED" and event_count <= 0:
+            return False
+        requested_start = _as_date(value.get("requestedStart"))
+        requested_end = _as_date(value.get("requestedEnd"))
+        if requested_start is None or requested_end is None or requested_start > requested_end:
+            return False
+        if window_start is not None and requested_start > window_start:
+            return False
+        if window_end is not None and requested_end < window_end:
+            return False
+        try:
+            verified_at = datetime.fromisoformat(str(value.get("verifiedAt", "")).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if verified_at.tzinfo is None:
+            return False
     else:
         return False
     requested_events = value.get("requestedEvents")
@@ -171,6 +200,18 @@ def _parse_taiwan_date(value: Any) -> date | None:
     text = str(value or "").strip()
     if not text:
         return None
+    western_compact = re.fullmatch(r"(\d{4})(\d{2})(\d{2})", text)
+    if western_compact:
+        try:
+            return date(int(western_compact.group(1)), int(western_compact.group(2)), int(western_compact.group(3)))
+        except ValueError:
+            return None
+    compact_roc = re.fullmatch(r"(\d{3})(\d{2})(\d{2})", text)
+    if compact_roc:
+        try:
+            return date(int(compact_roc.group(1)) + 1911, int(compact_roc.group(2)), int(compact_roc.group(3)))
+        except ValueError:
+            return None
     roc_match = re.fullmatch(r"(\d{2,3})[年/](\d{1,2})[月/](\d{1,2})日?", text)
     if roc_match:
         try:
@@ -181,18 +222,20 @@ def _parse_taiwan_date(value: Any) -> date | None:
 
 
 def _official_action_specs(market: str, start: date, end: date) -> tuple[str, list[tuple[str, str, dict[str, str]]]]:
+    start_ymd, end_ymd = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
     if market == "otc":
         roc_start = f"{start.year - 1911}/{start.month:02d}/{start.day:02d}"
         roc_end = f"{end.year - 1911}/{end.month:02d}/{end.day:02d}"
         return "TPEx official corporate-action API", [
-            ("exDailyQ", "https://www.tpex.org.tw/web/stock/exright/dailyquo/exDailyQ_result.php", {"l": "zh-tw", "d": roc_start, "ed": roc_end}),
-            ("revivt", "https://www.tpex.org.tw/web/stock/exright/revivt/revivt_result.php", {"l": "zh-tw", "d": roc_start, "ed": roc_end, "o": "data"}),
-            ("pvChgRslt", "https://www.tpex.org.tw/web/stock/exright/pvChgRslt/pvChgRslt_result.php", {"l": "zh-tw", "d": roc_start, "ed": roc_end, "o": "data"}),
+            ("exDailyQ", "https://www.tpex.org.tw/www/zh-tw/bulletin/exDailyQ", {"startDate": roc_start, "endDate": roc_end}),
+            ("revivt", "https://www.tpex.org.tw/www/zh-tw/bulletin/revivt", {"startDate": roc_start, "endDate": roc_end}),
+            ("pvChgRslt", "https://www.tpex.org.tw/www/zh-tw/bulletin/pvChgRslt", {"startDate": roc_start, "endDate": roc_end}),
         ]
     return "TWSE official corporate-action API", [
-        ("twt49u", "https://www.twse.com.tw/rwd/zh/exRight/TWT49U", {"strDate": start.strftime("%Y%m%d"), "endDate": end.strftime("%Y%m%d"), "response": "json"}),
-        ("twtaau", "https://www.twse.com.tw/exchangeReport/TWTAUU", {"strDate": start.strftime("%Y%m%d"), "endDate": end.strftime("%Y%m%d"), "response": "json"}),
-        ("twtb8u", "https://www.twse.com.tw/exchangeReport/TWTB8U", {"strDate": start.strftime("%Y%m%d"), "endDate": end.strftime("%Y%m%d"), "response": "json"}),
+        ("twt49u", "https://www.twse.com.tw/rwd/zh/exRight/TWT49U", {"startDate": start_ymd, "endDate": end_ymd, "response": "json"}),
+        ("twtaau", "https://www.twse.com.tw/rwd/zh/reducation/TWTAUU", {"startDate": start_ymd, "endDate": end_ymd, "response": "json"}),
+        ("twtb8u", "https://www.twse.com.tw/rwd/zh/change/TWTB8U", {"startDate": start_ymd, "endDate": end_ymd, "response": "json"}),
+        ("twtcau", "https://www.twse.com.tw/rwd/zh/split/TWTCAU", {"startDate": start_ymd, "endDate": end_ymd, "response": "json"}),
     ]
 
 
@@ -226,22 +269,108 @@ def _official_rows(payload: Any, *, provider: str, family: str) -> list[tuple[di
         if status in {"查詢日期範圍內無資料", "無符合條件資料"}:
             return []
         raise ValueError(f"{family}: official fields/data missing")
-    data = payload.get("aaData")
-    if not isinstance(data, list):
-        raise ValueError(f"{family}: TPEx result rows missing")
-    raw_total = payload.get("iTotalRecords", payload.get("iTotalDisplayRecords"))
-    try:
-        total = int(raw_total)
-    except (TypeError, ValueError):
-        raise ValueError(f"{family}: TPEx result count missing")
-    if total != len(data):
-        raise ValueError(f"{family}: TPEx range result is truncated")
+    if str(payload.get("stat", "ok")).strip().lower() not in {"ok", "success"}:
+        raise ValueError(f"{family}: TPEx response status is not complete")
+    tables = payload.get("tables")
+    if not isinstance(tables, list) or not tables:
+        raise ValueError(f"{family}: TPEx tables missing")
     result = []
-    for raw in data:
-        if not isinstance(raw, (list, tuple)) or len(raw) < 3:
-            raise ValueError(f"{family}: TPEx row schema mismatch")
-        result.append(({"日期": raw[0], "代號": raw[1], "名稱": raw[2], "欄位": list(raw)}, "OK"))
+    recognized_table = False
+    for table in tables:
+        if not isinstance(table, Mapping):
+            raise ValueError(f"{family}: TPEx table schema mismatch")
+        fields, data = table.get("fields"), table.get("data")
+        if not isinstance(fields, list) or not isinstance(data, list):
+            raise ValueError(f"{family}: TPEx fields/data missing")
+        if not fields:
+            if data:
+                raise ValueError(f"{family}: TPEx data has no field schema")
+            continue
+        field_names = [str(field) for field in fields]
+        has_symbol = any(("代號" in field or "代碼" in field) for field in field_names)
+        has_date = any("日期" in field for field in field_names)
+        if not (has_symbol and has_date):
+            if data:
+                raise ValueError(f"{family}: TPEx symbol/date fields missing")
+            continue
+        recognized_table = True
+        for raw in data:
+            if not isinstance(raw, (list, tuple)) or len(raw) != len(fields):
+                raise ValueError(f"{family}: TPEx row schema mismatch")
+            result.append(({str(key): value for key, value in zip(field_names, raw)}, "OK"))
+    if not recognized_table:
+        raise ValueError(f"{family}: TPEx empty response has no verifiable schema")
     return result
+
+
+def _official_period_matches(payload: Any, start: date, end: date) -> bool:
+    """If an exchange echoes its query range, require an exact match."""
+    if not isinstance(payload, Mapping) or payload.get("date") in (None, ""):
+        return True
+    raw = str(payload.get("date", "")).strip()
+    parts = re.split(r"\s*(?:~|～|至)\s*", raw)
+    if len(parts) != 2:
+        return start == end and _parse_taiwan_date(raw) == start
+    return _parse_taiwan_date(parts[0]) == start and _parse_taiwan_date(parts[1]) == end
+
+
+def official_action_cache_scope():
+    """Share identical official requests among symbols within one settlement."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def scope():
+        global _OFFICIAL_QUERY_CACHE, _OFFICIAL_QUERY_LOCKS
+        with _OFFICIAL_QUERY_GUARD:
+            _OFFICIAL_QUERY_CACHE = {}
+            _OFFICIAL_QUERY_LOCKS = {}
+        try:
+            yield
+        finally:
+            with _OFFICIAL_QUERY_GUARD:
+                _OFFICIAL_QUERY_CACHE = None
+                _OFFICIAL_QUERY_LOCKS = {}
+
+    return scope()
+
+
+def _official_payload(getter: Any, url: str, params: Mapping[str, str], timeout: float) -> tuple[Any, str]:
+    cache_key = (url, tuple(sorted((str(key), str(value)) for key, value in params.items())))
+    with _OFFICIAL_QUERY_GUARD:
+        cache = _OFFICIAL_QUERY_CACHE
+        lock = _OFFICIAL_QUERY_LOCKS.setdefault(cache_key, threading.Lock()) if cache is not None else None
+    if lock is not None:
+        with lock:
+            with _OFFICIAL_QUERY_GUARD:
+                cached = _OFFICIAL_QUERY_CACHE.get(cache_key) if _OFFICIAL_QUERY_CACHE is not None else None
+            if cached is not None:
+                return cached
+            payload = _request_official_json(getter, url, params, timeout)
+            result = (payload, _canonical_hash(payload))
+            with _OFFICIAL_QUERY_GUARD:
+                if _OFFICIAL_QUERY_CACHE is not None:
+                    _OFFICIAL_QUERY_CACHE[cache_key] = result
+            return result
+    payload = _request_official_json(getter, url, params, timeout)
+    return payload, _canonical_hash(payload)
+
+
+def _request_official_json(getter: Any, url: str, params: Mapping[str, str], timeout: float) -> Any:
+    for attempt in range(3):
+        try:
+            with _OFFICIAL_SOURCE_SEMAPHORE:
+                response = getter(url, params=dict(params), headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
+                response.raise_for_status()
+                return response.json()
+        except (requests.Timeout, requests.ConnectionError, requests.HTTPError) as error:
+            status_code = getattr(getattr(error, "response", None), "status_code", None)
+            transient = isinstance(error, (requests.Timeout, requests.ConnectionError)) or status_code == 429 or (
+                isinstance(status_code, int) and 500 <= status_code < 600
+            )
+            if not transient or attempt == 2:
+                raise
+            time.sleep(2 ** (attempt + 1))
+    raise RuntimeError("official source request exhausted")
 
 
 def fetch_official_taiwan_corporate_actions(
@@ -251,7 +380,7 @@ def fetch_official_taiwan_corporate_actions(
     start: date,
     end: date,
     http_get: Any = None,
-    timeout: float = 15,
+    timeout: float = 12,
 ) -> dict[str, Any]:
     """Verify Taiwan actions over the full research window using exchange data.
 
@@ -266,32 +395,37 @@ def fetch_official_taiwan_corporate_actions(
     response_hashes: dict[str, str] = {}
     try:
         for family, url, params in specs:
-            response = getter(url, params=params, headers={"User-Agent": "Mozilla/5.0"}, timeout=timeout)
-            response.raise_for_status()
-            raw_payload = response.json()
+            raw_payload, response_hash = _official_payload(getter, url, params, timeout)
+            if not _official_period_matches(raw_payload, start, end):
+                raise ValueError(f"{family}: official query range echo mismatch")
             parsed = _official_rows(raw_payload, provider=provider, family=family)
-            response_hashes[family] = _canonical_hash(raw_payload)
+            response_hashes[family] = response_hash
             for row, _ in parsed:
-                code_key = next((key for key in row if "代號" in key), None)
+                code_key = next((key for key in row if "代號" in key or "代碼" in key), None)
                 event_key = next((key for key in row if "日期" in key), None)
                 code = str(row.get(code_key, "")).strip() if code_key else ""
+                if code != _symbol(symbol):
+                    continue
                 event_date = _parse_taiwan_date(row.get(event_key)) if event_key else None
-                if code != _symbol(symbol) or event_date is None or not start <= event_date <= end:
+                if event_date is None:
+                    raise ValueError(f"{family}: matching symbol has invalid event date")
+                if not start <= event_date <= end:
                     continue
                 row["__eventDate"] = event_date.isoformat()
                 matched[family].append(row)
 
-        unsupported = [family for family, rows in matched.items() if rows and family != "twt49u" and family != "exDailyQ"]
+        unsupported = [family for family, rows in matched.items() if rows and family not in {"twt49u", "exDailyQ", "twtcau"}]
         dividends: list[dict[str, Any]] = []
+        splits: list[dict[str, Any]] = []
         events: list[dict[str, Any]] = []
         for row in matched.get("twt49u", []) + matched.get("exDailyQ", []):
             if "欄位" in row:
                 fields = row["欄位"]
-                try:
-                    cash = _finite(str(fields[13]).replace(",", "")) if len(fields) > 13 else None
-                    bonus_shares = _finite(str(fields[14]).replace(",", "")) if len(fields) > 14 else None
-                except (TypeError, ValueError):
-                    cash = bonus_shares = None
+                field_map = {str(key): value for key, value in row.items() if not str(key).startswith("__")}
+                cash_key = next((key for key in field_map if "現金股利" in key or key == "息值"), None)
+                bonus_key = next((key for key in field_map if "無償配股" in key or "股票股利" in key), None)
+                cash = _finite(str(field_map.get(cash_key, "")).replace(",", "")) if cash_key else None
+                bonus_shares = _finite(str(field_map.get(bonus_key, "0")).replace(",", "")) if bonus_key else 0.0
                 if cash is None or bonus_shares is None:
                     unsupported.append("exDailyQ_schema")
                     continue
@@ -300,20 +434,46 @@ def fetch_official_taiwan_corporate_actions(
                 if cash > 0:
                     dividends.append({"date": row["__eventDate"], "amount": cash})
             else:
-                event_kind = " ".join(str(value) for key, value in row.items() if "權息" in key or "權/息" in key)
-                right_value = next((_finite(str(value).replace(",", "")) for key, value in row.items() if "權值" in key), None)
-                cash_value = next((_finite(str(value).replace(",", "")) for key, value in row.items() if "息值" in key), None)
-                if (right_value is not None and right_value > 0) or "權" in event_kind:
-                    unsupported.append("stock_rights")
-                if cash_value is None:
+                event_kind = " ".join(str(value).strip() for key, value in row.items() if key in {"權/息", "權息", "種類"})
+                right_key = next((key for key in row if key == "權值" or key.startswith("權值 ")), None)
+                cash_key = next((key for key in row if key == "息值" or key.startswith("息值 ")), None)
+                combined_key = next((key for key in row if "權值+息值" in key or "權值＋息值" in key), None)
+                right_value = _finite(str(row.get(right_key, "0")).replace(",", "")) if right_key else 0.0
+                cash_value = _finite(str(row.get(cash_key, "")).replace(",", "")) if cash_key else None
+                if cash_value is None and combined_key and event_kind.strip() in {"息", "除息", "現金股利"}:
+                    cash_value = _finite(str(row.get(combined_key, "")).replace(",", ""))
+                if combined_key and any(marker in event_kind for marker in ("權", "股")):
+                    right_value = 1.0
+                if right_value is None or cash_value is None:
                     unsupported.append("twt49u_schema")
                     continue
+                if right_value > 0 or any(marker in event_kind for marker in ("權", "股票")):
+                    unsupported.append("stock_rights")
                 if cash_value > 0:
                     dividends.append({"date": row["__eventDate"], "amount": cash_value})
             events.append(row)
+        for row in matched.get("twtcau", []):
+            fields = {str(key): value for key, value in row.items() if not str(key).startswith("__")}
+            old_close_key = next((key for key in fields if "停止買賣前" in key and ("收盤" in key or "價格" in key)), None)
+            resume_price_key = next((key for key in fields if "恢復買賣參考價" in key or "恢復買賣參考價格" in key), None)
+            old_close = _finite(str(fields.get(old_close_key, "")).replace(",", "")) if old_close_key else None
+            resume_price = _finite(str(fields.get(resume_price_key, "")).replace(",", "")) if resume_price_key else None
+            if old_close is None or resume_price is None or old_close <= 0 or resume_price <= 0:
+                unsupported.append("twtcau_split_ratio_unavailable")
+                continue
+            ratio = old_close / resume_price
+            if not math.isfinite(ratio) or ratio <= 0:
+                unsupported.append("twtcau_split_ratio_invalid")
+                continue
+            splits.append({"date": row["__eventDate"], "numerator": ratio, "denominator": 1.0})
+            events.append(row)
         if unsupported:
             raise ValueError("unsupported official capital-action type")
-        normalized_events = {"dividends": sorted(dividends, key=lambda item: item["date"]), "splits": [], "officialRows": events}
+        normalized_events = {
+            "dividends": sorted(dividends, key=lambda item: item["date"]),
+            "splits": sorted(splits, key=lambda item: item["date"]),
+            "officialRows": events,
+        }
         return {
             "status": "NO_EVENTS_VERIFIED" if not events else "EVENTS_VERIFIED",
             "provider": provider,
@@ -321,12 +481,14 @@ def fetch_official_taiwan_corporate_actions(
             "sourceFamilies": sorted(response_hashes),
             "sourceResponseHashes": response_hashes,
             "coverageComplete": len(response_hashes) == len(specs),
+            "requestedStart": start.isoformat(),
+            "requestedEnd": end.isoformat(),
         }
     except Exception as error:  # noqa: BLE001 - callers retain a reason code, never a false pass
         message = str(error).lower()
         if "unsupported official" in message or "stock_rights" in message or "stock_distribution" in message:
             reason_code = "OFFICIAL_ACTION_TYPE_UNSUPPORTED"
-        elif "schema" in message or "count" in message or "truncated" in message or "status is not complete" in message:
+        elif "schema" in message or "count" in message or "truncated" in message or "status is not complete" in message or "invalid event date" in message or "range echo mismatch" in message:
             reason_code = "OFFICIAL_ACTION_RESPONSE_INVALID"
         else:
             reason_code = "OFFICIAL_ACTION_SOURCE_UNAVAILABLE"
@@ -353,7 +515,7 @@ def fetch_yahoo_research_series(
     end: date,
     http_get: Any = None,
     attempts: int = 3,
-    timeout: float = 15,
+    timeout: float = 12,
     sleep_fn: Any = time.sleep,
 ) -> dict[str, Any]:
     """Fetch raw OHLC and explicit events for candidate construction.
@@ -364,11 +526,22 @@ def fetch_yahoo_research_series(
     """
     getter = http_get or requests.get
     failures: list[str] = []
-    period1 = int(datetime.combine(start, datetime.min.time(), tzinfo=timezone.utc).timestamp())
-    period2 = int(datetime.combine(end + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc).timestamp())
-    for chart_symbol in yahoo_chart_symbols(symbol, market):
-        for attempt in range(max(1, attempts)):
+    # Yahoo daily bars are timestamped against each instrument's exchange
+    # timezone. Widen transport bounds, then crop on those local dates.
+    period1 = int(datetime.combine(start - timedelta(days=2), datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    period2 = int(datetime.combine(end + timedelta(days=3), datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    chart_symbols = yahoo_chart_symbols(symbol, market)
+    attempt_limit = max(1, attempts)
+    per_symbol_attempts = (
+        [attempt_limit - 1, 1]
+        if len(chart_symbols) > 1 and attempt_limit > 1
+        else [attempt_limit]
+    )
+    total_attempts = 0
+    for chart_symbol, symbol_attempts in zip(chart_symbols, per_symbol_attempts):
+        for attempt in range(symbol_attempts):
             try:
+                total_attempts += 1
                 response = getter(
                     f"https://query1.finance.yahoo.com/v8/finance/chart/{chart_symbol}",
                     params={"period1": period1, "period2": period2, "interval": "1d", "events": "history,splits,div"},
@@ -378,23 +551,49 @@ def fetch_yahoo_research_series(
                 response.raise_for_status()
                 payload = response.json()
                 result = payload["chart"]["result"][0]
+                meta = result.get("meta") or {}
+                exchange_timezone = str(meta.get("exchangeTimezoneName") or "").strip()
+                if not exchange_timezone:
+                    raise ValueError("Yahoo exchange timezone metadata missing")
+                try:
+                    source_tz = ZoneInfo(exchange_timezone)
+                except (ZoneInfoNotFoundError, ValueError):
+                    raise ValueError("Yahoo exchange timezone metadata invalid")
+                if (_symbol(symbol) == "TWD=X" or str(market).lower() == "fx") and str(meta.get("currency", "")).upper() != "TWD":
+                    raise ValueError("USD/TWD quote currency mismatch")
                 timestamps = result.get("timestamp") or []
                 quote = (result.get("indicators") or {}).get("quote", [{}])[0]
                 closes = quote.get("close") or []
                 rows = []
+                clipped_rows = 0
+                seen_sessions: set[date] = set()
                 for index, timestamp in enumerate(timestamps):
                     try:
-                        item_date = datetime.fromtimestamp(float(timestamp), tz=timezone.utc).date()
+                        item_date = datetime.fromtimestamp(float(timestamp), tz=timezone.utc).astimezone(source_tz).date()
                     except (TypeError, ValueError, OverflowError, OSError):
                         continue
+                    if item_date < start or item_date > end:
+                        clipped_rows += 1
+                        continue
+                    if item_date in seen_sessions:
+                        raise ValueError(f"duplicate Yahoo session date {item_date.isoformat()}")
+                    seen_sessions.add(item_date)
                     if index >= len(closes) or _finite(closes[index]) is None:
                         continue
+                    open_value = _finite(quote.get("open", [None] * len(timestamps))[index]) if index < len(quote.get("open", [])) else None
+                    high_value = _finite(quote.get("high", [None] * len(timestamps))[index]) if index < len(quote.get("high", [])) else None
+                    low_value = _finite(quote.get("low", [None] * len(timestamps))[index]) if index < len(quote.get("low", [])) else None
+                    close_value = _finite(closes[index])
+                    if any(value is None or value <= 0 for value in (open_value, high_value, low_value, close_value)):
+                        raise ValueError(f"invalid Yahoo OHLC values for {item_date.isoformat()}")
+                    if low_value > high_value or low_value > min(open_value, close_value) or high_value < max(open_value, close_value):
+                        raise ValueError(f"inconsistent Yahoo OHLC values for {item_date.isoformat()}")
                     rows.append({
                         "date": item_date.isoformat(),
-                        "open": quote.get("open", [None] * len(timestamps))[index] if index < len(quote.get("open", [])) else None,
-                        "high": quote.get("high", [None] * len(timestamps))[index] if index < len(quote.get("high", [])) else None,
-                        "low": quote.get("low", [None] * len(timestamps))[index] if index < len(quote.get("low", [])) else None,
-                        "close": closes[index],
+                        "open": open_value,
+                        "high": high_value,
+                        "low": low_value,
+                        "close": close_value,
                     })
                 if _symbol(symbol) == "TWD=X" or str(market).lower() == "fx":
                     fx_rows = normalize_research_price(rows)
@@ -418,9 +617,11 @@ def fetch_yahoo_research_series(
                             "verifiedAt": datetime.now(timezone.utc).isoformat(),
                             "coverageComplete": True,
                             "sourceHash": series_hash,
+                            "exchangeTimezoneName": exchange_timezone,
+                            "clippedOutOfRangeRows": clipped_rows,
                         },
                         "status": "READY",
-                        "attempts": attempt + 1,
+                        "attempts": total_attempts,
                     }
                 raw_events = result.get("events")
                 events = raw_events if isinstance(raw_events, Mapping) else {}
@@ -432,8 +633,11 @@ def fetch_yahoo_research_series(
                     numerator, denominator = _finite(item.get("numerator")), _finite(item.get("denominator"))
                     if event_timestamp is None or numerator is None or denominator is None or numerator <= 0 or denominator <= 0:
                         raise ValueError("invalid split event evidence")
+                    event_date = datetime.fromtimestamp(event_timestamp, tz=timezone.utc).astimezone(source_tz).date()
+                    if not start <= event_date <= end:
+                        continue
                     splits.append({
-                        "date": datetime.fromtimestamp(event_timestamp, tz=timezone.utc).date().isoformat(),
+                        "date": event_date.isoformat(),
                         "numerator": numerator,
                         "denominator": denominator,
                     })
@@ -445,13 +649,17 @@ def fetch_yahoo_research_series(
                     amount = _finite(item.get("amount"))
                     if event_timestamp is None or amount is None or amount < 0:
                         raise ValueError("invalid dividend event evidence")
+                    event_date = datetime.fromtimestamp(event_timestamp, tz=timezone.utc).astimezone(source_tz).date()
+                    if not start <= event_date <= end:
+                        continue
                     dividends.append({
-                        "date": datetime.fromtimestamp(event_timestamp, tz=timezone.utc).date().isoformat(),
+                        "date": event_date.isoformat(),
                         "amount": amount,
                     })
                 event_count = len(splits) + len(dividends)
                 official_evidence = None
-                if not event_count and str(market).lower() in {"tw", "taiwan", "twd"}:
+                is_taiwan = str(market).lower() in {"tw", "taiwan", "twd"}
+                if is_taiwan:
                     official_evidence = fetch_official_taiwan_corporate_actions(
                         symbol, market="otc" if _symbol(symbol) in OTC_SYMBOLS else "twse",
                         start=start, end=end, http_get=getter, timeout=timeout,
@@ -464,7 +672,7 @@ def fetch_yahoo_research_series(
                     else:
                         action_payload = dict(events)
                 else:
-                    action_payload = dict(events)
+                    action_payload = {"splits": splits, "dividends": dividends}
                 normalized = normalize_research_price(rows, splits=splits, dividends=dividends)
                 if not normalized:
                     raise ValueError("empty normalized research series")
@@ -487,7 +695,7 @@ def fetch_yahoo_research_series(
                         "requestedEvents": ["history", "splits", "dividends"],
                     }
                 elif event_count and isinstance(raw_events, Mapping):
-                    events_hash = _canonical_hash(raw_events)
+                    events_hash = _canonical_hash(action_payload)
                     corporate_evidence = {
                         "provider": "Yahoo Chart API",
                         "verificationStatus": "EVENTS_VERIFIED",
@@ -513,10 +721,23 @@ def fetch_yahoo_research_series(
                     "seriesHash": series_hash,
                     "reason": None if corporate_evidence else (official_evidence or {}).get("reason", "corporate action evidence unavailable"),
                     "reasonCode": None if corporate_evidence else (official_evidence or {}).get("reasonCode", "CORPORATE_ACTION_EVIDENCE_UNAVAILABLE"),
-                    "attempts": attempt + 1,
+                    "attempts": total_attempts,
                 }
             except Exception as error:  # noqa: BLE001 - diagnostic boundary
                 failures.append(f"{chart_symbol}:{type(error).__name__}")
+                if isinstance(error, ValueError):
+                    return {
+                        "symbol": _symbol(symbol),
+                        "market": str(market).lower(),
+                        "currency": "USD" if str(market).lower() in {"us", "usa", "usd"} else "TWD",
+                        "rows": [],
+                        "source": None,
+                        "corporateActionStatus": "UNAVAILABLE",
+                        "status": "UNAVAILABLE",
+                        "reason": str(error),
+                        "reasonCode": "SOURCE_DATA_INVALID",
+                        "attempts": total_attempts,
+                    }
                 if attempt + 1 < max(1, attempts):
                     sleep_fn(min(2 ** attempt, 8))
     return {
@@ -528,6 +749,7 @@ def fetch_yahoo_research_series(
         "corporateActionStatus": "UNAVAILABLE",
         "status": "UNAVAILABLE",
         "reason": "; ".join(failures) or "history unavailable",
+        "reasonCode": "SOURCE_DATA_INVALID" if failures and all(item.endswith(":ValueError") for item in failures) else "SOURCE_UNAVAILABLE",
     }
 
 
@@ -538,7 +760,7 @@ def fetch_finmind_research_series(
     start: date,
     end: date,
     http_get: Any = None,
-    timeout: float = 20,
+    timeout: float = 12,
 ) -> dict[str, Any] | None:
     """Fetch Taiwan raw OHLC through the authenticated research source.
 

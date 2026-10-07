@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from copy import deepcopy
 from datetime import date, datetime, timedelta, timezone
 import hashlib
@@ -11,6 +11,7 @@ import math
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any, Mapping
 
 from beta_policy import (
@@ -24,6 +25,7 @@ from beta_policy import (
     last_completed_week_cutoff,
     load_active_beta_policy,
     load_active_kelly_policy,
+    official_action_cache_scope,
     previous_quarter_cutoff,
     validate_active_kelly_document,
     validate_active_policy_document,
@@ -32,12 +34,15 @@ from beta_policy import (
 from risk import build_quarterly_kelly_candidate, calculate_nav_beta
 
 
-RETRY_UNAVAILABLE_AFTER = timedelta(hours=24)
+RESEARCH_REQUEST_BUDGET_SECONDS = 180
 AUTO_VALIDATION_CHECKS = [
     "point_in_time_cutoff",
     "completed_week_window",
     "paired_week_observations",
     "corporate_action_response_evidence",
+    "official_action_range_and_schema",
+    "fx_timezone_quote_direction_and_coverage",
+    "research_rows_cropped_to_point_in_time_window",
     "source_content_hash",
     "finite_coefficients",
     "kelly_formula",
@@ -121,6 +126,7 @@ def _fx_history_is_valid(payload: Mapping[str, Any] | None, *, cutoff: date | No
         or evidence.get("baseCurrency") != "USD"
         or evidence.get("quoteCurrency") != "TWD"
         or evidence.get("coverageComplete") is not True
+        or evidence.get("exchangeTimezoneName") != "Europe/London"
     ):
         return False
     try:
@@ -129,7 +135,13 @@ def _fx_history_is_valid(payload: Mapping[str, Any] | None, *, cutoff: date | No
         verified_at = datetime.fromisoformat(str(evidence.get("verifiedAt", "")).replace("Z", "+00:00"))
     except ValueError:
         return False
-    if requested_start > requested_end or (cutoff is not None and requested_end < cutoff) or verified_at.tzinfo is None:
+    if (
+        requested_start > requested_end
+        or (cutoff is not None and requested_end != cutoff)
+        or verified_at.tzinfo is None
+        or not isinstance(evidence.get("clippedOutOfRangeRows"), int)
+        or evidence.get("clippedOutOfRangeRows", -1) < 0
+    ):
         return False
     row_hash = _canonical_hash(rows)
     if payload.get("seriesHash") != row_hash or evidence.get("sourceHash") != row_hash:
@@ -145,7 +157,7 @@ def _fx_history_is_valid(payload: Mapping[str, Any] | None, *, cutoff: date | No
             return False
         if not math.isfinite(price) or price <= 0 or (previous is not None and item_date <= previous):
             return False
-        if item_date < requested_start or item_date > requested_end:
+        if item_date < requested_start or item_date > requested_end or (cutoff is not None and item_date > cutoff):
             return False
         previous = item_date
     return True
@@ -253,13 +265,30 @@ def _candidate_record_ready(record: Any) -> bool:
 def _retry_due(record: Any, now: datetime) -> bool:
     if not isinstance(record, Mapping):
         return True
+    reason_code = str(record.get("reasonCode", "")).upper()
+    reason = str(record.get("reason", "")).lower()
+    # A fixed point-in-time window cannot gain observations before the next
+    # quarter. Keep structural failures visible without redownloading six
+    # years of unchanged history on every settlement. Source/dependency
+    # failures are retried on the next scheduled settlement.
+    structural_codes = {
+        "INSUFFICIENT_PAIRED_WEEK_OBSERVATIONS",
+        "INSUFFICIENT_BETA_HISTORY",
+        "OFFICIAL_ACTION_TYPE_UNSUPPORTED",
+        "CORPORATE_ACTION_FACTOR_UNSUPPORTED",
+    }
+    if reason_code in structural_codes or "insufficient paired return observations" in reason:
+        return False
     try:
         last_attempt = datetime.fromisoformat(str(record.get("attemptedAt", "")).replace("Z", "+00:00"))
     except ValueError:
         return True
     if last_attempt.tzinfo is None:
         return True
-    return now - last_attempt.astimezone(timezone.utc) >= RETRY_UNAVAILABLE_AFTER
+    # Keep retry timing tied to the settlement cadence, not a 24-hour delay.
+    # The timestamp remains useful in private diagnostics and for deduping an
+    # accidental rerun within the same workflow invocation.
+    return now.astimezone(timezone.utc) - last_attempt.astimezone(timezone.utc) >= timedelta(minutes=30)
 
 
 def _fetch_research_set(
@@ -268,17 +297,49 @@ def _fetch_research_set(
     result: dict[str, dict[str, Any]] = {}
     if not symbols:
         return result
-    with ThreadPoolExecutor(max_workers=min(6, len(symbols))) as pool:
-        futures = {
-            pool.submit(fetcher, symbol, market=market, start=start, end=cutoff, token=token): (symbol, market)
-            for symbol, market in symbols.items()
-        }
-        for future in as_completed(futures):
-            symbol, market = futures[future]
-            try:
-                payload = future.result()
-            except Exception as error:  # noqa: BLE001 - sanitized source boundary
-                payload = {
+    pool = ThreadPoolExecutor(max_workers=min(4, len(symbols)))
+    futures = {
+        pool.submit(fetcher, symbol, market=market, start=start, end=cutoff, token=token): (symbol, market)
+        for symbol, market in symbols.items()
+    }
+    exhausted = False
+    try:
+        try:
+            completed = as_completed(futures, timeout=RESEARCH_REQUEST_BUDGET_SECONDS)
+            for future in completed:
+                symbol, market = futures[future]
+                try:
+                    payload = future.result()
+                except Exception as error:  # noqa: BLE001 - sanitized source boundary
+                    payload = {
+                        "symbol": symbol,
+                        "market": market,
+                        "currency": "TWD_PER_USD" if market == "fx" else "USD" if market == "us" else "TWD",
+                        "rows": [],
+                        "source": None,
+                        "corporateActionStatus": "UNAVAILABLE",
+                        "status": "UNAVAILABLE",
+                        "reason": type(error).__name__,
+                        "reasonCode": "SOURCE_UNAVAILABLE",
+                    }
+                normalized = dict(payload) if isinstance(payload, Mapping) else {}
+                normalized.setdefault("symbol", symbol)
+                normalized.setdefault("market", market)
+                is_valid = _fx_history_is_valid(normalized) if symbol == "TWD=X" else _history_is_valid(normalized)
+                normalized["status"] = "READY" if is_valid else "UNAVAILABLE"
+                if not is_valid:
+                    if not normalized.get("reason"):
+                        normalized["reason"] = "research evidence failed validation"
+                    if not normalized.get("reasonCode"):
+                        normalized["reasonCode"] = "FX_SOURCE_UNAVAILABLE" if symbol == "TWD=X" else "RESEARCH_EVIDENCE_INVALID"
+                result[symbol] = normalized
+        except FuturesTimeoutError:
+            exhausted = True
+            for future, (symbol, market) in futures.items():
+                if symbol in result:
+                    continue
+                future.cancel()
+                result[symbol] = {
                     "symbol": symbol,
                     "market": market,
                     "currency": "TWD_PER_USD" if market == "fx" else "USD" if market == "us" else "TWD",
@@ -286,19 +347,11 @@ def _fetch_research_set(
                     "source": None,
                     "corporateActionStatus": "UNAVAILABLE",
                     "status": "UNAVAILABLE",
-                    "reason": type(error).__name__,
+                    "reason": "quarterly research time budget exhausted",
+                    "reasonCode": "RESEARCH_TIME_BUDGET_EXHAUSTED",
                 }
-            normalized = dict(payload) if isinstance(payload, Mapping) else {}
-            normalized.setdefault("symbol", symbol)
-            normalized.setdefault("market", market)
-            is_valid = _fx_history_is_valid(normalized) if symbol == "TWD=X" else _history_is_valid(normalized)
-            normalized["status"] = "READY" if is_valid else "UNAVAILABLE"
-            if not is_valid:
-                if not normalized.get("reason"):
-                    normalized["reason"] = "research evidence failed validation"
-                if not normalized.get("reasonCode"):
-                    normalized["reasonCode"] = "RESEARCH_EVIDENCE_INVALID"
-            result[symbol] = normalized
+    finally:
+        pool.shutdown(wait=not exhausted, cancel_futures=True)
     return result
 
 
@@ -360,7 +413,7 @@ def ensure_quarterly_risk_policies(
     }
     beta_refresh_needed = not beta_is_current or bool(retry_symbols)
     kelly_refresh_needed = not kelly_is_current
-    benchmark_needed = bool(retry_symbols) or kelly_refresh_needed
+    benchmark_needed = not beta_is_current or bool(retry_symbols) or kelly_refresh_needed
     histories: dict[str, dict[str, Any]] = {}
     benchmark = _load_research(state, cutoff, "006208")
     fx_history = _load_research(state, cutoff, "TWD=X")
@@ -375,7 +428,8 @@ def ensure_quarterly_risk_policies(
     token = os.getenv("FINMIND_TOKEN", "").strip() or None
     if fetch_symbols:
         start = cutoff - timedelta(days=6 * 365 + 2)
-        fetched = _fetch_research_set(fetch_symbols, start=start, cutoff=cutoff, token=token, fetcher=fetcher)
+        with official_action_cache_scope():
+            fetched = _fetch_research_set(fetch_symbols, start=start, cutoff=cutoff, token=token, fetcher=fetcher)
         for symbol, payload in fetched.items():
             if payload.get("status") == "READY":
                 _save_research(state, cutoff, symbol, payload)
@@ -594,7 +648,10 @@ def ensure_quarterly_risk_policies(
                     )
                 )
             ),
-            "retryAfterHours": 24,
+            "retryPolicy": {
+                "sourceFailure": "NEXT_SCHEDULED_SETTLEMENT",
+                "structuralInsufficiency": "NEXT_QUARTER_OR_DATA_CHANGE",
+            },
             "candidatePath": str(beta_candidate_output),
         },
         "kelly": kelly_summary,

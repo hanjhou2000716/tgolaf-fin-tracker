@@ -8,6 +8,9 @@ from urllib.parse import urlsplit
 
 from beta_policy import (
     _canonical_hash,
+    _official_action_specs,
+    _official_period_matches,
+    _parse_taiwan_date,
     _valid_corporate_action_evidence,
     estimate_beta_policy,
     fetch_official_taiwan_corporate_actions,
@@ -15,6 +18,7 @@ from beta_policy import (
     load_active_beta_policy,
     load_active_kelly_policy,
     normalize_research_price,
+    official_action_cache_scope,
     validate_active_policy_document,
     validate_active_kelly_document,
     weekly_research_series,
@@ -61,7 +65,7 @@ class BetaPolicyTests(unittest.TestCase):
                 return self.payload
 
         def getter(url, *, params, **kwargs):
-            return Response({"aaData": [], "iTotalRecords": 0})
+            return Response({"stat": "ok", "tables": [{"fields": ["除權息日期", "代號", "名稱"], "data": []}]})
 
         result = fetch_official_taiwan_corporate_actions(
             "00886", market="otc", start=date(2021, 9, 24), end=date(2026, 9, 30), http_get=getter,
@@ -101,12 +105,12 @@ class BetaPolicyTests(unittest.TestCase):
             def json(self):
                 return self.payload
 
-        dividend = ["115/04/01", "00886", "ETF"] + ["0"] * 18
-        dividend[13] = "0.50"
-        dividend[14] = "0"
+        fields = ["除權息日期", "代號", "名稱", "除權息前收盤價", "權值+息值", "權/息", "現金股利", "每仟股無償配股"]
+        dividend = ["115/04/01", "00886", "ETF", "100", "0.50", "息", "0.50", "0"]
 
         def getter(url, *, params, **kwargs):
-            return Response({"aaData": [dividend], "iTotalRecords": 1} if "exDailyQ_result" in url else {"aaData": [], "iTotalRecords": 0})
+            data = [dividend] if url.endswith("exDailyQ") else []
+            return Response({"stat": "ok", "tables": [{"fields": fields if data else ["除權息日期", "代號", "名稱"], "data": data}]})
 
         result = fetch_official_taiwan_corporate_actions(
             "00886", market="otc", start=date(2021, 9, 24), end=date(2026, 9, 30), http_get=getter,
@@ -132,19 +136,20 @@ class BetaPolicyTests(unittest.TestCase):
         sessions = [date(2026, 4, 1), date(2026, 4, 2)]
         timestamps = [int(datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc).timestamp()) for day in sessions]
         chart = {"chart": {"result": [{
+            "meta": {"exchangeTimezoneName": "Asia/Taipei", "currency": "TWD"},
             "timestamp": timestamps,
             "indicators": {"quote": [{"open": [100, 99.5], "high": [100, 99.5], "low": [100, 99.5], "close": [100, 99.5]}]},
             # Yahoo omitted events entirely; a successful chart response is not enough.
         }]}}
-        dividend = ["115/04/02", "00886", "ETF"] + ["0"] * 18
-        dividend[13] = "0.50"
-        dividend[14] = "0"
+        fields = ["除權息日期", "代號", "名稱", "除權息前收盤價", "權值+息值", "權/息", "現金股利", "每仟股無償配股"]
+        dividend = ["115/04/02", "00886", "ETF", "100", "0.50", "息", "0.50", "0"]
 
         def getter(url, *, params, **kwargs):
             parsed_url = urlsplit(url)
             if parsed_url.hostname == "query1.finance.yahoo.com":
                 return Response(chart)
-            return Response({"aaData": [dividend], "iTotalRecords": 1} if parsed_url.path.endswith("exDailyQ_result.php") else {"aaData": [], "iTotalRecords": 0})
+            data = [dividend] if parsed_url.path.endswith("exDailyQ") else []
+            return Response({"stat": "ok", "tables": [{"fields": fields if data else ["除權息日期", "代號", "名稱"], "data": data}]})
 
         result = fetch_yahoo_research_series(
             "00886", market="tw", start=date(2026, 4, 1), end=date(2026, 4, 3), http_get=getter,
@@ -153,6 +158,133 @@ class BetaPolicyTests(unittest.TestCase):
         self.assertEqual(result["corporateActionStatus"], "PASS")
         self.assertEqual(result["corporateActionEvidence"]["verificationStatus"], "EVENTS_VERIFIED")
         self.assertAlmostEqual(result["rows"][-1]["totalReturnIndex"], result["rows"][0]["totalReturnIndex"])
+
+    def test_yahoo_fx_uses_exchange_timezone_and_crops_before_hashing(self):
+        from datetime import datetime, timezone
+
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        # The 23:00 UTC quote is already the next calendar day in London.
+        timestamps = [
+            int(datetime(2020, 9, 28, 23, tzinfo=timezone.utc).timestamp()),
+            int(datetime(2020, 9, 29, 23, tzinfo=timezone.utc).timestamp()),
+            int(datetime(2026, 10, 1, 23, tzinfo=timezone.utc).timestamp()),
+        ]
+        chart = {"chart": {"result": [{
+            "meta": {"exchangeTimezoneName": "Europe/London", "currency": "TWD"},
+            "timestamp": timestamps,
+            "indicators": {"quote": [{
+                "open": [31.0, 31.0, 32.0],
+                "high": [31.1, 31.2, 32.1],
+                "low": [30.9, 30.9, 31.9],
+                "close": [31.0, 31.1, 32.0],
+            }]},
+        }]}}
+        calls = []
+
+        def getter(url, *, params, **kwargs):
+            calls.append(params)
+            return Response(chart)
+
+        result = fetch_yahoo_research_series(
+            "TWD=X", market="fx", start=date(2020, 9, 29), end=date(2026, 9, 30),
+            http_get=getter, attempts=1,
+        )
+        self.assertEqual([row["date"] for row in result["rows"]], ["2020-09-29", "2020-09-30"])
+        self.assertEqual(result["fxEvidence"]["exchangeTimezoneName"], "Europe/London")
+        self.assertEqual(result["fxEvidence"]["clippedOutOfRangeRows"], 1)
+        self.assertNotEqual(result["fxEvidence"]["sourceHash"], _canonical_hash(chart))
+        self.assertLess(calls[0]["period1"], int(datetime(2020, 9, 29, tzinfo=timezone.utc).timestamp()))
+
+    def test_official_endpoint_contracts_and_roc_date_forms(self):
+        _, twse = _official_action_specs("twse", date(2026, 9, 1), date(2026, 9, 30))
+        _, tpex = _official_action_specs("otc", date(2026, 9, 1), date(2026, 9, 30))
+        self.assertEqual(twse[0][2]["startDate"], "20260901")
+        self.assertNotIn("strDate", twse[0][2])
+        self.assertIn("/reducation/TWTAUU", twse[1][1])
+        self.assertIn("/change/TWTB8U", twse[2][1])
+        self.assertIn("/split/TWTCAU", twse[3][1])
+        self.assertIn("/www/zh-tw/bulletin/exDailyQ", tpex[0][1])
+        self.assertEqual(_parse_taiwan_date("115/09/30"), date(2026, 9, 30))
+        self.assertEqual(_parse_taiwan_date("1150930"), date(2026, 9, 30))
+        self.assertFalse(_official_period_matches({"date": "115/08/01~115/08/31"}, date(2026, 9, 1), date(2026, 9, 30)))
+        self.assertTrue(_official_period_matches({"date": "115/09/01~115/09/30"}, date(2026, 9, 1), date(2026, 9, 30)))
+
+    def test_official_query_rows_for_matching_symbol_need_parseable_dates(self):
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        def getter(url, *, params, **kwargs):
+            if url.endswith("exDailyQ"):
+                return Response({"stat": "ok", "tables": [{
+                    "fields": ["除權息日期", "代號", "名稱"],
+                    "data": [["not-a-date", "00886", "ETF"]],
+                }]})
+            return Response({"stat": "ok", "tables": [{"fields": ["除權息日期", "代號", "名稱"], "data": []}]})
+
+        result = fetch_official_taiwan_corporate_actions(
+            "00886", market="otc", start=date(2021, 9, 24), end=date(2026, 9, 30), http_get=getter,
+        )
+        self.assertEqual(result["status"], "UNVERIFIED")
+        self.assertEqual(result["reasonCode"], "OFFICIAL_ACTION_RESPONSE_INVALID")
+
+    def test_official_twse_etf_split_is_converted_to_verified_ratio(self):
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        def getter(url, *, params, **kwargs):
+            if "/split/TWTCAU" in url:
+                return Response({"stat": "OK", "fields": ["恢復買賣日期", "證券代號", "基金名稱", "停止買賣前最後收盤價", "恢復買賣參考價"], "data": [["2025/06/10", "00685L", "ETF", "25.5", "12.75"]]})
+            return Response({"stat": "OK", "fields": ["日期", "代號", "名稱"], "data": []})
+
+        result = fetch_official_taiwan_corporate_actions(
+            "00685L", market="twse", start=date(2020, 1, 1), end=date(2026, 9, 30), http_get=getter,
+        )
+        self.assertEqual(result["status"], "EVENTS_VERIFIED")
+        self.assertEqual(result["events"]["splits"], [{"date": "2025-06-10", "numerator": 2.0, "denominator": 1.0}])
+
+    def test_official_range_tables_are_shared_only_inside_one_settlement_scope(self):
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"stat": "ok", "tables": [{"fields": ["除權息日期", "代號", "名稱"], "data": []}]}
+
+        calls = []
+
+        def getter(url, *, params, **kwargs):
+            calls.append((url, tuple(sorted(params.items()))))
+            return Response()
+
+        with official_action_cache_scope():
+            a = fetch_official_taiwan_corporate_actions("00886", market="otc", start=date(2021, 1, 1), end=date(2026, 9, 30), http_get=getter)
+            b = fetch_official_taiwan_corporate_actions("3455", market="otc", start=date(2021, 1, 1), end=date(2026, 9, 30), http_get=getter)
+        self.assertEqual(a["status"], "NO_EVENTS_VERIFIED")
+        self.assertEqual(b["status"], "NO_EVENTS_VERIFIED")
+        self.assertEqual(len(calls), 3)
 
     def test_empty_yahoo_event_map_is_not_no_event_evidence(self):
         evidence = _corporate_evidence()
