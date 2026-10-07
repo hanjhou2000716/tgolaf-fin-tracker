@@ -42,6 +42,8 @@ AUTO_VALIDATION_CHECKS = [
     "corporate_action_response_evidence",
     "official_action_range_and_schema",
     "fx_timezone_quote_direction_and_coverage",
+    "fx_source_specific_close_contract",
+    "fx_window_limited_to_estimation_period",
     "research_rows_cropped_to_point_in_time_window",
     "source_content_hash",
     "finite_coefficients",
@@ -122,12 +124,22 @@ def _fx_history_is_valid(payload: Mapping[str, Any] | None, *, cutoff: date | No
         or not isinstance(rows, list)
         or not rows
         or not isinstance(evidence, Mapping)
-        or evidence.get("provider") != "Yahoo Chart API"
         or evidence.get("baseCurrency") != "USD"
         or evidence.get("quoteCurrency") != "TWD"
-        or evidence.get("coverageComplete") is not True
-        or evidence.get("exchangeTimezoneName") != "Europe/London"
+        or evidence.get("validationMethod") != "fx-close-v1"
     ):
+        return False
+    provider = str(evidence.get("provider", ""))
+    if provider == "Yahoo Chart API":
+        # Source-session dates are already normalized from Yahoo's own
+        # exchangeTimezoneName. Do not assume a fixed timezone: it can vary
+        # with the provider's instrument metadata.
+        if not str(evidence.get("exchangeTimezoneName", "")).strip():
+            return False
+    elif provider == "Taiwan CBC OpenData":
+        if evidence.get("closingConvention") != "Taiwan interbank daily close":
+            return False
+    else:
         return False
     try:
         requested_start = date.fromisoformat(str(evidence.get("requestedStart", "")))
@@ -139,8 +151,13 @@ def _fx_history_is_valid(payload: Mapping[str, Any] | None, *, cutoff: date | No
         requested_start > requested_end
         or (cutoff is not None and requested_end != cutoff)
         or verified_at.tzinfo is None
-        or not isinstance(evidence.get("clippedOutOfRangeRows"), int)
-        or evidence.get("clippedOutOfRangeRows", -1) < 0
+        or (
+            "clippedOutOfRangeRows" in evidence
+            and (
+                not isinstance(evidence.get("clippedOutOfRangeRows"), int)
+                or evidence.get("clippedOutOfRangeRows", -1) < 0
+            )
+        )
     ):
         return False
     row_hash = _canonical_hash(rows)
@@ -293,13 +310,14 @@ def _retry_due(record: Any, now: datetime) -> bool:
 
 def _fetch_research_set(
     symbols: Mapping[str, str], *, start: date, cutoff: date, token: str | None, fetcher: Any,
+    starts: Mapping[str, date] | None = None,
 ) -> dict[str, dict[str, Any]]:
     result: dict[str, dict[str, Any]] = {}
     if not symbols:
         return result
     pool = ThreadPoolExecutor(max_workers=min(4, len(symbols)))
     futures = {
-        pool.submit(fetcher, symbol, market=market, start=start, end=cutoff, token=token): (symbol, market)
+        pool.submit(fetcher, symbol, market=market, start=(starts or {}).get(symbol, start), end=cutoff, token=token): (symbol, market)
         for symbol, market in symbols.items()
     }
     exhausted = False
@@ -363,6 +381,7 @@ def ensure_quarterly_risk_policies(
     today: date | None = None,
     now: datetime | None = None,
     fetcher: Any = fetch_research_series,
+    fx_fallback_fetcher: Any | None = None,
 ) -> dict[str, Any]:
     """Prepare a verified Beta candidate and automatically activate independent Kelly policy."""
     current_date = today or datetime.now(timezone.utc).astimezone().date()
@@ -417,6 +436,15 @@ def ensure_quarterly_risk_policies(
     histories: dict[str, dict[str, Any]] = {}
     benchmark = _load_research(state, cutoff, "006208")
     fx_history = _load_research(state, cutoff, "TWD=X")
+    fx_source_selection: dict[str, Any] | None = (
+        {
+            "source": fx_history.get("source"),
+            "seriesHash": fx_history.get("seriesHash"),
+            "fallbackFrom": None,
+            "fallbackReason": None,
+        }
+        if isinstance(fx_history, Mapping) else None
+    )
 
     fetch_symbols: dict[str, str] = {}
     if benchmark_needed and benchmark is None:
@@ -427,15 +455,30 @@ def ensure_quarterly_risk_policies(
         fetch_symbols["TWD=X"] = "fx"
     token = os.getenv("FINMIND_TOKEN", "").strip() or None
     if fetch_symbols:
-        start = cutoff - timedelta(days=6 * 365 + 2)
+        beta_start = cutoff - timedelta(days=3 * 365 + 14)
+        kelly_start = cutoff - timedelta(days=5 * 365 + 14)
+        starts = {
+            symbol: kelly_start if symbol == "006208" and kelly_refresh_needed else beta_start
+            for symbol in fetch_symbols
+        }
+        start = min(starts.values())
         with official_action_cache_scope():
-            fetched = _fetch_research_set(fetch_symbols, start=start, cutoff=cutoff, token=token, fetcher=fetcher)
+            fetched = _fetch_research_set(
+                fetch_symbols, start=start, cutoff=cutoff, token=token, fetcher=fetcher, starts=starts,
+        )
         for symbol, payload in fetched.items():
-            if payload.get("status") == "READY":
+            if symbol != "TWD=X" and payload.get("status") == "READY":
                 _save_research(state, cutoff, symbol, payload)
             histories[symbol] = payload
         benchmark = benchmark or histories.get("006208")
         fx_history = fx_history or histories.get("TWD=X")
+        if fx_source_selection is None and isinstance(fx_history, Mapping):
+            fx_source_selection = {
+                "source": fx_history.get("source"),
+                "seriesHash": fx_history.get("seriesHash"),
+                "fallbackFrom": None,
+                "fallbackReason": None,
+            }
 
     if beta_refresh_needed:
         fresh_asset_symbols = set(retry_symbols)
@@ -448,6 +491,64 @@ def ensure_quarterly_risk_policies(
             fx_rows=fx_rows,
             cutoff=cutoff,
         ) if fresh_asset_symbols else {"assets": {}}
+        fx_gap_symbols = sorted(
+            symbol for symbol in fresh_asset_symbols
+            if retry_symbols.get(symbol) == "us"
+            and isinstance(estimates.get("assets", {}).get(symbol), Mapping)
+            and estimates["assets"][symbol].get("reason")
+            == "verified USD/TWD observations do not cover paired weeks inside the three-year estimation window"
+        )
+        current_fx_provider = (
+            (fx_history.get("fxEvidence") or {}).get("provider")
+            if isinstance(fx_history, Mapping) and isinstance(fx_history.get("fxEvidence"), Mapping)
+            else None
+        )
+        fallback_fetcher = fx_fallback_fetcher
+        if fallback_fetcher is None and fetcher is fetch_research_series:
+            fallback_fetcher = fetch_cbc_usd_twd_series
+        # A syntactically valid Yahoo FX response can still miss required
+        # paired weeks. In that case, replace the entire FX history with CBC
+        # and re-estimate every unresolved asset as one coherent source set;
+        # never splice daily observations from both providers.
+        if fx_gap_symbols and current_fx_provider == "Yahoo Chart API" and fallback_fetcher:
+            old_fx_hash = str(fx_source_selection.get("seriesHash") or "")
+            try:
+                cbc_history = fallback_fetcher(
+                    start=cutoff - timedelta(days=3 * 365 + 14), end=cutoff,
+                )
+            except Exception as error:  # noqa: BLE001 - preserve the primary diagnosis and fallback evidence
+                fx_source_selection["fallbackReason"] = f"CBC fallback failed: {type(error).__name__}"
+            else:
+                if _fx_history_is_valid(cbc_history, cutoff=cutoff):
+                    cbc_estimates = estimate_beta_policy(
+                        fresh_histories,
+                        benchmark_rows,
+                        fx_rows=cbc_history.get("rows", []),
+                        cutoff=cutoff,
+                    ) if fresh_asset_symbols else {"assets": {}}
+                    fx_history = cbc_history
+                    histories["TWD=X"] = cbc_history
+                    estimates = cbc_estimates
+                    fx_source_selection = {
+                        "source": cbc_history.get("source"),
+                        "seriesHash": cbc_history.get("seriesHash"),
+                        "fallbackFrom": old_fx_hash or None,
+                        "fallbackReason": "Yahoo FX did not cover required completed paired weeks",
+                    }
+                else:
+                    fx_source_selection["fallbackReason"] = "CBC fallback failed FX contract validation"
+        unresolved_fx_gaps = [
+            symbol for symbol in fresh_asset_symbols
+            if retry_symbols.get(symbol) == "us"
+            and isinstance(estimates.get("assets", {}).get(symbol), Mapping)
+            and estimates["assets"][symbol].get("reason")
+            == "verified USD/TWD observations do not cover paired weeks inside the three-year estimation window"
+        ]
+        if fx_history is not None and not unresolved_fx_gaps and _fx_history_is_valid(fx_history, cutoff=cutoff):
+            # Persist FX only after this quarter's required paired weeks prove
+            # complete. A merely well-formed partial response must never
+            # replace a previously verified complete provider cache.
+            _save_research(state, cutoff, "TWD=X", fx_history)
         candidate_assets = deepcopy(same_quarter_base)
         for symbol in fresh_asset_symbols:
             record = deepcopy(estimates.get("assets", {}).get(symbol) or {
@@ -493,6 +594,7 @@ def ensure_quarterly_risk_policies(
             "effectiveFromQuarter": effective_quarter,
             "referenceThroughQuarter": _quarter_label(date(current_date.year + (1 if current_date.month >= 10 else 0), ((current_date.month - 1 + 3) % 12) + 1, 1)),
             "assets": candidate_assets,
+            "fxSourceSelection": fx_source_selection,
             "unmodeledSymbols": unmodeled_symbols,
             "contentHash": _canonical_hash(candidate_assets),
             "inputHash": input_hash,
@@ -621,6 +723,7 @@ def ensure_quarterly_risk_policies(
                 else "REUSED" if beta_is_current else "WAITING_FOR_PORTFOLIO_QUALIFICATION"
             ),
             "symbolsRequested": sorted(beta_symbols),
+            "fxSourceSelection": fx_source_selection,
             "unmodeledSymbols": unmodeled_symbols,
             "symbolsUnresolved": sorted(
                 symbol for symbol in beta_symbols

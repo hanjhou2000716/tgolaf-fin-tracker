@@ -2,7 +2,7 @@ import json
 import hashlib
 import tempfile
 import unittest
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -14,6 +14,7 @@ from beta_policy import (
     _valid_corporate_action_evidence,
     estimate_beta_policy,
     fetch_official_taiwan_corporate_actions,
+    fetch_research_series,
     fetch_yahoo_research_series,
     load_active_beta_policy,
     load_active_kelly_policy,
@@ -183,7 +184,9 @@ class BetaPolicyTests(unittest.TestCase):
             "timestamp": timestamps,
             "indicators": {"quote": [{
                 "open": [31.0, 31.0, 32.0],
-                "high": [31.1, 31.2, 32.1],
+                # FX quotes are validated as dated positive closes, not as
+                # listed-security OHLC envelopes.
+                "high": [30.8, 31.2, 32.1],
                 "low": [30.9, 30.9, 31.9],
                 "close": [31.0, 31.1, 32.0],
             }]},
@@ -204,6 +207,36 @@ class BetaPolicyTests(unittest.TestCase):
         self.assertNotEqual(result["fxEvidence"]["sourceHash"], _canonical_hash(chart))
         self.assertLess(calls[0]["period1"], int(datetime(2020, 9, 29, tzinfo=timezone.utc).timestamp()))
 
+    def test_cbc_fx_fallback_uses_one_complete_range_when_yahoo_fails(self):
+        class Response:
+            def __init__(self, payload=None, error=None):
+                self.payload, self.error = payload, error
+
+            def raise_for_status(self):
+                if self.error:
+                    raise self.error
+
+            def json(self):
+                return self.payload
+
+        calls = []
+
+        def getter(url, **kwargs):
+            calls.append(url)
+            if "yahoo" in url:
+                return Response(error=RuntimeError("upstream unavailable"))
+            return Response([{"日期": "20260928", "NTD_USD": "31.2"}, {"日期": "20260929", "NTD_USD": "31.3"}])
+
+        result = fetch_research_series(
+            "TWD=X", market="fx", start=date(2026, 9, 28), end=date(2026, 9, 30), http_get=getter,
+        )
+        self.assertEqual(result["status"], "READY")
+        self.assertEqual(result["fxEvidence"]["provider"], "Taiwan CBC OpenData")
+        self.assertIn("RuntimeError", result["fxEvidence"]["primaryFailure"])
+        self.assertEqual([row["close"] for row in result["rows"]], [31.2, 31.3])
+        self.assertEqual(sum("yahoo" in url for url in calls), 3)
+        self.assertEqual(sum("cbc.gov.tw" in url for url in calls), 1)
+
     def test_official_endpoint_contracts_and_roc_date_forms(self):
         _, twse = _official_action_specs("twse", date(2026, 9, 1), date(2026, 9, 30))
         _, tpex = _official_action_specs("otc", date(2026, 9, 1), date(2026, 9, 30))
@@ -213,6 +246,7 @@ class BetaPolicyTests(unittest.TestCase):
         self.assertIn("/change/TWTB8U", twse[2][1])
         self.assertIn("/split/TWTCAU", twse[3][1])
         self.assertIn("/www/zh-tw/bulletin/exDailyQ", tpex[0][1])
+        self.assertEqual(tpex[0][2]["startDate"], "2026/09/01")
         self.assertEqual(_parse_taiwan_date("115/09/30"), date(2026, 9, 30))
         self.assertEqual(_parse_taiwan_date("1150930"), date(2026, 9, 30))
         self.assertFalse(_official_period_matches({"date": "115/08/01~115/08/31"}, date(2026, 9, 1), date(2026, 9, 30)))
@@ -312,7 +346,32 @@ class BetaPolicyTests(unittest.TestCase):
             min_observations=2,
         )
         self.assertIn("TEST", result["assets"])
-        self.assertEqual(result["assets"]["TEST"]["status"], "CANDIDATE")
+        self.assertEqual(result["assets"]["TEST"]["status"], "CANDIDATE", result["assets"]["TEST"])
+
+    def test_fx_coverage_is_checked_only_for_paired_weeks_in_three_year_window(self):
+        cutoff = date(2026, 9, 30)
+        benchmark, asset, fx = [], [], []
+        first_friday = date(2020, 1, 3)
+        day = first_friday
+        index = 0
+        while day <= date(2026, 9, 25):
+            benchmark.append({"date": day.isoformat(), "splitAdjustedClose": 100 + index * 0.3 + (index % 5)})
+            asset.append({"date": day.isoformat(), "splitAdjustedClose": 60 + index * 0.4 + (index % 7)})
+            # Deliberately omit all pre-window FX history. The estimator must
+            # not require rates for rows it will not use.
+            if day >= date(2023, 9, 29):
+                fx.append({"date": day.isoformat(), "close": 31 + index * 0.001})
+            day += timedelta(days=7)
+            index += 1
+        series = {"rows": asset, "currency": "USD", "source": "Yahoo USD equity", "corporateActionStatus": "PASS",
+                  "corporateActionEvidence": _corporate_evidence("2020-01-03", "2026-09-25")}
+        result = estimate_beta_policy({"TEST": series}, benchmark, fx_rows=fx, cutoff=cutoff)
+        self.assertEqual(result["assets"]["TEST"]["status"], "CANDIDATE", result["assets"]["TEST"])
+
+        missing_one_current_week = [row for row in fx if row["date"] not in {"2025-01-31", "2025-02-07"}]
+        blocked = estimate_beta_policy({"TEST": series}, benchmark, fx_rows=missing_one_current_week, cutoff=cutoff)
+        self.assertEqual(blocked["assets"]["TEST"]["status"], "INSUFFICIENT_EVIDENCE")
+        self.assertIn("paired weeks inside", blocked["assets"]["TEST"]["reason"])
 
     def test_active_policy_requires_approval_and_evidence(self):
         payload = {

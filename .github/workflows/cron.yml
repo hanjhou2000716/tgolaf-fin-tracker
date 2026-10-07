@@ -70,6 +70,8 @@ jobs:
     needs: gate
     if: needs.gate.outputs.should_run == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      pages_base_url: ${{ steps.pages_config.outputs.base_url }}
     permissions:
       actions: read
       contents: read
@@ -78,6 +80,7 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Configure GitHub Pages
+        id: pages_config
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
 
       - name: Set up Python
@@ -151,6 +154,21 @@ jobs:
           SCHEDULED_WINDOW_OVERRIDE: ${{ needs.gate.outputs.window }}
           SCHEDULED_DATE_OVERRIDE: ${{ needs.gate.outputs.snapshot_date }}
         run: python main.py
+
+      - name: Record private settlement health for fallback gate
+        if: always()
+        env:
+          SCHEDULED_WINDOW_OVERRIDE: ${{ needs.gate.outputs.window }}
+          SCHEDULED_DATE_OVERRIDE: ${{ needs.gate.outputs.snapshot_date }}
+        run: python settlement_health.py
+
+      - name: Upload private settlement health marker
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: settlement-health
+          path: .private-build/settlement-health.json
+          if-no-files-found: ignore
 
       - name: Upload quarterly risk policy state
         if: always()
@@ -277,6 +295,12 @@ jobs:
         # parser error.
         run: touch public-site/.nojekyll
 
+      - name: Stamp public artifact with publication identity and content hashes
+        env:
+          PUBLICATION_WINDOW: ${{ needs.gate.outputs.window }}
+          PUBLICATION_WINDOW_DATE: ${{ needs.gate.outputs.snapshot_date }}
+        run: python pages_publication.py prepare public-site
+
       - name: Upload public site artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -296,11 +320,19 @@ jobs:
       pages: write
       id-token: write
     steps:
+      - name: Checkout publication verifier
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
       - name: Download public site artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: public-site
           path: public-site
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.10"
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@98ef48e41587a300b82de4cf298aa98b57b2faae # v3.0.1
@@ -309,4 +341,53 @@ jobs:
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v4.0.5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_BASE_URL: ${{ needs.build.outputs.pages_base_url }}
+          PUBLICATION_SUMMARY_PATH: .private-build/pages-publication-summary.json
+        run: python pages_publication.py publish-and-verify public-site
+
+      - name: Upload private Pages publication verification
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pages-publication-deployment-summary
+          path: .private-build/pages-publication-summary.json
+          if-no-files-found: ignore
+
+  verify-publication:
+    name: Independently verify live Pages content
+    needs: [build, deploy]
+    if: needs.build.result == 'success' && needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout read-only verifier
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.10"
+
+      - name: Download the exact public artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: public-site
+          path: public-site
+
+      - name: Verify live manifest and public content again
+        env:
+          PAGES_BASE_URL: ${{ needs.build.outputs.pages_base_url }}
+          PUBLICATION_SUMMARY_PATH: .private-build/pages-publication-verification.json
+        run: python pages_publication.py verify-live public-site
+
+      - name: Upload independent publication evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pages-publication-verification
+          path: .private-build/pages-publication-verification.json
+          if-no-files-found: ignore

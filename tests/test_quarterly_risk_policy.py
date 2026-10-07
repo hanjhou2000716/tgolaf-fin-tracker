@@ -54,6 +54,7 @@ def _research_series(symbol, market, start, cutoff):
                 "sourceHash": series_hash,
                 "exchangeTimezoneName": "Europe/London",
                 "clippedOutOfRangeRows": 0,
+                "validationMethod": "fx-close-v1",
             },
         }
     events = {"splits": {"fixture": {"ratio": 1.0}}, "dividends": {}}
@@ -193,6 +194,59 @@ class QuarterlyRiskPolicyTests(unittest.TestCase):
             cache.write_text(json.dumps(payload), encoding="utf-8")
             self.assertIsNone(_load_research(state, cutoff, "TWD=X"))
 
+    def test_yahoo_fx_missing_required_weeks_switches_to_whole_cbc_series(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cutoff = date(2026, 9, 30)
+            calls = []
+
+            def fetcher(symbol, *, market, start, end, token=None):
+                if symbol == "TWD=X":
+                    primary = _research_series(symbol, market, start, end)
+                    primary["rows"] = [
+                        row for row in primary["rows"]
+                        if start.isoformat() <= row["date"] <= end.isoformat()
+                    ][::3]
+                    primary["seriesHash"] = _canonical_hash(primary["rows"])
+                    primary["fxEvidence"]["sourceHash"] = primary["seriesHash"]
+                    calls.append("Yahoo")
+                    return primary
+                return _research_series(symbol, market, start, end)
+
+            def cbc_fallback(*, start, end):
+                history = _research_series("TWD=X", "fx", start, end)
+                history["rows"] = [
+                    row for row in history["rows"]
+                    if start.isoformat() <= row["date"] <= end.isoformat()
+                ]
+                history["seriesHash"] = _canonical_hash(history["rows"])
+                history["source"] = "Taiwan CBC FTDOpenData_Day fixture"
+                history["fxEvidence"].update({
+                    "provider": "Taiwan CBC OpenData",
+                    "closingConvention": "Taiwan interbank daily close",
+                    "validationMethod": "fx-close-v1",
+                    "sourceHash": history["seriesHash"],
+                })
+                calls.append("CBC")
+                return history
+
+            summary = ensure_quarterly_risk_policies(
+                {"台股": {"006208": 100}, "美股": {"AAPL": 20}, "基金": {}},
+                state_dir=root / "state", candidate_dir=root / "audit",
+                today=date(2026, 10, 5), now=datetime(2026, 10, 5, tzinfo=timezone.utc),
+                fetcher=fetcher, fx_fallback_fetcher=cbc_fallback,
+            )
+            self.assertEqual(calls, ["Yahoo", "CBC"])
+            candidate = json.loads((root / "audit" / "beta-policy-candidate.json").read_text(encoding="utf-8"))
+            self.assertEqual(candidate["assets"]["AAPL"]["status"], "CANDIDATE",
+                             {"asset": candidate["assets"]["AAPL"], "fx": candidate.get("fxSourceSelection"), "calls": calls})
+            self.assertIn("Taiwan CBC", candidate["fxSourceSelection"]["source"])
+            self.assertEqual(candidate["fxSourceSelection"]["fallbackReason"],
+                             "Yahoo FX did not cover required completed paired weeks")
+            restored_fx = _load_research(root / "state", cutoff, "TWD=X")
+            self.assertIn("Taiwan CBC", restored_fx["source"])
+            self.assertEqual(summary["beta"]["symbolsUnresolved"], [])
+
     def test_v2_candidate_cache_is_rejected_after_algorithm_upgrade(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "candidate.json"
@@ -202,20 +256,20 @@ class QuarterlyRiskPolicyTests(unittest.TestCase):
             path.write_text(json.dumps(payload), encoding="utf-8")
             self.assertIsNone(_candidate_cache(path, cutoff=date(2026, 9, 30)))
 
-    def test_v3_recent_failure_does_not_cool_down_v4_candidate_rebuild(self):
+    def test_v4_recent_failure_does_not_cool_down_v5_candidate_rebuild(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             state_dir, candidate_dir = root / "state", root / "audit"
             state_dir.mkdir()
             failed = {
                 "status": "INSUFFICIENT_EVIDENCE",
-                "reason": "stale v3 result",
+                "reason": "stale v4 result",
                 "attemptedAt": "2026-10-07T00:00:00Z",
                 "observations": 0,
             }
             old = _sealed_cache({
                 "dataCutoff": "2026-09-30",
-                "algorithmVersion": "quarterly-risk-v3",
+                "algorithmVersion": "quarterly-risk-v4",
                 "assets": {"TEST": failed},
             })
             (state_dir / "beta-policy-candidate-cache.json").write_text(json.dumps(old), encoding="utf-8")
@@ -234,9 +288,9 @@ class QuarterlyRiskPolicyTests(unittest.TestCase):
                 fetcher=fetcher,
             )
             self.assertIn("TEST", calls)
-            self.assertEqual(summary["algorithmVersion"], "quarterly-risk-v4")
+            self.assertEqual(summary["algorithmVersion"], "quarterly-risk-v5")
             candidate = json.loads((candidate_dir / "beta-policy-candidate.json").read_text(encoding="utf-8"))
-            self.assertEqual(candidate["algorithmVersion"], "quarterly-risk-v4")
+            self.assertEqual(candidate["algorithmVersion"], "quarterly-risk-v5")
 
     def test_v2_sealed_activation_candidate_cannot_be_promoted(self):
         with tempfile.TemporaryDirectory() as directory:
