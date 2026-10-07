@@ -1,12 +1,14 @@
 """Watch the public Growth and Skynet health contracts for stale data."""
 
 import datetime
+import hashlib
 import io
 import json
 import os
 import re
 import sys
 import zipfile
+from urllib.parse import quote, urlencode
 
 from service_contracts import (
     FUTURE_TIMESTAMP_TOLERANCE,
@@ -26,6 +28,9 @@ STATE_SCHEMA_VERSION = 1
 STATE_ARTIFACT_NAME = "health-watchdog-state"
 ALERT_REPEAT_HOURS = 24
 GITHUB_API = os.getenv("GITHUB_API_URL", "https://api.github.com").rstrip("/")
+SKYNET_REPOSITORY = "hanjhou2000716/skynet-monitoring"
+SKYNET_PUBLICATION_URL = "https://hanjhou2000716.github.io/skynet-monitoring/publication.json"
+SKYNET_PUBLICATION_ARTIFACT = "skynet-publication-verification"
 
 
 def default_stale_after_hours(name):
@@ -256,11 +261,180 @@ def fetch_status(name, url, now):
     try:
         response = requests.get(url, timeout=15, headers={"Cache-Control": "no-cache"})
         response.raise_for_status()
-        return evaluate_status(name, response.json(), now)
+        payload = response.json()
+        issues = evaluate_status(name, payload, now)
+        if (
+            "skynet" in str(name).lower()
+            and payload.get("schemaVersion") == SKYNET_SCHEMA_VERSION
+            and any("UPDATE_WINDOW_MISSED:" in issue for issue in issues)
+            and any("MARKET_DATA_STALE:" in issue for issue in issues)
+        ):
+            try:
+                proof = _fetch_publication_mismatch(payload, now, requests)
+            except (requests.RequestException, ValueError, TypeError, KeyError):
+                proof = None
+            if proof:
+                issues = _replace_published_snapshot_incidents(issues, proof)
+        return issues
     except requests.RequestException as error:
         return [f"{name} endpoint unavailable: {error}"]
     except ValueError as error:
         return [f"{name} returned invalid JSON: {error}"]
+
+
+def _publication_manifest_is_consistent(payload, manifest):
+    if not isinstance(payload, dict) or not isinstance(manifest, dict):
+        return False
+    service = payload.get("service")
+    if not isinstance(service, dict):
+        return False
+    try:
+        files = manifest.get("files")
+        critical = manifest.get("criticalFiles")
+        if not isinstance(files, dict) or not isinstance(critical, dict):
+            return False
+        if not {"index.html", "data.json", "status.json"}.issubset(critical):
+            return False
+        if any(files.get(name) != digest for name, digest in critical.items()):
+            return False
+        unsigned = dict(manifest)
+        supplied_hash = unsigned.pop("contentHash", None)
+        expected_hash = hashlib.sha256(json.dumps(
+            unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")).hexdigest()
+        return supplied_hash == expected_hash and (
+            str(int(manifest.get("runId"))) == str(int(service.get("runId")))
+            and str(manifest.get("sourceCommit")) == str(service.get("commit"))
+            and manifest.get("windowDate") == service.get("windowDate")
+            and manifest.get("window") == service.get("window")
+            and str(manifest.get("publicationId", "")).endswith(
+                f":{manifest.get('runId')}:{manifest.get('runAttempt')}:1"
+            )
+        )
+    except (TypeError, ValueError):
+        return False
+
+
+def _verified_publication_run(now, requests_module):
+    url = f"{GITHUB_API}/repos/{SKYNET_REPOSITORY}/actions/runs?branch=main&per_page=8"
+    response = requests_module.get(url, timeout=12, headers={"Cache-Control": "no-cache"})
+    response.raise_for_status()
+    value = response.json()
+    runs = value.get("workflow_runs", []) if isinstance(value, dict) else []
+    for run in runs:
+        if not isinstance(run, dict) or run.get("status") != "completed" or run.get("conclusion") != "success":
+            continue
+        if run.get("head_branch") != "main" or not str(run.get("path", "")).endswith("deploy.yml"):
+            continue
+        artifacts_url = f"{GITHUB_API}/repos/{SKYNET_REPOSITORY}/actions/runs/{int(run['id'])}/artifacts?per_page=100"
+        artifacts_response = requests_module.get(artifacts_url, timeout=8, headers={"Cache-Control": "no-cache"})
+        artifacts_response.raise_for_status()
+        artifacts_payload = artifacts_response.json()
+        artifacts = artifacts_payload.get("artifacts", []) if isinstance(artifacts_payload, dict) else []
+        if any(
+            isinstance(item, dict) and item.get("name") == SKYNET_PUBLICATION_ARTIFACT and item.get("expired") is not True
+            for item in artifacts
+        ):
+            return run
+    return None
+
+
+def _expected_skynet_window(now):
+    now = _taipei_time(now)
+    if now.hour >= 17:
+        return now.date().isoformat(), "afternoon"
+    if now.hour >= 8:
+        return now.date().isoformat(), "morning"
+    return None, None
+
+
+def publication_root_issue(payload, manifest, verified_run, now):
+    """Prove a Pages publication mismatch only from a completed verified run."""
+    service = payload.get("service") if isinstance(payload, dict) else None
+    if not isinstance(service, dict) or not _publication_manifest_is_consistent(payload, manifest):
+        return None
+    expected_date, expected_window = _expected_skynet_window(now)
+    if not expected_date or service.get("windowDate") == expected_date and service.get("window") == expected_window:
+        return None
+    if not isinstance(verified_run, dict) or verified_run.get("conclusion") != "success":
+        return None
+    try:
+        live_identity = (int(manifest["runId"]), int(manifest["runAttempt"]))
+        completed_identity = (int(verified_run["id"]), int(verified_run.get("run_attempt", 1)))
+        run_started = _as_taipei(verified_run.get("run_started_at"))
+        live_generated = _as_taipei(service.get("generatedAt"))
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return None
+    if completed_identity <= live_identity or run_started <= live_generated:
+        return None
+    if run_started.date().isoformat() != expected_date:
+        return None
+    started_window = "morning" if run_started.hour < 14 else "afternoon"
+    if started_window != expected_window:
+        return None
+    return {
+        "system": "Skynet Monitoring",
+        "expectedRunId": completed_identity[0],
+        "liveRunId": live_identity[0],
+        "windowDate": expected_date,
+        "window": expected_window,
+    }
+
+
+def _fetch_publication_mismatch(payload, now, requests_module):
+    nonce = f"{datetime.datetime.now(datetime.timezone.utc).timestamp():.6f}"
+    response = requests_module.get(
+        SKYNET_PUBLICATION_URL + f"?watchdog={nonce}", timeout=10,
+        headers={"Cache-Control": "no-cache, no-store", "Pragma": "no-cache"},
+    )
+    response.raise_for_status()
+    manifest = response.json()
+    if not _publication_manifest_is_consistent(payload, manifest):
+        return None
+    # The health check and manifest can traverse different CDN caches. Only
+    # merge symptoms into a publication incident after independently reading
+    # each critical public file and proving it belongs to this manifest.
+    base = SKYNET_PUBLICATION_URL.rsplit("/", 1)[0].rstrip("/") + "/"
+    for relative in ("index.html", "data.json", "status.json"):
+        expected = manifest.get("criticalFiles", {}).get(relative)
+        if not isinstance(expected, str) or manifest.get("files", {}).get(relative) != expected:
+            return None
+        safe_path = "/".join(quote(part, safe="") for part in relative.split("/"))
+        target = base + safe_path + "?" + urlencode({"watchdog": nonce})
+        live = requests_module.get(
+            target, timeout=10,
+            headers={"Cache-Control": "no-cache, no-store", "Pragma": "no-cache"},
+        )
+        live.raise_for_status()
+        content = getattr(live, "content", None)
+        if not isinstance(content, bytes):
+            return None
+        if hashlib.sha256(content).hexdigest() != expected:
+            return None
+        if relative == "status.json":
+            try:
+                if json.loads(content) != payload:
+                    return None
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return None
+    latest_run = _verified_publication_run(now, requests_module)
+    return publication_root_issue(payload, manifest, latest_run, now)
+
+
+def _replace_published_snapshot_incidents(issues, proof):
+    root = (
+        f"Skynet Monitoring PUBLICATION_NOT_VISIBLE: expected {proof['windowDate']} {proof['window']} "
+        f"publication run={proof['expectedRunId']}; live run={proof['liveRunId']}"
+    )
+    retained = []
+    for issue in issues:
+        if not issue.startswith("Skynet Monitoring "):
+            retained.append(issue)
+            continue
+        if any(code in issue for code in ("UPDATE_WINDOW_MISSED:", "MARKET_DATA_STALE:", "SERVICE_STALE:")):
+            continue
+        retained.append(issue)
+    return [root, *retained]
 
 
 def send_alert(issues):

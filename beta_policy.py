@@ -26,7 +26,7 @@ from risk import estimate_beta_from_returns, quarterly_half_kelly
 
 
 POLICY_SCHEMA_VERSION = 1
-AUTO_VALIDATION_ALGORITHM = "quarterly-risk-v4"
+AUTO_VALIDATION_ALGORITHM = "quarterly-risk-v5"
 AUTO_VALIDATION_REQUIRED_CHECKS = frozenset({
     "point_in_time_cutoff",
     "completed_week_window",
@@ -34,6 +34,8 @@ AUTO_VALIDATION_REQUIRED_CHECKS = frozenset({
     "corporate_action_response_evidence",
     "official_action_range_and_schema",
     "fx_timezone_quote_direction_and_coverage",
+    "fx_source_specific_close_contract",
+    "fx_window_limited_to_estimation_period",
     "research_rows_cropped_to_point_in_time_window",
     "source_content_hash",
     "finite_coefficients",
@@ -224,12 +226,15 @@ def _parse_taiwan_date(value: Any) -> date | None:
 def _official_action_specs(market: str, start: date, end: date) -> tuple[str, list[tuple[str, str, dict[str, str]]]]:
     start_ymd, end_ymd = start.strftime("%Y%m%d"), end.strftime("%Y%m%d")
     if market == "otc":
-        roc_start = f"{start.year - 1911}/{start.month:02d}/{start.day:02d}"
-        roc_end = f"{end.year - 1911}/{end.month:02d}/{end.day:02d}"
+        # TPEx's current bulletin endpoints accept Gregorian YYYY/MM/DD.
+        # The response echoes this range, so query and evidence use the same
+        # canonical dates rather than the unsupported ROC parameter variant.
+        greg_start = start.strftime("%Y/%m/%d")
+        greg_end = end.strftime("%Y/%m/%d")
         return "TPEx official corporate-action API", [
-            ("exDailyQ", "https://www.tpex.org.tw/www/zh-tw/bulletin/exDailyQ", {"startDate": roc_start, "endDate": roc_end}),
-            ("revivt", "https://www.tpex.org.tw/www/zh-tw/bulletin/revivt", {"startDate": roc_start, "endDate": roc_end}),
-            ("pvChgRslt", "https://www.tpex.org.tw/www/zh-tw/bulletin/pvChgRslt", {"startDate": roc_start, "endDate": roc_end}),
+            ("exDailyQ", "https://www.tpex.org.tw/www/zh-tw/bulletin/exDailyQ", {"startDate": greg_start, "endDate": greg_end}),
+            ("revivt", "https://www.tpex.org.tw/www/zh-tw/bulletin/revivt", {"startDate": greg_start, "endDate": greg_end}),
+            ("pvChgRslt", "https://www.tpex.org.tw/www/zh-tw/bulletin/pvChgRslt", {"startDate": greg_start, "endDate": greg_end}),
         ]
     return "TWSE official corporate-action API", [
         ("twt49u", "https://www.twse.com.tw/rwd/zh/exRight/TWT49U", {"startDate": start_ymd, "endDate": end_ymd, "response": "json"}),
@@ -414,7 +419,12 @@ def fetch_official_taiwan_corporate_actions(
                 row["__eventDate"] = event_date.isoformat()
                 matched[family].append(row)
 
-        unsupported = [family for family, rows in matched.items() if rows and family not in {"twt49u", "exDailyQ", "twtcau"}]
+        unsupported = [
+            f"{family}:{row.get('__eventDate', 'unknown')}:{_event_kind_for_diagnostics(row)}"
+            for family, rows in matched.items()
+            if rows and family not in {"twt49u", "exDailyQ", "twtcau"}
+            for row in rows
+        ]
         dividends: list[dict[str, Any]] = []
         splits: list[dict[str, Any]] = []
         events: list[dict[str, Any]] = []
@@ -430,7 +440,7 @@ def fetch_official_taiwan_corporate_actions(
                     unsupported.append("exDailyQ_schema")
                     continue
                 if bonus_shares > 0:
-                    unsupported.append("stock_distribution")
+                    unsupported.append(f"stock_distribution:{row.get('__eventDate')}:{bonus_shares}")
                 if cash > 0:
                     dividends.append({"date": row["__eventDate"], "amount": cash})
             else:
@@ -448,7 +458,7 @@ def fetch_official_taiwan_corporate_actions(
                     unsupported.append("twt49u_schema")
                     continue
                 if right_value > 0 or any(marker in event_kind for marker in ("權", "股票")):
-                    unsupported.append("stock_rights")
+                    unsupported.append(f"stock_rights:{row.get('__eventDate')}:{event_kind}:{right_value}")
                 if cash_value > 0:
                     dividends.append({"date": row["__eventDate"], "amount": cash_value})
             events.append(row)
@@ -468,7 +478,7 @@ def fetch_official_taiwan_corporate_actions(
             splits.append({"date": row["__eventDate"], "numerator": ratio, "denominator": 1.0})
             events.append(row)
         if unsupported:
-            raise ValueError("unsupported official capital-action type")
+            raise ValueError("unsupported official capital-action type: " + "; ".join(unsupported[:8]))
         normalized_events = {
             "dividends": sorted(dividends, key=lambda item: item["date"]),
             "splits": sorted(splits, key=lambda item: item["date"]),
@@ -492,7 +502,19 @@ def fetch_official_taiwan_corporate_actions(
             reason_code = "OFFICIAL_ACTION_RESPONSE_INVALID"
         else:
             reason_code = "OFFICIAL_ACTION_SOURCE_UNAVAILABLE"
-        return {"status": "UNVERIFIED", "provider": provider, "reasonCode": reason_code}
+        return {
+            "status": "UNVERIFIED", "provider": provider,
+            "reasonCode": reason_code, "reason": str(error),
+            "requestedStart": start.isoformat(), "requestedEnd": end.isoformat(),
+            "sourceFamiliesExpected": [family for family, _, _ in specs],
+        }
+
+
+def _event_kind_for_diagnostics(row: Mapping[str, Any]) -> str:
+    return " ".join(
+        f"{key}={str(value).strip()}" for key, value in row.items()
+        if not str(key).startswith("__") and any(marker in str(key) for marker in ("種類", "權", "息", "變更", "原因"))
+    )[:240]
 
 
 def yahoo_chart_symbols(symbol: str, market: str) -> tuple[str, ...]:
@@ -580,10 +602,19 @@ def fetch_yahoo_research_series(
                     seen_sessions.add(item_date)
                     if index >= len(closes) or _finite(closes[index]) is None:
                         continue
+                    close_value = _finite(closes[index])
+                    if _symbol(symbol) == "TWD=X" or str(market).lower() == "fx":
+                        # FX is a daily close series, not an exchange-traded
+                        # security. Yahoo's OHLC envelope can legitimately be
+                        # internally inconsistent for a 24-hour quote, so only
+                        # validate the positive finite close used by the model.
+                        if close_value is None or close_value <= 0:
+                            raise ValueError(f"invalid Yahoo FX close for {item_date.isoformat()}")
+                        rows.append({"date": item_date.isoformat(), "close": close_value})
+                        continue
                     open_value = _finite(quote.get("open", [None] * len(timestamps))[index]) if index < len(quote.get("open", [])) else None
                     high_value = _finite(quote.get("high", [None] * len(timestamps))[index]) if index < len(quote.get("high", [])) else None
                     low_value = _finite(quote.get("low", [None] * len(timestamps))[index]) if index < len(quote.get("low", [])) else None
-                    close_value = _finite(closes[index])
                     if any(value is None or value <= 0 for value in (open_value, high_value, low_value, close_value)):
                         raise ValueError(f"invalid Yahoo OHLC values for {item_date.isoformat()}")
                     if low_value > high_value or low_value > min(open_value, close_value) or high_value < max(open_value, close_value):
@@ -615,10 +646,11 @@ def fetch_yahoo_research_series(
                             "requestedStart": start.isoformat(),
                             "requestedEnd": end.isoformat(),
                             "verifiedAt": datetime.now(timezone.utc).isoformat(),
-                            "coverageComplete": True,
                             "sourceHash": series_hash,
                             "exchangeTimezoneName": exchange_timezone,
                             "clippedOutOfRangeRows": clipped_rows,
+                            "closeObservationCount": len(fx_rows),
+                            "validationMethod": "fx-close-v1",
                         },
                         "status": "READY",
                         "attempts": total_attempts,
@@ -824,12 +856,89 @@ def fetch_finmind_research_series(
 def fetch_research_series(symbol: str, *, market: str, start: date, end: date, token: str | None = None, http_get: Any = None) -> dict[str, Any]:
     """Apply the primary Taiwan source and raw-chart fallback policy."""
     if _symbol(symbol) == "TWD=X" or str(market).lower() == "fx":
-        return fetch_yahoo_research_series("TWD=X", market="fx", start=start, end=end, http_get=http_get)
+        try:
+            primary = fetch_yahoo_research_series("TWD=X", market="fx", start=start, end=end, http_get=http_get)
+            if primary.get("status") == "READY":
+                return primary
+            yahoo_failure = str(primary.get("reason") or primary.get("reasonCode") or "FX_SOURCE_UNAVAILABLE")
+        except Exception as error:  # noqa: BLE001 - fallback boundary for an external quote service
+            yahoo_failure = type(error).__name__
+        try:
+            cbc = fetch_cbc_usd_twd_series(start=start, end=end, http_get=http_get)
+            cbc["fxEvidence"]["primaryFailure"] = yahoo_failure
+            return cbc
+        except Exception as error:  # noqa: BLE001 - report both independent providers
+            return {
+                "symbol": "TWD=X", "market": "fx", "currency": "TWD_PER_USD",
+                "quotePair": "USD/TWD", "rows": [], "source": None,
+                "corporateActionStatus": "NOT_APPLICABLE", "status": "UNAVAILABLE",
+                "reason": "Yahoo FX unavailable; CBC fallback " + type(error).__name__,
+                "reasonCode": "FX_SOURCES_UNAVAILABLE",
+                "sourceResults": {"Yahoo": yahoo_failure, "CBC": type(error).__name__},
+            }
     if str(market).lower() in {"tw", "taiwan", "twd"} and token:
         primary = fetch_finmind_research_series(symbol, token=token, start=start, end=end, http_get=http_get)
         if primary and primary.get("rows") and primary.get("corporateActionStatus") == "PASS":
             return primary
     return fetch_yahoo_research_series(symbol, market=market, start=start, end=end, http_get=http_get)
+
+
+def fetch_cbc_usd_twd_series(
+    *, start: date, end: date, http_get: Any = None, timeout: float = 12,
+) -> dict[str, Any]:
+    """Fetch one complete USD/TWD history from Taiwan CBC's daily series.
+
+    This is an all-period fallback for Yahoo, never a day-by-day splice. The
+    rate is NTD per USD and is aligned to each asset's own completed week later.
+    """
+    getter = http_get or requests.get
+    response = getter(
+        "https://cpx.cbc.gov.tw/api/OpenData/FTDOpenData_Day",
+        headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if isinstance(payload, Mapping):
+        records = payload.get("data", payload.get("Data"))
+    else:
+        records = payload
+    if not isinstance(records, list) or not records:
+        raise ValueError("CBC daily FX response has no recognizable records")
+    rows = []
+    for record in records:
+        if not isinstance(record, Mapping):
+            raise ValueError("CBC daily FX row is not an object")
+        raw_date = record.get("日期", record.get("date", record.get("Date")))
+        raw_rate = record.get("NTD_USD", record.get("rate", record.get("Rate")))
+        item_date = _as_date(raw_date)
+        rate = _finite(str(raw_rate).replace(",", "")) if raw_rate is not None else None
+        if item_date is None or rate is None or rate <= 0:
+            raise ValueError("CBC daily FX row has invalid date or positive NTD-per-USD close")
+        if start <= item_date <= end:
+            rows.append({"date": item_date.isoformat(), "close": rate})
+    rows.sort(key=lambda item: item["date"])
+    if not rows:
+        raise ValueError("CBC daily FX series is empty in the requested range")
+    if any(left["date"] >= right["date"] for left, right in zip(rows, rows[1:])):
+        raise ValueError("CBC daily FX dates are duplicated or unordered")
+    normalized = normalize_research_price(rows)
+    series_hash = _canonical_hash(normalized)
+    return {
+        "symbol": "TWD=X", "market": "fx", "currency": "TWD_PER_USD",
+        "quotePair": "USD/TWD", "rows": normalized,
+        "source": "Taiwan CBC FTDOpenData_Day",
+        "seriesHash": series_hash, "status": "READY", "attempts": 1,
+        "fxEvidence": {
+            "provider": "Taiwan CBC OpenData",
+            "baseCurrency": "USD", "quoteCurrency": "TWD",
+            "requestedStart": start.isoformat(), "requestedEnd": end.isoformat(),
+            "verifiedAt": datetime.now(timezone.utc).isoformat(),
+            "sourceHash": series_hash, "closeObservationCount": len(normalized),
+            "validationMethod": "fx-close-v1",
+            "closingConvention": "Taiwan interbank daily close",
+        },
+    }
 
 
 def _quarter_index(value: date) -> int:
@@ -1060,25 +1169,41 @@ def estimate_beta_policy(
         rows = record.get("rows") if isinstance(record, Mapping) else None
         currency = str(record.get("currency", "TWD")) if isinstance(record, Mapping) else "TWD"
         weekly = _weekly_rows(rows or [], price_key="splitAdjustedClose", currency=currency, fx_rows=fx_rows, cutoff=completed_week_cutoff)
+        local_weekly = None
         if currency.upper() != "TWD":
+            # Determine the required FX observations only after the three-year
+            # paired estimation window is known. Old history outside the
+            # estimator window must not make a current-quarter policy fail.
             fx_by_date = {
                 _as_date(row.get("date")): _finite(row.get("close", row.get("price")))
                 for row in fx_rows or []
                 if _as_date(row.get("date")) is not None
             }
-            unconverted_weekly = _weekly_rows(
+            local_weekly = _weekly_rows(
                 rows or [], price_key="splitAdjustedClose", currency="TWD", cutoff=completed_week_cutoff,
             )
-            fx_missing = len(weekly) != len(unconverted_weekly)
-            for item_date, _ in weekly.values():
-                prior = [fx_date for fx_date, value in fx_by_date.items() if fx_date and fx_date <= item_date and value and value > 0]
-                if not prior or (item_date - max(prior)).days > 7:
+        common = [key for key in sorted(set(benchmark).intersection(weekly)) if window_start <= benchmark[key][0] <= completed_week_cutoff]
+        if local_weekly is not None:
+            required_fx_weeks = [
+                key for key in sorted(set(benchmark).intersection(local_weekly))
+                if window_start <= benchmark[key][0] <= completed_week_cutoff
+            ]
+            fx_missing = not fx_rows
+            for key in required_fx_weeks:
+                local_date = local_weekly[key][0]
+                prior = [fx_date for fx_date, value in fx_by_date.items() if fx_date and fx_date <= local_date and value and value > 0]
+                if (
+                    key not in weekly
+                    or weekly[key][0] != local_date
+                    or not prior
+                    or (local_date - max(prior)).days > 7
+                ):
                     fx_missing = True
                     break
-            if not fx_rows or fx_missing:
+            if fx_missing:
                 assets[symbol] = {
                     "status": "INSUFFICIENT_EVIDENCE",
-                    "reason": "verified USD/TWD observations do not cover paired weeks",
+                    "reason": "verified USD/TWD observations do not cover paired weeks inside the three-year estimation window",
                     "observations": 0,
                     "windowStart": window_start.isoformat(),
                     "windowEnd": completed_week_cutoff.isoformat(),
@@ -1087,10 +1212,6 @@ def estimate_beta_policy(
                     "source": record.get("source") if isinstance(record, Mapping) else None,
                 }
                 continue
-        common = [
-            key for key in sorted(set(benchmark).intersection(weekly))
-            if window_start <= benchmark[key][0] <= completed_week_cutoff
-        ]
         latest_pair_fresh = False
         if common:
             latest_key = common[-1]

@@ -1,7 +1,7 @@
 import datetime as dt
 import unittest
 
-from schedule_gate import decide_fallback, scheduled_context
+from schedule_gate import decide_fallback, dispatch_context, scheduled_context
 from service_contracts import UTC
 
 
@@ -16,11 +16,35 @@ class ScheduleGateTests(unittest.TestCase):
         }]
         result = decide_fallback(
             event_name="schedule", schedule="20 22 * * 1-5", now_utc=self.now,
-            commit="abc", runs=runs,
+            commit="abc", runs=runs, health_status="PASS",
         )
         self.assertEqual(result["decision"], "SKIP")
         self.assertEqual(result["reasonCode"], "SKIP_ALREADY_SUCCEEDED")
         self.assertEqual(result["window"], "us")
+
+    def test_successful_workflow_without_private_health_marker_does_not_skip(self):
+        runs = [{
+            "status": "completed", "conclusion": "success", "headSha": "abc",
+            "createdAt": "2026-09-15T21:42:00Z", "event": "repository_dispatch",
+        }]
+        result = decide_fallback(
+            event_name="schedule", schedule="20 22 * * 1-5", now_utc=self.now,
+            commit="abc", runs=runs,
+        )
+        self.assertEqual(result["decision"], "RUN")
+        self.assertEqual(result["reasonCode"], "RUN_HEALTH_UNVERIFIED")
+
+    def test_data_unhealthy_run_does_not_skip_fallback(self):
+        runs = [{
+            "status": "completed", "conclusion": "success", "headSha": "abc",
+            "createdAt": "2026-09-15T21:42:00Z", "event": "repository_dispatch",
+        }]
+        result = decide_fallback(
+            event_name="schedule", schedule="20 22 * * 1-5", now_utc=self.now,
+            commit="abc", runs=runs, health_status="UNHEALTHY",
+        )
+        self.assertEqual(result["decision"], "RUN")
+        self.assertEqual(result["reasonCode"], "RUN_DATA_UNHEALTHY")
 
     def test_old_date_window_or_commit_does_not_skip(self):
         runs = [{
@@ -56,6 +80,14 @@ class ScheduleGateTests(unittest.TestCase):
     def test_context_uses_taipei_calendar(self):
         context = scheduled_context("25 7 * * 1-5", self.now)
         self.assertEqual(context, {"date": "2026-09-15", "window": "tw"})
+
+    def test_dispatch_context_identifies_only_known_primary_windows(self):
+        morning = dt.datetime(2026, 9, 15, 21, 40, tzinfo=UTC)  # 05:40 Taipei
+        afternoon = dt.datetime(2026, 9, 15, 6, 45, tzinfo=UTC)  # 14:45 Taipei
+        outside = dt.datetime(2026, 9, 15, 10, 0, tzinfo=UTC)  # 18:00 Taipei
+        self.assertEqual(dispatch_context(morning), {"date": "2026-09-16", "window": "us"})
+        self.assertEqual(dispatch_context(afternoon), {"date": "2026-09-15", "window": "tw"})
+        self.assertIsNone(dispatch_context(outside)["window"])
 
     def test_delayed_cron_after_midnight_keeps_prior_settlement_date(self):
         delayed = dt.datetime(2026, 9, 16, 17, 10, tzinfo=UTC)  # 01:10 Thupei

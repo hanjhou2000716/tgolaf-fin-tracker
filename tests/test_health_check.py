@@ -1,4 +1,5 @@
 import datetime
+import hashlib
 import io
 import json
 import os
@@ -12,12 +13,15 @@ from health_check import (
     GROWTH_STALE_AFTER_HOURS,
     GROWTH_URL,
     TAIPEI,
+    _fetch_publication_mismatch,
     alert_plan,
     evaluate_status,
     incident_key,
     load_incident_state,
     normalize_incident_state,
     parse_generated_at,
+    publication_root_issue,
+    _replace_published_snapshot_incidents,
     save_incident_state,
     send_alert,
 )
@@ -148,6 +152,125 @@ class HealthCheckTests(unittest.TestCase):
         )
         issues = evaluate_status("Skynet Monitoring", payload, now)
         self.assertTrue(any("Taiwan MARKET_DATA_STALE" in issue for issue in issues))
+
+    def test_publication_mismatch_collapses_window_and_stale_impact_only_with_verified_run(self):
+        now = datetime.datetime(2026, 10, 7, 8, 0, tzinfo=TAIPEI)
+        payload = self._skynet_v2(
+            generated="2026-10-06T14:00:00+08:00", window="afternoon", window_date="2026-10-06",
+            tw_latest="2026-10-05", tw_expected="2026-10-06", tw_status="stale",
+            tw_due="2026-10-06T14:30:00+08:00",
+        )
+        payload["service"]["runId"] = "100"
+        manifest = self._publication_manifest(payload)
+        verified_run = {
+            "id": 101, "run_attempt": 1, "conclusion": "success",
+            "run_started_at": "2026-10-06T22:00:00Z",  # Oct 7 06:00 Taipei
+        }
+        proof = publication_root_issue(payload, manifest, verified_run, now)
+        self.assertEqual(proof["expectedRunId"], 101)
+        issues = evaluate_status("Skynet Monitoring", payload, now)
+        grouped = _replace_published_snapshot_incidents(issues, proof)
+        self.assertEqual(sum("PUBLICATION_NOT_VISIBLE" in item for item in grouped), 1)
+        self.assertFalse(any("UPDATE_WINDOW_MISSED" in item or "MARKET_DATA_STALE" in item for item in grouped))
+
+    def test_publication_mismatch_without_newer_verified_run_keeps_distinct_causes(self):
+        now = datetime.datetime(2026, 10, 7, 8, 0, tzinfo=TAIPEI)
+        payload = self._skynet_v2(window_date="2026-10-06")
+        payload["service"]["runId"] = "100"
+        manifest = self._publication_manifest(payload)
+        older = {"id": 99, "run_attempt": 1, "conclusion": "success", "run_started_at": "2026-10-06T22:00:00Z"}
+        self.assertIsNone(publication_root_issue(payload, manifest, older, now))
+
+    def test_publication_mismatch_rejects_tampered_manifest_hash(self):
+        payload = self._skynet_v2(window_date="2026-10-06")
+        payload["service"]["runId"] = "100"
+        manifest = self._publication_manifest(payload)
+        manifest["window"] = "afternoon"
+        verified = {"id": 101, "run_attempt": 1, "conclusion": "success",
+                    "run_started_at": "2026-10-06T22:00:00Z"}
+        self.assertIsNone(publication_root_issue(
+            payload, manifest, verified, datetime.datetime(2026, 10, 7, 8, 0, tzinfo=TAIPEI),
+        ))
+
+    def test_publication_mismatch_requires_live_critical_file_hashes(self):
+        now = datetime.datetime(2026, 10, 7, 8, 0, tzinfo=TAIPEI)
+        payload = self._skynet_v2(
+            generated="2026-10-06T14:00:00+08:00", window="afternoon", window_date="2026-10-06",
+            tw_latest="2026-10-05", tw_expected="2026-10-06", tw_status="stale",
+        )
+        payload["service"]["runId"] = "100"
+        manifest = self._publication_manifest(payload)
+        public_files = {
+            "index.html": b"<!doctype html><title>Skynet</title>",
+            "data.json": b"{\"safe\":true}",
+            "status.json": json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode(),
+        }
+        hashes = {name: hashlib.sha256(value).hexdigest() for name, value in public_files.items()}
+        manifest["files"] = hashes
+        manifest["criticalFiles"] = dict(hashes)
+        unsigned = dict(manifest)
+        unsigned.pop("contentHash", None)
+        manifest["contentHash"] = hashlib.sha256(json.dumps(
+            unsigned, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+
+        class Response:
+            def __init__(self, *, payload=None, content=b""):
+                self._payload = payload
+                self.content = content
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._payload
+
+        class Requests:
+            def __init__(self, mismatch=False):
+                self.mismatch = mismatch
+
+            def get(self, url, **_kwargs):
+                if "/publication.json?" in url:
+                    return Response(payload=manifest)
+                name = url.split("?")[0].rsplit("/", 1)[-1]
+                content = public_files[name]
+                if self.mismatch and name == "data.json":
+                    content += b"stale"
+                return Response(content=content)
+
+        with patch("health_check._verified_publication_run", return_value={
+            "id": 101, "run_attempt": 1, "conclusion": "success",
+            "run_started_at": "2026-10-06T22:00:00Z",
+        }):
+            self.assertIsNotNone(_fetch_publication_mismatch(payload, now, Requests()))
+            self.assertIsNone(_fetch_publication_mismatch(payload, now, Requests(mismatch=True)))
+
+    @staticmethod
+    def _publication_manifest(payload):
+        service = payload["service"]
+        file_hashes = {
+            name: hashlib.sha256(("verified:" + name).encode("utf-8")).hexdigest()
+            for name in ("index.html", "data.json", "status.json")
+        }
+        manifest = {
+            "schemaVersion": 1,
+            "publicationId": f"hanjhou2000716/skynet-monitoring:{service['runId']}:1:1",
+            "publicationAttempt": 1,
+            "repository": "hanjhou2000716/skynet-monitoring",
+            "runId": service["runId"],
+            "runAttempt": "1",
+            "sourceCommit": service["commit"],
+            "windowDate": service["windowDate"],
+            "window": service["window"],
+            "generatedAt": service["generatedAt"],
+            "dataStatus": payload["status"],
+            "files": file_hashes,
+            "criticalFiles": dict(file_hashes),
+        }
+        manifest["contentHash"] = hashlib.sha256(json.dumps(
+            manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        return manifest
 
     def test_v2_reports_actionable_instrument_dates_without_duplicate_market_reason(self):
         payload = self._skynet_v2(

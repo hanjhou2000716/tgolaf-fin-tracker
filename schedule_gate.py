@@ -11,6 +11,7 @@ import datetime as dt
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -54,6 +55,22 @@ def scheduled_context(schedule: str, now_utc: dt.datetime | None = None) -> dict
     }
 
 
+def dispatch_context(now_utc: dt.datetime | None = None) -> dict[str, str | None]:
+    """Tag primary repository_dispatch runs only inside known settlement windows."""
+    now = now_utc or dt.datetime.now(UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
+    local = now.astimezone(TAIPEI)
+    clock = local.time().replace(tzinfo=None)
+    if WINDOW_BOUNDS["us"][0] <= clock < WINDOW_BOUNDS["us"][1]:
+        window = "us"
+    elif WINDOW_BOUNDS["tw"][0] <= clock < WINDOW_BOUNDS["tw"][1]:
+        window = "tw"
+    else:
+        window = None
+    return {"date": local.date().isoformat(), "window": window}
+
+
 def _successful_run_matches(
     runs: Iterable[dict[str, Any]], *, window: str, snapshot_date: str, commit: str
 ) -> bool:
@@ -80,6 +97,29 @@ def _successful_run_matches(
     return False
 
 
+def _matching_successful_run(
+    runs: Iterable[dict[str, Any]], *, window: str, snapshot_date: str, commit: str
+) -> dict[str, Any] | None:
+    start, end = WINDOW_BOUNDS[window]
+    candidates = []
+    for run in runs:
+        if str(run.get("status") or "").lower() != "completed" or str(run.get("conclusion") or "").lower() != "success":
+            continue
+        if commit and str(run.get("headSha") or "") != commit:
+            continue
+        created = run.get("createdAt") or run.get("runStartedAt")
+        if not created:
+            continue
+        try:
+            local = _parse_time(created)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if local.date().isoformat() == snapshot_date and start <= local.time().replace(tzinfo=None) < end:
+            candidates.append((local, run))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1] if candidates else None
+
+
 def decide_fallback(
     *,
     event_name: str,
@@ -88,6 +128,7 @@ def decide_fallback(
     commit: str = "",
     runs: Iterable[dict[str, Any]] | None = None,
     api_error: str | None = None,
+    health_status: str | None = None,
 ) -> dict[str, Any]:
     """Make a deterministic RUN/SKIP decision with a safe reason code."""
     context = scheduled_context(schedule, now_utc)
@@ -109,10 +150,14 @@ def decide_fallback(
     if api_error:
         result["reasonCode"] = "RUN_API_UNAVAILABLE"
         return result
-    if _successful_run_matches(runs or (), window=window, snapshot_date=str(context["date"]), commit=commit):
+    match = _matching_successful_run(runs or (), window=window, snapshot_date=str(context["date"]), commit=commit)
+    if match and str(health_status or "").upper() == "PASS":
         result["foundSuccessfulRun"] = True
         result["decision"] = "SKIP"
         result["reasonCode"] = "SKIP_ALREADY_SUCCEEDED"
+    elif match:
+        result["foundSuccessfulRun"] = True
+        result["reasonCode"] = "RUN_HEALTH_UNVERIFIED" if not health_status else "RUN_DATA_UNHEALTHY"
     else:
         result["reasonCode"] = "RUN_NO_SUCCESSFUL_MATCH"
     return result
@@ -129,6 +174,27 @@ def _query_runs() -> list[dict[str, Any]]:
     completed = subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
     value = json.loads(completed.stdout or "[]")
     return value if isinstance(value, list) else []
+
+
+def _health_status_for_run(run: dict[str, Any] | None, *, expected_window: str | None, expected_date: str | None) -> str:
+    if not run or not run.get("databaseId"):
+        return "UNVERIFIED"
+    repository = os.getenv("GITHUB_REPOSITORY", "")
+    with tempfile.TemporaryDirectory(prefix="growth-health-gate-") as tmp:
+        command = [
+            "gh", "run", "download", str(run["databaseId"]), "--repo", repository,
+            "--name", "settlement-health", "--dir", tmp,
+        ]
+        try:
+            subprocess.run(command, check=True, capture_output=True, text=True, timeout=45)
+            marker = json.loads((Path(tmp) / "settlement-health.json").read_text(encoding="utf-8"))
+        except (OSError, subprocess.SubprocessError, ValueError, TypeError):
+            return "UNVERIFIED"
+    if not isinstance(marker, dict):
+        return "UNVERIFIED"
+    if marker.get("window") != expected_window or marker.get("windowDate") != expected_date:
+        return "UNVERIFIED"
+    return str(marker.get("healthStatus", "UNVERIFIED")).upper()
 
 
 def _write_output(result: dict[str, Any]) -> None:
@@ -152,13 +218,32 @@ def main() -> int:
             runs = _query_runs()
         except (OSError, subprocess.SubprocessError, ValueError, TypeError) as error:
             api_error = type(error).__name__
+    health_status = None
+    if event_name == "schedule" and not api_error:
+        context = scheduled_context(schedule)
+        matching_run = (
+            _matching_successful_run(
+                runs, window=str(context["window"]), snapshot_date=str(context["date"]), commit=commit,
+            )
+            if context["window"] else None
+        )
+        health_status = _health_status_for_run(
+            matching_run, expected_window=context["window"], expected_date=context["date"],
+        ) if matching_run else None
     result = decide_fallback(
         event_name=event_name,
         schedule=schedule,
         commit=commit,
         runs=runs,
         api_error=api_error,
+        health_status=health_status,
     )
+    if event_name == "repository_dispatch":
+        context = dispatch_context()
+        result["date"] = context["date"]
+        result["window"] = context["window"]
+        if context["window"]:
+            result["reasonCode"] = "RUN_PRIMARY_TRIGGER"
     result["apiCheck"] = "unavailable" if api_error else "ok" if event_name == "schedule" else "not_required"
     result["schemaVersion"] = 1
     Path(".private-build").mkdir(parents=True, exist_ok=True)
