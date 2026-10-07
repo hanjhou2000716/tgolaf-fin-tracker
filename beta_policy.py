@@ -72,6 +72,14 @@ def _as_date(value: Any) -> date | None:
     text = str(value or "").strip()
     if not text:
         return None
+    # date.fromisoformat accepted compact YYYYMMDD dates starting in Python
+    # 3.11. The production workflow is pinned to Python 3.10, and CBC's
+    # OpenData feed uses this compact form, so parse it explicitly here.
+    if re.fullmatch(r"\d{8}", text):
+        try:
+            return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+        except ValueError:
+            return None
     try:
         return date.fromisoformat(text[:10].replace("/", "-"))
     except ValueError:
