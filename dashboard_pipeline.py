@@ -82,6 +82,10 @@ from history_store import (
     schema_drift_alert_sent,
     upsert_history_snapshot,
 )
+from telegram_delivery import (
+    deliver_once as deliver_telegram_notification,
+    encrypt_outbox as encrypt_telegram_outbox,
+)
 from sheets_retry import TRANSIENT_SHEETS_STATUS, retry_sheet_operation, write_operation_summary
 from runtime_extensions import build_runtime_extensions
 from refresh_recovery import inventory_has_positive_assets, validate_recovery_candidate
@@ -177,51 +181,87 @@ def open_spreadsheets_with_retry(client, *, attempts=4, sleep=time.sleep):
 
 def settlement_notification_sent(history_sheet, snapshot_date, window_key):
     """Read the durable per-day/per-window notification marker from History."""
+    return settlement_notification_state(history_sheet, snapshot_date, window_key)["status"] == "SENT"
+
+
+def settlement_notification_state(history_sheet, snapshot_date, window_key):
+    """Read fail-closed delivery state; legacy timestamps remain SENT."""
     if history_sheet is None:
-        return False
+        raise RuntimeError("settlement notification state is unavailable")
     header_map = build_header_map(retry_sheet_operation("history.row_values", history_sheet.row_values, 1))
     marker_column = header_map.get("Settlement_Notification_Sent_At")
     if not marker_column:
-        return False
+        raise RuntimeError("settlement notification marker column is missing")
     row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
     if row_number is None:
-        return False
+        raise RuntimeError("settlement notification history row is missing")
     row = retry_sheet_operation("history.row_values", history_sheet.row_values, row_number)
     raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
     if not raw_marker:
-        return False
+        return {"status": "PENDING"}
     try:
         markers = json.loads(raw_marker)
-    except json.JSONDecodeError:
-        # Legacy single-timestamp markers do not identify a window; allow both
-        # new settlement windows to send once after rollout.
-        return False
-    return isinstance(markers, dict) and bool(markers.get(window_key))
+    except json.JSONDecodeError as error:
+        # Old versions stored a single send timestamp. It has no window key,
+        # so conservatively regard it as already sent during migration.
+        try:
+            datetime.datetime.fromisoformat(raw_marker.replace("Z", "+00:00"))
+        except ValueError:
+            raise RuntimeError("settlement notification marker is malformed") from error
+        return {"status": "SENT", "sentAt": raw_marker, "legacy": True}
+    if isinstance(markers, str):
+        # Some older writers JSON-encoded the single timestamp before the
+        # per-window object was introduced. Treat it conservatively as sent.
+        try:
+            datetime.datetime.fromisoformat(markers.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise RuntimeError("settlement notification marker is malformed") from error
+        return {"status": "SENT", "sentAt": markers, "legacy": True}
+    if not isinstance(markers, dict):
+        raise RuntimeError("settlement notification marker has unknown format")
+    value = markers.get(window_key)
+    if isinstance(value, str) and value:
+        return {"status": "SENT", "sentAt": value, "legacy": True}
+    if value is None:
+        return {"status": "PENDING"}
+    if not isinstance(value, dict) or value.get("status") not in {
+        "SENDING", "SENT", "FAILED", "DELIVERY_UNKNOWN"
+    }:
+        raise RuntimeError("settlement notification marker has unknown state")
+    return value
 
 
-def mark_settlement_notification_sent(history_sheet, snapshot_date, window_key, sent_at):
+def mark_settlement_notification_state(history_sheet, snapshot_date, window_key, state):
     if history_sheet is None:
-        return
+        raise RuntimeError("settlement notification state is unavailable")
     header_map = build_header_map(retry_sheet_operation("history.row_values", history_sheet.row_values, 1))
     marker_column = header_map.get("Settlement_Notification_Sent_At")
     if not marker_column:
-        return
+        raise RuntimeError("settlement notification marker column is missing")
     row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
     if row_number is None:
-        return
+        raise RuntimeError("settlement notification history row is missing")
     row = retry_sheet_operation("history.row_values", history_sheet.row_values, row_number)
     raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
     try:
         markers = json.loads(raw_marker) if raw_marker else {}
-    except json.JSONDecodeError:
-        markers = {}
+    except json.JSONDecodeError as error:
+        raise RuntimeError("settlement notification marker is malformed") from error
     if not isinstance(markers, dict):
-        markers = {}
-    markers[window_key] = sent_at
+        raise RuntimeError("settlement notification marker has unknown format")
+    markers[window_key] = state
     marker_a1 = column_to_a1(marker_column)
     retry_sheet_operation("history.update", history_sheet.update,
         f"{marker_a1}{row_number}",
         [[json.dumps(markers, ensure_ascii=False, separators=(",", ":"))]],
+    )
+
+
+def mark_settlement_notification_sent(history_sheet, snapshot_date, window_key, sent_at):
+    """Backward-compatible wrapper for older callers and tests."""
+    mark_settlement_notification_state(
+        history_sheet, snapshot_date, window_key,
+        {"status": "SENT", "sentAt": sent_at},
     )
 
 
@@ -2615,10 +2655,8 @@ def main():
         ]
     }
     
-    # Send once in each settlement window. The History marker is keyed by
-    # window so the US morning and Taiwan afternoon notifications can both be
-    # delivered while remaining idempotent across Cron retries. Manual force
-    # mode intentionally bypasses both the time window and the dedupe marker.
+    # Send once per date/window. A write-ahead SENDING marker makes a process
+    # interruption fail closed instead of blindly repeating an uncertain send.
     snapshot_date = override_date.isoformat() if override_date and os.getenv("GITHUB_EVENT_NAME", "").strip() == "schedule" else tw_now.strftime("%Y-%m-%d")
     if FORCE_TELEGRAM:
         settlement_window = "manual"
@@ -2636,49 +2674,94 @@ def main():
     if refresh_blocked:
         ensure_history_columns(history_sheet, ["Schema_Drift_Alert_Marker"])
     refresh_already_alerted = schema_drift_alert_sent(history_sheet, refresh_digest) if refresh_digest else False
-    if refresh_blocked:
-        notification_already_sent = refresh_already_alerted and not FORCE_TELEGRAM
-    elif settlement_window and not FORCE_TELEGRAM:
-        notification_already_sent = settlement_notification_sent(history_sheet, snapshot_date, settlement_window)
-    else:
-        notification_already_sent = False
-    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID and settlement_window and not notification_already_sent:
-        try:
-            response = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": tg_text,
-                "parse_mode": "Markdown",
-                "reply_markup": keyboard,
-            }, timeout=10)
-            response.raise_for_status()
-            if refresh_blocked:
-                mark_schema_drift_alert_sent(
-                    history_sheet, snapshot_date, refresh_digest, generated_at
-                )
-            else:
-                mark_settlement_notification_sent(history_sheet, snapshot_date, settlement_window, generated_at)
-                if conflict_digest and not conflict_already_alerted:
-                    mark_ledger_conflict_alert_sent(
-                        history_sheet, snapshot_date, conflict_digest, generated_at
-                    )
-                if schema_digest and schema_alert_due:
-                    mark_schema_drift_alert_sent(
-                        history_sheet, snapshot_date, schema_digest, generated_at
-                    )
-            # This line is intentionally non-financial and makes production
-            # verification auditable without logging the settlement payload.
-            print(
-                "Telegram settlement light sent: "
-                f"{buy_hold_telegram_emoji(buy_hold_policy)}"
+    notification_result = {
+        "schemaVersion": 1,
+        "notificationType": "settlement" if not refresh_blocked else "data_blocked",
+        "windowDate": snapshot_date,
+        "window": settlement_window,
+        "status": "NOT_REQUIRED" if not settlement_window else "FAILED",
+        "reasonCode": "OUTSIDE_SETTLEMENT_WINDOW" if not settlement_window else "NOT_ATTEMPTED",
+    }
+    notification_payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": tg_text,
+        "parse_mode": "Markdown",
+        "reply_markup": keyboard,
+    }
+    delivery_key = settlement_window or ""
+    if refresh_blocked and refresh_digest:
+        delivery_key = f"blocked_{refresh_digest}"
+    should_deliver = bool(settlement_window and not refresh_blocked) or bool(refresh_blocked and refresh_digest)
+    if settlement_window and not refresh_blocked:
+        notification_outbox = {
+            "schemaVersion": 1,
+            "notificationType": "settlement",
+            "windowDate": snapshot_date,
+            "window": settlement_window,
+            "sourceCommit": os.getenv("GITHUB_SHA", ""),
+            "runId": os.getenv("GITHUB_RUN_ID", ""),
+            "payload": notification_payload,
+        }
+        notification_outbox["contentHash"] = hashlib.sha256(
+            json.dumps(notification_outbox, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+        if TELEGRAM_TOKEN and GCP_CREDENTIALS_JSON:
+            protected_outbox = encrypt_telegram_outbox(
+                notification_outbox,
+                telegram_token=TELEGRAM_TOKEN,
+                google_credentials=GCP_CREDENTIALS_JSON,
             )
-            print(f"Telegram notification sent; window={settlement_window}, forced={FORCE_TELEGRAM}")
-        except requests.RequestException as error:
-            print(f"Telegram notification failed: {error}")
-    else:
-        print(
-            "Telegram notification skipped; "
-            f"window={settlement_window}, alreadySent={notification_already_sent}, snapshotResult={snapshot_result}"
-        )
+            write_json(".private-build/settlement-notification-outbox.enc.json", protected_outbox)
+    if should_deliver and not (refresh_blocked and refresh_already_alerted):
+        if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+            notification_result.update(status="FAILED", reasonCode="TELEGRAM_CREDENTIALS_MISSING")
+        else:
+            def load_delivery_state():
+                return settlement_notification_state(history_sheet, snapshot_date, delivery_key)
+
+            def save_delivery_state(state):
+                mark_settlement_notification_state(history_sheet, snapshot_date, delivery_key, state)
+
+            notification_result = deliver_telegram_notification(
+                date_key=snapshot_date,
+                window=delivery_key,
+                payload=notification_payload,
+                token=TELEGRAM_TOKEN,
+                load_state=load_delivery_state,
+                save_state=save_delivery_state,
+                post=requests.post,
+                now=generated_at,
+            )
+            notification_result["notificationType"] = "settlement" if not refresh_blocked else "data_blocked"
+            notification_result["window"] = settlement_window
+    elif refresh_blocked and refresh_already_alerted:
+        notification_result.update(status="SENT", reasonCode="ALREADY_ALERTED")
+    elif settlement_window and refresh_blocked:
+        notification_result.update(status="FAILED", reasonCode="SETTLEMENT_DATA_BLOCKED")
+
+    write_json(".private-build/settlement-notification-result.json", notification_result)
+    print(
+        "Telegram notification outcome: "
+        f"status={notification_result['status']}, "
+        f"window={settlement_window or 'none'}, reason={notification_result.get('reasonCode')}"
+    )
+    if notification_result["status"] == "SENT":
+        if refresh_blocked:
+            mark_schema_drift_alert_sent(
+                history_sheet, snapshot_date, refresh_digest, generated_at
+            )
+        else:
+            if conflict_digest and not conflict_already_alerted:
+                mark_ledger_conflict_alert_sent(
+                    history_sheet, snapshot_date, conflict_digest, generated_at
+                )
+            if schema_digest and schema_alert_due:
+                mark_schema_drift_alert_sent(
+                    history_sheet, snapshot_date, schema_digest, generated_at
+                )
+        print("Telegram settlement light sent: " + buy_hold_telegram_emoji(buy_hold_policy))
+    elif notification_result["status"] == "DELIVERY_UNKNOWN":
+        print("Telegram delivery is unconfirmed; automatic resend is blocked")
     # Flush a non-financial Google Sheets availability summary for the private
     # Actions artifact after a successful run.  Fatal Sheet errors are flushed
     # by retry_sheet_operation before they propagate.

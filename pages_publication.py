@@ -13,11 +13,12 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import sys
 import time
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urljoin, urlsplit, urlunsplit
+from urllib.parse import quote, urljoin, urlencode, urlsplit, urlunsplit
 from urllib.request import Request, urlopen
 
 
@@ -36,6 +37,30 @@ def _canonical_json(value: Any) -> bytes:
 
 def _sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _manifest_hash_is_valid(manifest: Mapping[str, Any]) -> bool:
+    unsigned = dict(manifest)
+    supplied = unsigned.pop("contentHash", None)
+    return isinstance(supplied, str) and supplied == _sha256(_canonical_json(unsigned))
+
+
+def _source_order(manifest: Mapping[str, Any]) -> tuple[int, int]:
+    try:
+        run_id = int(manifest.get("sourceRunId", manifest.get("runId", 0)))
+        run_attempt = int(manifest.get("sourceRunAttempt", manifest.get("runAttempt", 0)))
+    except (TypeError, ValueError):
+        return 0, 0
+    return run_id, run_attempt
+
+
+def _safe_relative_path(value: Any) -> str:
+    if not isinstance(value, str) or not value or "\\" in value:
+        raise PublicationError("publication manifest contains an unsafe content path")
+    pieces = value.split("/")
+    if any(piece in {"", ".", ".."} for piece in pieces):
+        raise PublicationError("publication manifest contains an unsafe content path")
+    return value
 
 
 def _iso(value: Any) -> str | None:
@@ -65,7 +90,9 @@ def prepare_manifest(site_dir: str | Path, *, env: Mapping[str, str] | None = No
     repo = env.get("GITHUB_REPOSITORY", "").strip()
     run_id = env.get("GITHUB_RUN_ID", "").strip()
     run_attempt = env.get("GITHUB_RUN_ATTEMPT", "").strip()
-    source_commit = env.get("GITHUB_SHA", "").strip()
+    source_commit = (env.get("PUBLICATION_SOURCE_COMMIT") or env.get("GITHUB_SHA", "")).strip()
+    source_run_id = (env.get("PUBLICATION_SOURCE_RUN_ID") or run_id).strip()
+    source_run_attempt = (env.get("PUBLICATION_SOURCE_RUN_ATTEMPT") or run_attempt).strip()
     if not repo or not run_id or not run_attempt or not source_commit:
         raise PublicationError("workflow repository, run identity, or source commit is missing")
 
@@ -93,15 +120,68 @@ def prepare_manifest(site_dir: str | Path, *, env: Mapping[str, str] | None = No
         "repository": repo,
         "runId": run_id,
         "runAttempt": run_attempt,
+        "sourceRunId": source_run_id,
+        "sourceRunAttempt": source_run_attempt,
         "sourceCommit": source_commit,
         "windowDate": env.get("PUBLICATION_WINDOW_DATE") or _service_value(status, "windowDate"),
         "window": env.get("PUBLICATION_WINDOW") or _service_value(status, "window"),
         "generatedAt": generated_at,
         "files": digests,
     }
+    if env.get("PUBLICATION_RECOVERY_FROM"):
+        body["republicationOf"] = env["PUBLICATION_RECOVERY_FROM"]
     body["contentHash"] = _sha256(_canonical_json(body))
     (root / MANIFEST_NAME).write_bytes(_canonical_json(body) + b"\n")
     return body
+
+
+def prepare_republication(
+    site_dir: str | Path,
+    *,
+    source_run_id: str,
+    source_commit: str,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Validate a trusted failed run's public artifact, then issue a new publication identity."""
+    env = dict(env or os.environ)
+    root = Path(site_dir).resolve()
+    try:
+        original = json.loads((root / MANIFEST_NAME).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise PublicationError("source public artifact has no valid publication manifest") from error
+    if not isinstance(original, Mapping) or not _manifest_hash_is_valid(original):
+        raise PublicationError("source publication manifest failed its integrity check")
+    repository = env.get("GITHUB_REPOSITORY", "").strip()
+    if original.get("repository") != repository:
+        raise PublicationError("source publication belongs to a different repository")
+    if str(original.get("runId", "")) != str(source_run_id):
+        raise PublicationError("source publication run identity does not match the failed workflow")
+    if original.get("sourceCommit") != source_commit:
+        raise PublicationError("source publication commit does not match the failed workflow")
+    files = original.get("files")
+    if not isinstance(files, Mapping) or not {"index.html", "status.json"}.issubset(files):
+        raise PublicationError("source publication manifest is missing required public files")
+    for relative, expected in files.items():
+        safe_relative = _safe_relative_path(relative)
+        path = (root / safe_relative).resolve()
+        if root not in path.parents or not path.is_file() or _sha256(path.read_bytes()) != expected:
+            raise PublicationError(f"source public artifact failed content-integrity check: {safe_relative}")
+
+    if original.get("window") not in {None, "", "us", "tw"}:
+        raise PublicationError("source publication window is invalid")
+    if original.get("windowDate") not in {None, ""}:
+        try:
+            datetime.fromisoformat(str(original["windowDate"]))
+        except ValueError as error:
+            raise PublicationError("source publication date is invalid") from error
+    env["PUBLICATION_SOURCE_RUN_ID"] = str(original.get("sourceRunId") or original["runId"])
+    env["PUBLICATION_SOURCE_RUN_ATTEMPT"] = str(original.get("sourceRunAttempt") or original.get("runAttempt") or "1")
+    env["PUBLICATION_SOURCE_COMMIT"] = source_commit
+    env["PUBLICATION_WINDOW"] = str(original.get("window") or "")
+    env["PUBLICATION_WINDOW_DATE"] = str(original.get("windowDate") or "")
+    env["PUBLICATION_RECOVERY_FROM"] = str(original.get("publicationId", ""))
+    env["PUBLICATION_REQUIRE_ORDERING_PROOF"] = "true"
+    return prepare_manifest(root, env=env)
 
 
 def pages_build_version(publication_id: str, deployment_attempt: int) -> str:
@@ -139,8 +219,26 @@ def _request_json(method: str, url: str, *, token: str, body: Mapping[str, Any] 
     try:
         with urlopen(request, timeout=30) as response:
             raw = response.read()
-    except (HTTPError, URLError, TimeoutError) as error:
-        raise PublicationError(f"GitHub Pages API {method} failed: {type(error).__name__}") from error
+    except HTTPError as error:
+        raw_error = error.read(4096).decode("utf-8", errors="replace")
+        try:
+            parsed_error = json.loads(raw_error)
+        except (TypeError, ValueError):
+            parsed_error = {}
+        detail = parsed_error.get("message") if isinstance(parsed_error, Mapping) else None
+        if not isinstance(detail, str) or not detail.strip():
+            detail = "GitHub returned no safe error message"
+        detail = re.sub(r"(?i)(Bearer\s+)[^\s,;]+", r"\1[REDACTED]", detail)
+        detail = re.sub(r"gh[pousr]_[A-Za-z0-9_]+", "[REDACTED]", detail)
+        detail = re.sub(r"github_pat_[A-Za-z0-9_]+", "[REDACTED]", detail)
+        request_id = error.headers.get("X-GitHub-Request-Id", "") if error.headers else ""
+        request_id = re.sub(r"[^A-Za-z0-9-]", "", request_id)[:80]
+        suffix = f" requestId={request_id}" if request_id else ""
+        raise PublicationError(
+            f"GitHub Pages API {method} rejected request: HTTP {error.code}; {detail[:300]}{suffix}"
+        ) from error
+    except (URLError, TimeoutError) as error:
+        raise PublicationError(f"GitHub Pages API {method} transport failed: {type(error).__name__}") from error
     if not raw:
         return {}
     try:
@@ -155,9 +253,9 @@ def _oidc_token(env: Mapping[str, str] | None = None) -> str:
     request_token = env.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
     if not request_url or not request_token:
         raise PublicationError("GitHub Actions OIDC endpoint is unavailable")
-    separator = "&" if "?" in request_url else "?"
-    url = request_url + separator + urlencode({"audience": f"https://github.com/{env.get('GITHUB_REPOSITORY', '')}"})
-    payload = _read_json_response(url, headers={"Authorization": f"Bearer {request_token}"})
+    # Match actions/deploy-pages: use the runner-issued OIDC request URL
+    # verbatim and let the runner's configured audience policy apply.
+    payload = _read_json_response(request_url, headers={"Authorization": f"Bearer {request_token}"})
     token = payload.get("value") if isinstance(payload, Mapping) else None
     if not isinstance(token, str) or not token:
         raise PublicationError("GitHub Actions OIDC token response is empty")
@@ -185,7 +283,6 @@ def _publish_pages(repo: str, artifact_id: int, publication_id: str, attempt: in
         "POST", f"{API_ROOT}/repos/{repo}/pages/deployments", token=token,
         body={
             "artifact_id": artifact_id,
-            "environment": "github-pages",
             "pages_build_version": pages_build_version(publication_id, attempt),
             "oidc_token": oidc,
         },
@@ -209,11 +306,72 @@ def _await_deployment(status_url: str, token: str, *, wait: Callable[[float], No
 
 
 def _live_payload(base_url: str, relative: str, nonce: str, reader: Callable[..., Any]) -> Any:
+    _safe_relative_path(relative)
     safe_path = "/".join(quote(piece, safe="") for piece in relative.split("/"))
     url = urljoin(base_url.rstrip("/") + "/", safe_path)
     split = urlsplit(url)
     url = urlunsplit((split.scheme, split.netloc, split.path, urlencode({"publication_check": nonce}), ""))
     return reader(url, headers={"Cache-Control": "no-cache, no-store, max-age=0", "Pragma": "no-cache"})
+
+
+def _verify_live_manifest_files(
+    manifest: Mapping[str, Any], base_url: str, nonce: str, reader: Callable[..., Any]
+) -> bool:
+    files = manifest.get("files")
+    if not isinstance(files, Mapping) or not files or not _manifest_hash_is_valid(manifest):
+        return False
+    for relative, expected in files.items():
+        try:
+            value = _live_payload(base_url, relative, nonce, reader)
+        except Exception:
+            return False
+        if isinstance(value, str):
+            value = value.encode("utf-8")
+        if not isinstance(value, bytes) or _sha256(value) != expected:
+            return False
+    return True
+
+
+def _publication_preflight(
+    site_dir: str | Path,
+    base_url: str,
+    *,
+    reader: Callable[..., Any] = _read_bytes_response,
+) -> str:
+    """Prevent delayed/older artifacts from replacing a newer live publication."""
+    manifest = json.loads((Path(site_dir) / MANIFEST_NAME).read_text(encoding="utf-8"))
+    nonce = _sha256(f"preflight:{manifest.get('publicationId')}:{time.monotonic()}".encode())[:16]
+    try:
+        raw = _live_payload(base_url, MANIFEST_NAME, nonce, reader)
+    except HTTPError as error:
+        if error.code == 404:
+            return "NO_EXISTING_PUBLICATION"
+        raise PublicationError(f"existing Pages manifest read failed: HTTP {error.code}") from error
+    except Exception as error:
+        raise PublicationError(f"existing Pages manifest read failed: {type(error).__name__}") from error
+    try:
+        live = json.loads(raw) if isinstance(raw, (bytes, str)) else raw
+    except (TypeError, ValueError) as error:
+        raise PublicationError("existing Pages manifest is malformed; refusing to overwrite") from error
+    if not isinstance(live, Mapping) or live.get("repository") != manifest.get("repository"):
+        raise PublicationError("existing Pages manifest is unverifiable; refusing to overwrite")
+    if not _manifest_hash_is_valid(live):
+        raise PublicationError("existing Pages manifest hash is invalid; refusing to overwrite")
+    candidate_order = _source_order(manifest)
+    live_order = _source_order(live)
+    if live_order > candidate_order:
+        if not _verify_live_manifest_files(live, base_url, nonce, reader):
+            raise PublicationError("newer Pages publication failed content-integrity check")
+        return "SUPERSEDED"
+    if live_order == candidate_order:
+        if live.get("files") == manifest.get("files"):
+            if _verify_live_manifest_files(live, base_url, nonce, reader):
+                return "ALREADY_VISIBLE"
+            # Same source and expected files, but CDN content is partial: it is
+            # safe to republish this exact artifact to repair visibility.
+            return "READY"
+        raise PublicationError("publications from the same source run have conflicting content")
+    return "READY"
 
 
 def verify_live_publication(
@@ -238,26 +396,11 @@ def verify_live_publication(
     digest_map = manifest.get("files") if isinstance(manifest, Mapping) else None
     if not isinstance(digest_map, Mapping) or not digest_map:
         raise PublicationError("publication file hash manifest is empty")
-    unsigned_manifest = dict(manifest)
-    supplied_content_hash = unsigned_manifest.pop("contentHash", None)
-    if supplied_content_hash != _sha256(_canonical_json(unsigned_manifest)):
+    if not _manifest_hash_is_valid(manifest):
         raise PublicationError("prepared publication manifest content hash is invalid")
 
     def verify_manifest_files(candidate: Mapping[str, Any], nonce: str) -> bool:
-        files = candidate.get("files")
-        if not isinstance(files, Mapping) or not files:
-            return False
-        unsigned = dict(candidate)
-        supplied_content_hash = unsigned.pop("contentHash", None)
-        if supplied_content_hash != _sha256(_canonical_json(unsigned)):
-            return False
-        for relative, expected in files.items():
-            value = _live_payload(base_url, str(relative), nonce, reader)
-            if isinstance(value, str):
-                value = value.encode("utf-8")
-            if not isinstance(value, bytes) or _sha256(value) != expected:
-                return False
-        return True
+        return _verify_live_manifest_files(candidate, base_url, nonce, reader)
 
     deadline = monotonic() + max_wait_seconds
     last_error = "public content has not updated"
@@ -275,15 +418,14 @@ def verify_live_publication(
                 raise PublicationError("live publication manifest is not an object")
             live_id = live_manifest.get("publicationId")
             if live_id != publication_id:
-                def identity_order(value: Mapping[str, Any]) -> tuple[int, int]:
-                    try:
-                        return int(value.get("runId", 0)), int(value.get("runAttempt", 0))
-                    except (TypeError, ValueError):
-                        return 0, 0
-                if identity_order(live_manifest) > identity_order(manifest):
+                if _source_order(live_manifest) > _source_order(manifest):
                     if live_manifest.get("repository") == manifest.get("repository") and verify_manifest_files(live_manifest, nonce):
                         return "SUPERSEDED"
                     raise PublicationError("newer Pages manifest failed its content-integrity check")
+                if _source_order(live_manifest) == _source_order(manifest):
+                    if live_manifest.get("files") == manifest.get("files") and verify_manifest_files(live_manifest, nonce):
+                        return "SUPERSEDED"
+                    raise PublicationError("same-source Pages publication has conflicting content")
                 raise PublicationError("live Pages is still serving an older publication manifest")
             for relative, expected_hash in digest_map.items():
                 live = _live_payload(base_url, str(relative), nonce, reader)
@@ -315,10 +457,25 @@ def publish_and_verify(site_dir: str | Path, *, env: Mapping[str, str] | None = 
     manifest_path = Path(site_dir) / MANIFEST_NAME
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     publication_id = str(manifest["publicationId"])
+    preflight = _publication_preflight(site_dir, base_url)
+    if preflight == "SUPERSEDED":
+        return {"status": "SUPERSEDED", "publicationId": publication_id, "reasonCode": "NEWER_SOURCE_ALREADY_PUBLISHED"}
+    if preflight == "ALREADY_VISIBLE":
+        return {"status": "VERIFIED", "publicationId": publication_id, "reasonCode": "IDENTICAL_SOURCE_ALREADY_VISIBLE"}
+    if preflight == "NO_EXISTING_PUBLICATION" and manifest.get("republicationOf"):
+        raise PublicationError("republication requires a verifiable current manifest; refusing a blind overwrite")
     artifact_id = _find_pages_artifact(repo, run_id, token)
     last_error: Exception | None = None
     for attempt in (1, 2):
         try:
+            if attempt > 1:
+                preflight = _publication_preflight(site_dir, base_url)
+                if preflight == "SUPERSEDED":
+                    return {"status": "SUPERSEDED", "publicationId": publication_id,
+                            "reasonCode": "NEWER_SOURCE_PUBLISHED_DURING_RETRY"}
+                if preflight == "ALREADY_VISIBLE":
+                    return {"status": "VERIFIED", "publicationId": publication_id,
+                            "reasonCode": "IDENTICAL_SOURCE_BECAME_VISIBLE"}
             # Fetch a fresh short-lived OIDC token for the retry as the first
             # Pages request may have consumed most of the token lifetime.
             oidc = _oidc_token(env)
@@ -365,6 +522,10 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     prepare = sub.add_parser("prepare")
     prepare.add_argument("site_dir")
+    republish = sub.add_parser("prepare-republication")
+    republish.add_argument("site_dir")
+    republish.add_argument("--source-run-id", required=True)
+    republish.add_argument("--source-commit", required=True)
     deploy = sub.add_parser("publish-and-verify")
     deploy.add_argument("site_dir")
     verify = sub.add_parser("verify-live")
@@ -375,6 +536,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "prepare":
             manifest = prepare_manifest(args.site_dir)
             print(json.dumps({"status": "PREPARED", "publicationId": manifest["publicationId"], "contentHash": manifest["contentHash"]}))
+            return 0
+        if args.command == "prepare-republication":
+            manifest = prepare_republication(
+                args.site_dir, source_run_id=args.source_run_id, source_commit=args.source_commit,
+            )
+            print(json.dumps({
+                "status": "REPUBLISH_PREPARED", "publicationId": manifest["publicationId"],
+                "sourceRunId": manifest["sourceRunId"], "contentHash": manifest["contentHash"],
+            }))
             return 0
         if args.command == "verify-live":
             if not args.base_url:

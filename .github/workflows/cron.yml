@@ -27,6 +27,7 @@ concurrency:
   # Queue the fallback behind an in-flight primary run; cancelling the primary
   # could leave a valid update half-written and force an unnecessary replay.
   cancel-in-progress: false
+  queue: max
 
 permissions:
   contents: read
@@ -86,7 +87,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.10"
+          python-version-file: .python-version
           cache: pip
           cache-dependency-path: requirements.lock
 
@@ -161,6 +162,23 @@ jobs:
           SCHEDULED_WINDOW_OVERRIDE: ${{ needs.gate.outputs.window }}
           SCHEDULED_DATE_OVERRIDE: ${{ needs.gate.outputs.snapshot_date }}
         run: python settlement_health.py
+
+      - name: Upload private notification delivery outcome
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: settlement-notification-result
+          path: .private-build/settlement-notification-result.json
+          if-no-files-found: ignore
+
+      - name: Upload private settlement notification outbox
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: settlement-notification-outbox
+          path: .private-build/settlement-notification-outbox.enc.json
+          retention-days: 2
+          if-no-files-found: ignore
 
       - name: Upload private settlement health marker
         if: always()
@@ -332,7 +350,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.10"
+          python-version-file: .python-version
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@98ef48e41587a300b82de4cf298aa98b57b2faae # v3.0.1
@@ -370,7 +388,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
-          python-version: "3.10"
+          python-version-file: .python-version
 
       - name: Download the exact public artifact
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -391,3 +409,37 @@ jobs:
           name: pages-publication-verification
           path: .private-build/pages-publication-verification.json
           if-no-files-found: ignore
+
+  verify-settlement-completion:
+    name: Verify settlement notification receipt
+    needs: [gate, build, deploy, verify-publication]
+    if: always() && needs.gate.outputs.should_run == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version-file: .python-version
+      - name: Download notification outcome
+        if: needs.build.result == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p .private-build
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name settlement-notification-result --dir .private-build
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name settlement-health --dir .private-build
+      - name: Require complete stages for scheduled windows
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          PUBLICATION_RESULT: ${{ needs.verify-publication.result }}
+          REQUIRE_NOTIFICATION: ${{ needs.gate.outputs.window != '' }}
+          EXPECTED_DATE: ${{ needs.gate.outputs.snapshot_date }}
+          EXPECTED_WINDOW: ${{ needs.gate.outputs.window }}
+        run: python workflow_completion.py
