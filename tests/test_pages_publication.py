@@ -43,15 +43,23 @@ class PagesPublicationTests(unittest.TestCase):
         self.assertEqual(result, "opaque-token")
         self.assertEqual(read.call_args.args[0], request_url)
 
-    def test_pages_request_uses_unique_build_version_and_default_environment(self):
+    def test_pages_request_uses_source_commit_build_version(self):
+        source_commit = "a" * 40
         with patch("pages_publication._request_json", return_value={"status_url": "https://api.github.test/status"}) as request:
-            _publish_pages("owner/repo", 77, "owner/repo:123:1:1", 1, "oidc", "token")
+            _publish_pages("owner/repo", 77, source_commit, 1, "oidc", "token")
         method, url = request.call_args.args
         body = request.call_args.kwargs["body"]
         self.assertEqual(method, "POST")
         self.assertTrue(url.endswith("/pages/deployments"))
         self.assertEqual(set(body), {"artifact_id", "pages_build_version", "oidc_token"})
-        self.assertEqual(len(body["pages_build_version"]), 64)
+        self.assertEqual(body["pages_build_version"], source_commit)
+        self.assertEqual(pages_build_version(source_commit), source_commit)
+
+    def test_pages_build_version_rejects_synthetic_or_malformed_values(self):
+        with self.assertRaisesRegex(PublicationError, "source commit SHA"):
+            pages_build_version("synthetic-publication-hash")
+        with self.assertRaisesRegex(PublicationError, "source commit SHA"):
+            pages_build_version("a" * 64)
 
     def test_pages_http_error_keeps_safe_status_and_request_id(self):
         error = HTTPError(
@@ -73,19 +81,28 @@ class PagesPublicationTests(unittest.TestCase):
         (root / "data.public.json").write_bytes(b'{"mode":"demo"}\n')
         (root / "status.json").write_bytes(b'{"status":"ok","generatedAt":"2026-10-07T05:40:00Z"}\n')
 
-    def test_manifest_records_unique_run_identity_and_public_file_hashes(self):
+    def test_manifest_keeps_unique_publication_id_when_source_commit_repeats(self):
         with tempfile.TemporaryDirectory() as directory:
-            site = Path(directory) / "site"
-            self._site(site)
-            manifest = prepare_manifest(site, env={
+            site_a = Path(directory) / "site-a"
+            site_b = Path(directory) / "site-b"
+            self._site(site_a)
+            self._site(site_b)
+            repeated_sha = "c" * 40
+            manifest_a = prepare_manifest(site_a, env={
                 "GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "123",
-                "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "abc123",
+                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": repeated_sha,
                 "PUBLICATION_WINDOW_DATE": "2026-10-07", "PUBLICATION_WINDOW": "us",
             })
-            self.assertEqual(manifest["publicationId"], "owner/repo:123:2:1")
-            self.assertIn("status.json", manifest["files"])
-            self.assertNotIn("portfolio", json.dumps(manifest))
-            self.assertNotEqual(pages_build_version(manifest["publicationId"], 1), pages_build_version(manifest["publicationId"], 2))
+            manifest_b = prepare_manifest(site_b, env={
+                "GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "124",
+                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": repeated_sha,
+                "PUBLICATION_WINDOW_DATE": "2026-10-07", "PUBLICATION_WINDOW": "us",
+            })
+            self.assertEqual(manifest_a["sourceCommit"], repeated_sha)
+            self.assertEqual(manifest_b["sourceCommit"], repeated_sha)
+            self.assertNotEqual(manifest_a["publicationId"], manifest_b["publicationId"])
+            self.assertIn("status.json", manifest_a["files"])
+            self.assertNotIn("portfolio", json.dumps(manifest_a))
 
     def test_live_readback_requires_exact_publication_and_all_content_hashes(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -93,7 +110,7 @@ class PagesPublicationTests(unittest.TestCase):
             self._site(site)
             expected = prepare_manifest(site, env={
                 "GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "123",
-                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "abc123",
+                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "b" * 40,
             })
             base_url = "https://owner.github.io/repo"
 
