@@ -85,6 +85,7 @@ from history_store import (
 from telegram_delivery import (
     deliver_once as deliver_telegram_notification,
     encrypt_outbox as encrypt_telegram_outbox,
+    telegram_delivery_enabled,
 )
 from sheets_retry import TRANSIENT_SHEETS_STATUS, retry_sheet_operation, write_operation_summary
 from runtime_extensions import build_runtime_extensions
@@ -110,6 +111,7 @@ from service_contracts import (
 # ==========================================
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_SEND_ENABLED = telegram_delivery_enabled(os.getenv("TELEGRAM_SEND_ENABLED"))
 FINMIND_TOKEN = os.getenv("FINMIND_TOKEN")
 GCP_CREDENTIALS_JSON = os.getenv("GCP_CREDENTIALS")
 FORCE_TELEGRAM = os.getenv("FORCE_TELEGRAM", "false").strip().lower() in {"1", "true", "yes", "on"}
@@ -2705,14 +2707,16 @@ def main():
         notification_outbox["contentHash"] = hashlib.sha256(
             json.dumps(notification_outbox, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
-        if TELEGRAM_TOKEN and GCP_CREDENTIALS_JSON:
+        if TELEGRAM_SEND_ENABLED and TELEGRAM_TOKEN and GCP_CREDENTIALS_JSON:
             protected_outbox = encrypt_telegram_outbox(
                 notification_outbox,
                 telegram_token=TELEGRAM_TOKEN,
                 google_credentials=GCP_CREDENTIALS_JSON,
             )
             write_json(".private-build/settlement-notification-outbox.enc.json", protected_outbox)
-    if should_deliver and not (refresh_blocked and refresh_already_alerted):
+    if should_deliver and not TELEGRAM_SEND_ENABLED:
+        notification_result.update(status="DISABLED", reasonCode="OPERATOR_DISABLED")
+    elif should_deliver and not (refresh_blocked and refresh_already_alerted):
         if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
             notification_result.update(status="FAILED", reasonCode="TELEGRAM_CREDENTIALS_MISSING")
         else:

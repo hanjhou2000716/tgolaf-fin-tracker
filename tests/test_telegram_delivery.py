@@ -3,10 +3,18 @@ from types import SimpleNamespace
 
 from telegram_delivery import (
     TelegramDeliveryError, decrypt_outbox, deliver_once, encrypt_outbox, send_message,
+    telegram_delivery_enabled,
 )
 
 
 class TelegramDeliveryTests(unittest.TestCase):
+    def test_delivery_requires_enabled_mode_and_only_explicit_false_disables(self):
+        self.assertTrue(telegram_delivery_enabled(None))
+        self.assertTrue(telegram_delivery_enabled("enabled"))
+        self.assertFalse(telegram_delivery_enabled("disabled"))
+        self.assertFalse(telegram_delivery_enabled("false"))
+        self.assertFalse(telegram_delivery_enabled("invalid"))
+
     def test_success_requires_api_receipt(self):
         result = send_message(
             "test-token", {"chat_id": "test", "text": "fixture"},

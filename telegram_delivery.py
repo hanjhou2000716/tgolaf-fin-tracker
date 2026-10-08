@@ -16,6 +16,13 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 _OUTBOX_AAD_PREFIX = b"PRStK-settlement-outbox-v1\n"
 
 
+def telegram_delivery_enabled(value: str | None) -> bool:
+    """Default to normal operation; only explicit truthy values can enable delivery."""
+    if value is None or not str(value).strip():
+        return True
+    return str(value).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
 def _outbox_key(telegram_token: str, google_credentials: str) -> bytes:
     if not telegram_token or not google_credentials:
         raise ValueError("outbox encryption credentials are unavailable")

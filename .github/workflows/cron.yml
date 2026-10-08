@@ -10,6 +10,14 @@ on:
         required: false
         default: false
         type: boolean
+      notification_mode:
+        description: "Disable Telegram only for an explicitly non-notifying validation run"
+        required: false
+        default: enabled
+        type: choice
+        options:
+          - enabled
+          - disabled
       recover_missing_email:
         description: "One-time recovery for existing current-form rows created before email collection"
         required: false
@@ -129,6 +137,7 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_SEND_ENABLED: ${{ inputs.notification_mode != 'disabled' }}
           GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
           FORCE_TELEGRAM: ${{ inputs.force_telegram || false }}
