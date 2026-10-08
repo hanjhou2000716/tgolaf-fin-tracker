@@ -184,9 +184,17 @@ def prepare_republication(
     return prepare_manifest(root, env=env)
 
 
-def pages_build_version(publication_id: str, deployment_attempt: int) -> str:
-    """Pages requires a unique build version even when source SHA is unchanged."""
-    return _sha256(f"{publication_id}:deployment:{deployment_attempt}".encode("utf-8"))
+def pages_build_version(source_commit: str) -> str:
+    """Use the source revision accepted by GitHub Pages' deployment endpoint.
+
+    The deployment endpoint rejects synthetic per-run hashes with HTTP 404.
+    Per-publication uniqueness is tracked by the public manifest and content
+    hashes; live readback verifies those values after deployment.
+    """
+    value = str(source_commit or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{40}", value):
+        raise PublicationError("Pages build version must be the 40-character source commit SHA")
+    return value
 
 
 def _read_json_response(url: str, *, headers: Mapping[str, str] | None = None, timeout: float = 20) -> Any:
@@ -278,12 +286,12 @@ def _find_pages_artifact(repo: str, run_id: str, token: str) -> int:
     return int(matches[0]["id"])
 
 
-def _publish_pages(repo: str, artifact_id: int, publication_id: str, attempt: int, oidc: str, token: str) -> tuple[str, str | None]:
+def _publish_pages(repo: str, artifact_id: int, source_commit: str, attempt: int, oidc: str, token: str) -> tuple[str, str | None]:
     payload = _request_json(
         "POST", f"{API_ROOT}/repos/{repo}/pages/deployments", token=token,
         body={
             "artifact_id": artifact_id,
-            "pages_build_version": pages_build_version(publication_id, attempt),
+            "pages_build_version": pages_build_version(source_commit),
             "oidc_token": oidc,
         },
     )
@@ -479,20 +487,21 @@ def publish_and_verify(site_dir: str | Path, *, env: Mapping[str, str] | None = 
             # Fetch a fresh short-lived OIDC token for the retry as the first
             # Pages request may have consumed most of the token lifetime.
             oidc = _oidc_token(env)
-            status_url, page_url = _publish_pages(repo, artifact_id, publication_id, attempt, oidc, token)
+            source_commit = str(manifest.get("sourceCommit") or "")
+            status_url, page_url = _publish_pages(repo, artifact_id, source_commit, attempt, oidc, token)
             _await_deployment(status_url, token, wait=wait, deadline=monotonic() + 600, monotonic=monotonic)
             result = verify_live_publication(
                 site_dir, base_url, expected_publication_id=publication_id,
                 wait=wait, monotonic=monotonic, max_wait_seconds=300, poll_seconds=15,
             )
             if result == "SUPERSEDED":
-                return {"status": "SUPERSEDED", "publicationId": publication_id, "pagesBuildVersion": pages_build_version(publication_id, attempt)}
+                return {"status": "SUPERSEDED", "publicationId": publication_id, "pagesBuildVersion": pages_build_version(source_commit)}
             output_path = env.get("GITHUB_OUTPUT")
             if output_path:
                 with open(output_path, "a", encoding="utf-8") as output:
                     output.write(f"page_url={page_url or base_url}\n")
             return {"status": "VERIFIED", "publicationId": publication_id, "deploymentAttempt": attempt,
-                    "artifactId": artifact_id, "pagesBuildVersion": pages_build_version(publication_id, attempt),
+                    "artifactId": artifact_id, "pagesBuildVersion": pages_build_version(source_commit),
                     "pageUrl": page_url or base_url}
         except PublicationError as error:
             last_error = error
