@@ -7,6 +7,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from beta_policy import (
+    _as_date,
     _canonical_hash,
     _official_action_specs,
     _official_period_matches,
@@ -236,6 +237,10 @@ class BetaPolicyTests(unittest.TestCase):
         self.assertEqual([row["close"] for row in result["rows"]], [31.2, 31.3])
         self.assertEqual(sum("yahoo" in url for url in calls), 3)
         self.assertEqual(sum("cbc.gov.tw" in url for url in calls), 1)
+
+    def test_compact_cbc_session_date_is_python_310_compatible(self):
+        self.assertEqual(_as_date("20260928"), date(2026, 9, 28))
+        self.assertIsNone(_as_date("20260230"))
 
     def test_official_endpoint_contracts_and_roc_date_forms(self):
         _, twse = _official_action_specs("twse", date(2026, 9, 1), date(2026, 9, 30))

@@ -15,6 +15,7 @@ class SettlementHealthTests(unittest.TestCase):
                 "beta": {"status": "READY", "policyStatus": "READY", "validationStatus": "AUTO_VALIDATED", "marketQuotesFresh": True},
                 "kelly": {"status": "READY", "approvalStatus": "AUTO_VALIDATED"},
             }}},
+            {"status": "SENT", "notificationType": "settlement", "windowDate": "2026-10-07", "window": "us"},
             window_date="2026-10-07", window="us",
         )
         self.assertEqual(result["healthStatus"], "PASS")
@@ -33,6 +34,19 @@ class SettlementHealthTests(unittest.TestCase):
         self.assertEqual(result["healthStatus"], "UNHEALTHY")
         self.assertIn("BETA_POLICY_NOT_AUTO_VALIDATED", result["reasonCodes"])
         self.assertIn("LEDGER_AUDIT_NOT_OK", result["reasonCodes"])
+
+    def test_settlement_without_matching_telegram_receipt_is_unhealthy(self):
+        result = build_settlement_health(
+            {"status": "ok", "ledgerAudit": {"status": "OK"}, "ingestionHealth": {"status": "READY"}},
+            {"portfolio": {"risk": {
+                "beta": {"status": "READY", "policyStatus": "READY", "validationStatus": "AUTO_VALIDATED", "marketQuotesFresh": True},
+                "kelly": {"status": "READY", "approvalStatus": "AUTO_VALIDATED"},
+            }}},
+            {"status": "FAILED", "notificationType": "settlement", "windowDate": "2026-10-07", "window": "us"},
+            window_date="2026-10-07", window="us",
+        )
+        self.assertEqual(result["healthStatus"], "UNHEALTHY")
+        self.assertIn("SETTLEMENT_NOTIFICATION_NOT_CONFIRMED", result["reasonCodes"])
 
 
 if __name__ == "__main__":

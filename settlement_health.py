@@ -20,6 +20,7 @@ def _read(path: str | Path) -> Mapping[str, Any] | None:
 def build_settlement_health(
     status_payload: Mapping[str, Any] | None,
     private_payload: Mapping[str, Any] | None,
+    notification_payload: Mapping[str, Any] | None = None,
     *,
     window_date: str = "",
     window: str = "",
@@ -27,6 +28,16 @@ def build_settlement_health(
     reasons: list[str] = []
     if not isinstance(status_payload, Mapping) or status_payload.get("status") != "ok":
         reasons.append("PORTFOLIO_STATUS_NOT_OK")
+    if window in {"us", "tw"}:
+        if not isinstance(notification_payload, Mapping):
+            reasons.append("SETTLEMENT_NOTIFICATION_UNVERIFIED")
+        elif (
+            notification_payload.get("status") != "SENT"
+            or notification_payload.get("notificationType") != "settlement"
+            or notification_payload.get("windowDate") != window_date
+            or notification_payload.get("window") != window
+        ):
+            reasons.append("SETTLEMENT_NOTIFICATION_NOT_CONFIRMED")
     if not isinstance(private_payload, Mapping):
         reasons.append("PRIVATE_SNAPSHOT_MISSING")
     else:
@@ -65,10 +76,11 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--status", default=".private-build/status.private.json")
     parser.add_argument("--snapshot", default=".private-build/data.private.json")
+    parser.add_argument("--notification", default=".private-build/settlement-notification-result.json")
     parser.add_argument("--output", default=".private-build/settlement-health.json")
     args = parser.parse_args()
     result = build_settlement_health(
-        _read(args.status), _read(args.snapshot),
+        _read(args.status), _read(args.snapshot), _read(args.notification),
         window_date=os.getenv("SCHEDULED_DATE_OVERRIDE", ""),
         window=os.getenv("SCHEDULED_WINDOW_OVERRIDE", ""),
     )
