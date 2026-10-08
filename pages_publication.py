@@ -24,6 +24,8 @@ from urllib.request import Request, urlopen
 
 API_ROOT = "https://api.github.com"
 MANIFEST_NAME = "publication.json"
+# Pages consumes this marker but does not expose it as a downloadable site file.
+PAGES_CONTROL_FILES = {".nojekyll"}
 USER_AGENT = "growth-pages-publication-verifier/1"
 
 
@@ -97,7 +99,12 @@ def prepare_manifest(site_dir: str | Path, *, env: Mapping[str, str] | None = No
         raise PublicationError("workflow repository, run identity, or source commit is missing")
 
     digests: dict[str, str] = {}
-    for path in sorted(item for item in root.rglob("*") if item.is_file() and item.name != MANIFEST_NAME):
+    for path in sorted(
+        item for item in root.rglob("*")
+        if item.is_file()
+        and item.name != MANIFEST_NAME
+        and item.relative_to(root).as_posix() not in PAGES_CONTROL_FILES
+    ):
         relative = path.relative_to(root).as_posix()
         if relative.startswith("/") or ".." in Path(relative).parts:
             raise PublicationError("unsafe public artifact path")

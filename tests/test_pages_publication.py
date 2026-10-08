@@ -77,9 +77,40 @@ class PagesPublicationTests(unittest.TestCase):
 
     def _site(self, root):
         root.mkdir()
+        (root / ".nojekyll").write_bytes(b"")
         (root / "index.html").write_bytes(b"<html>public demo</html>\n")
         (root / "data.public.json").write_bytes(b'{"mode":"demo"}\n')
         (root / "status.json").write_bytes(b'{"status":"ok","generatedAt":"2026-10-07T05:40:00Z"}\n')
+
+    def test_manifest_keeps_nojekyll_for_pages_but_does_not_require_http_readback(self):
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory) / "site"
+            self._site(site)
+            manifest = prepare_manifest(site, env={
+                "GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "123",
+                "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "d" * 40,
+            })
+            self.assertTrue((site / ".nojekyll").is_file())
+            self.assertNotIn(".nojekyll", manifest["files"])
+
+            requested_paths = []
+
+            def reader(url, *, headers):
+                path = unquote(urlsplit(url).path).removeprefix("/repo/")
+                requested_paths.append(path)
+                if path == ".nojekyll":
+                    raise AssertionError("Pages control files are not publicly retrievable")
+                return (site / path).read_bytes()
+
+            self.assertEqual(
+                verify_live_publication(
+                    site, "https://owner.github.io/repo",
+                    expected_publication_id=manifest["publicationId"], reader=reader,
+                    wait=_Clock().wait, monotonic=_Clock().monotonic, max_wait_seconds=0,
+                ),
+                "VERIFIED",
+            )
+            self.assertNotIn(".nojekyll", requested_paths)
 
     def test_manifest_keeps_unique_publication_id_when_source_commit_repeats(self):
         with tempfile.TemporaryDirectory() as directory:
