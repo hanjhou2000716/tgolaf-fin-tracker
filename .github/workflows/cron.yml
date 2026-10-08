@@ -97,10 +97,15 @@ jobs:
         with:
           python-version-file: .python-version
           cache: pip
-          cache-dependency-path: requirements.lock
+          cache-dependency-path: |
+            requirements.lock
+            requirements-test.lock
 
       - name: Install locked dependencies
         run: python -m pip install --requirement requirements.lock
+
+      - name: Install locked test dependencies
+        run: python -m pip install --requirement requirements-test.lock
 
       - name: Run formula and data validation tests
         run: python -m unittest discover -s tests -v
