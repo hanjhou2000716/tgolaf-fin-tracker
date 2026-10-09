@@ -21,6 +21,7 @@ from beta_policy import (
     _canonical_hash,
     _valid_corporate_action_evidence,
     estimate_beta_policy,
+    fetch_cbc_usd_twd_series,
     fetch_research_series,
     last_completed_week_cutoff,
     load_active_beta_policy,

@@ -151,13 +151,18 @@ def decide_fallback(
         result["reasonCode"] = "RUN_API_UNAVAILABLE"
         return result
     match = _matching_successful_run(runs or (), window=window, snapshot_date=str(context["date"]), commit=commit)
-    if match and str(health_status or "").upper() == "PASS":
+    stage_status = str(health_status or "").upper()
+    if match and stage_status in {"PASS", "COMPLETE"}:
         result["foundSuccessfulRun"] = True
         result["decision"] = "SKIP"
         result["reasonCode"] = "SKIP_ALREADY_SUCCEEDED"
     elif match:
         result["foundSuccessfulRun"] = True
-        result["reasonCode"] = "RUN_HEALTH_UNVERIFIED" if not health_status else "RUN_DATA_UNHEALTHY"
+        result["reasonCode"] = (
+            "RUN_HEALTH_UNVERIFIED" if not stage_status
+            else "RUN_SETTLEMENT_INCOMPLETE" if stage_status == "INCOMPLETE"
+            else "RUN_DATA_UNHEALTHY"
+        )
     else:
         result["reasonCode"] = "RUN_NO_SUCCESSFUL_MATCH"
     return result
@@ -194,7 +199,9 @@ def _health_status_for_run(run: dict[str, Any] | None, *, expected_window: str |
         return "UNVERIFIED"
     if marker.get("window") != expected_window or marker.get("windowDate") != expected_date:
         return "UNVERIFIED"
-    return str(marker.get("healthStatus", "UNVERIFIED")).upper()
+    # New markers gate retries on completed settlement/notification stages.
+    # Legacy markers remain fail-closed: only healthStatus=PASS can skip.
+    return str(marker.get("completionStatus", marker.get("healthStatus", "UNVERIFIED"))).upper()
 
 
 def _write_output(result: dict[str, Any]) -> None:
