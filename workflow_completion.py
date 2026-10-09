@@ -7,9 +7,11 @@ import os
 from pathlib import Path
 
 
-def completion_errors(env=None, notification=None, settlement_health=None):
+def completion_errors(env=None, notification=None, settlement_health=None, quarterly_policy_summary=None):
     env = env or os.environ
     errors = []
+    if isinstance(quarterly_policy_summary, dict) and quarterly_policy_summary.get("technicalStatus") == "ERROR":
+        errors.append(str(quarterly_policy_summary.get("reasonCode") or "QUARTERLY_POLICY_RUNTIME_ERROR"))
     for name in ("BUILD_RESULT", "DEPLOY_RESULT", "PUBLICATION_RESULT"):
         if str(env.get(name, "")).lower() != "success":
             errors.append(name.removesuffix("_RESULT") + "_NOT_CONFIRMED")
@@ -35,6 +37,7 @@ def completion_errors(env=None, notification=None, settlement_health=None):
 def main():
     notification = None
     settlement_health = None
+    quarterly_policy_summary = None
     try:
         notification = json.loads(
             Path(".private-build/settlement-notification-result.json").read_text(encoding="utf-8")
@@ -47,7 +50,17 @@ def main():
         )
     except (OSError, json.JSONDecodeError):
         pass
-    errors = completion_errors(notification=notification, settlement_health=settlement_health)
+    try:
+        quarterly_policy_summary = json.loads(
+            Path(".private-build/quarterly-risk-policy-summary.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        pass
+    errors = completion_errors(
+        notification=notification,
+        settlement_health=settlement_health,
+        quarterly_policy_summary=quarterly_policy_summary,
+    )
     if errors:
         print("Settlement completion failed: " + ", ".join(errors))
         return 1

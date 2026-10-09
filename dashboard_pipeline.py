@@ -7,6 +7,7 @@ import math
 import re
 import time
 import copy
+import traceback
 from pathlib import Path
 from collections import Counter
 from typing import Any, Mapping
@@ -803,11 +804,21 @@ def calculate_current_assets():
             candidate_dir=os.getenv("RISK_CANDIDATE_OUTPUT_DIR", ".private-build"),
             today=datetime.datetime.now(TAIPEI).date(),
         )
-    except Exception as error:  # noqa: BLE001 - preserve ledger processing on research-source outages
+    except Exception as error:  # noqa: BLE001 - settle and notify, but preserve technical failure
+        # Ordinary source failures are normalized by quarterly_risk_policy.
+        # An exception escaping that layer is an unexpected runtime defect.
+        frames = traceback.extract_tb(error.__traceback__, limit=12)
         write_json(".private-build/quarterly-risk-policy-summary.json", {
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "status": "UNAVAILABLE",
-            "reasonCode": type(error).__name__,
+            "technicalStatus": "ERROR",
+            "stage": "quarterly_policy_preparation",
+            "reasonCode": "QUARTERLY_POLICY_RUNTIME_ERROR",
+            "exceptionType": type(error).__name__,
+            "diagnosticFrames": [
+                {"file": Path(frame.filename).name, "line": frame.lineno, "function": frame.name}
+                for frame in frames
+            ],
         })
     ledger_sync_result = upload_private_transactions(accepted_transactions)
     sync_conflicts = tuple(getattr(ledger_sync_result, "conflicts", ()))

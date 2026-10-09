@@ -31,6 +31,18 @@ class WorkflowCompletionTests(unittest.TestCase):
         }
         self.assertEqual(completion_errors(env, notification, health), [])
 
+    def test_unexpected_quarterly_policy_error_fails_after_other_stages(self):
+        env = {"BUILD_RESULT": "success", "DEPLOY_RESULT": "success", "PUBLICATION_RESULT": "success",
+               "REQUIRE_NOTIFICATION": "true", "EXPECTED_DATE": "2026-10-08", "EXPECTED_WINDOW": "tw"}
+        notification = {"status": "SENT", "notificationType": "settlement", "windowDate": "2026-10-08", "window": "tw"}
+        health = {"completionStatus": "COMPLETE"}
+        summary = {"status": "UNAVAILABLE", "technicalStatus": "ERROR",
+                   "reasonCode": "QUARTERLY_POLICY_RUNTIME_ERROR"}
+        self.assertEqual(
+            completion_errors(env, notification, health, summary),
+            ["QUARTERLY_POLICY_RUNTIME_ERROR"],
+        )
+
     def test_incomplete_notification_stage_still_fails(self):
         env = {"BUILD_RESULT": "success", "DEPLOY_RESULT": "success", "PUBLICATION_RESULT": "success",
                "REQUIRE_NOTIFICATION": "true"}
