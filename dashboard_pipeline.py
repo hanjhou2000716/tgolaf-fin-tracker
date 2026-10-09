@@ -9,7 +9,7 @@ import time
 import copy
 from pathlib import Path
 from collections import Counter
-from typing import Mapping
+from typing import Any, Mapping
 import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials

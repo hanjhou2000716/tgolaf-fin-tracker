@@ -19,9 +19,31 @@ class SettlementHealthTests(unittest.TestCase):
             window_date="2026-10-07", window="us",
         )
         self.assertEqual(result["healthStatus"], "PASS")
+        self.assertEqual(result["completionStatus"], "COMPLETE")
+        self.assertEqual(result["settlementStatus"], "COMPLETE")
         self.assertEqual(result["windowDate"], "2026-10-07")
         self.assertNotIn("portfolio", result)
         self.assertNotIn("holdings", result)
+
+    def test_risk_unhealthy_is_separate_from_settlement_completion(self):
+        result = build_settlement_health(
+            {
+                "status": "ok",
+                "ledgerAudit": {"status": "OK"},
+                "ingestionHealth": {"status": "READY"},
+            },
+            {"portfolio": {"risk": {
+                "beta": {"status": "READY", "policyStatus": "READY", "validationStatus": "NOT_READY", "marketQuotesFresh": True},
+                "kelly": {"status": "READY", "approvalStatus": "NOT_READY"},
+            }}},
+            {"status": "SENT", "notificationType": "settlement", "windowDate": "2026-10-07", "window": "tw"},
+            window_date="2026-10-07", window="tw",
+        )
+        self.assertEqual(result["executionStatus"], "COMPLETED")
+        self.assertEqual(result["completionStatus"], "COMPLETE")
+        self.assertEqual(result["riskStatus"], "UNHEALTHY")
+        self.assertEqual(result["healthStatus"], "UNHEALTHY")
+        self.assertIn("NAV_BETA_NOT_READY", result["riskReasonCodes"])
 
     def test_reference_values_or_degraded_ledger_are_not_healthy(self):
         result = build_settlement_health(

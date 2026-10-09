@@ -61,12 +61,55 @@ def build_settlement_health(
         ingestion = status_payload.get("ingestionHealth") if isinstance(status_payload, Mapping) else None
         if not isinstance(ingestion, Mapping) or str(ingestion.get("status", "")).upper() not in {"OK", "READY", "READY_FROM_FORM"}:
             reasons.append("INGESTION_NOT_READY")
+    notification_codes = {
+        "SETTLEMENT_NOTIFICATION_UNVERIFIED",
+        "SETTLEMENT_NOTIFICATION_NOT_CONFIRMED",
+    }
+    settlement_codes = {
+        "PORTFOLIO_STATUS_NOT_OK",
+        "PRIVATE_SNAPSHOT_MISSING",
+        "LEDGER_AUDIT_NOT_OK",
+        "INGESTION_NOT_READY",
+    }
+    completion_codes = notification_codes | settlement_codes
+    completion_reasons = sorted(set(reasons) & completion_codes)
+    settlement_reasons = sorted(set(reasons) & settlement_codes)
+    notification_reasons = sorted(set(reasons) & notification_codes)
+    notification_required = window in {"us", "tw"}
+    settlement_status = "COMPLETE" if not settlement_reasons else "INCOMPLETE"
+    notification_status = (
+        "SENT" if notification_required and not notification_reasons
+        else "UNCONFIRMED" if notification_required
+        else "NOT_REQUIRED"
+    )
+    completion_status = (
+        "COMPLETE"
+        if settlement_status == "COMPLETE" and notification_status in {"SENT", "NOT_REQUIRED"}
+        else "INCOMPLETE"
+    )
+    risk_codes = {
+        "NAV_BETA_NOT_READY",
+        "BETA_POLICY_NOT_AUTO_VALIDATED",
+        "MARKET_QUOTES_NOT_FRESH",
+        "KELLY_NOT_READY",
+        "KELLY_POLICY_NOT_AUTO_VALIDATED",
+    }
+    risk_reasons = sorted(set(reasons) & risk_codes)
+    data_reasons = sorted(set(reasons) - notification_codes)
     result = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
+        "executionStatus": "COMPLETED",
+        "settlementStatus": settlement_status,
+        "notificationStatus": notification_status,
+        "completionStatus": completion_status,
+        "dataStatus": "PASS" if not data_reasons else "UNHEALTHY",
+        "riskStatus": "PASS" if not risk_reasons else "UNHEALTHY",
         "healthStatus": "PASS" if not reasons else "UNHEALTHY",
         "windowDate": window_date or None,
         "window": window or None,
         "reasonCodes": sorted(set(reasons)),
+        "completionReasonCodes": completion_reasons,
+        "riskReasonCodes": risk_reasons,
         "publicationVerificationRequired": True,
     }
     return result

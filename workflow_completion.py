@@ -14,10 +14,12 @@ def completion_errors(env=None, notification=None, settlement_health=None):
         if str(env.get(name, "")).lower() != "success":
             errors.append(name.removesuffix("_RESULT") + "_NOT_CONFIRMED")
     if str(env.get("REQUIRE_NOTIFICATION", "false")).lower() in {"true", "1", "yes"}:
-        if not isinstance(settlement_health, dict) or settlement_health.get("healthStatus") != "PASS":
-            health_reasons = settlement_health.get("reasonCodes", []) if isinstance(settlement_health, dict) else []
-            errors.append("SETTLEMENT_HEALTH_NOT_PASS")
-            errors.extend(health_reasons or ([] if isinstance(settlement_health, dict) else ["SETTLEMENT_HEALTH_MISSING"]))
+        if not isinstance(settlement_health, dict):
+            errors.append("SETTLEMENT_RESULT_MISSING")
+        elif settlement_health.get("completionStatus") != "COMPLETE":
+            completion_reasons = settlement_health.get("completionReasonCodes", [])
+            errors.append("SETTLEMENT_STAGES_NOT_COMPLETE")
+            errors.extend(completion_reasons or ["SETTLEMENT_COMPLETION_UNVERIFIED"])
         if not isinstance(notification, dict):
             errors.append("NOTIFICATION_RESULT_MISSING")
         elif (

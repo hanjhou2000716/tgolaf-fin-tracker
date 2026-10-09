@@ -34,6 +34,18 @@ class ScheduleGateTests(unittest.TestCase):
         self.assertEqual(result["decision"], "RUN")
         self.assertEqual(result["reasonCode"], "RUN_HEALTH_UNVERIFIED")
 
+    def test_completed_settlement_with_unhealthy_risk_skips_fallback(self):
+        runs = [{
+            "status": "completed", "conclusion": "success", "headSha": "abc",
+            "createdAt": "2026-09-15T21:42:00Z", "event": "repository_dispatch",
+        }]
+        result = decide_fallback(
+            event_name="schedule", schedule="20 22 * * 1-5", now_utc=self.now,
+            commit="abc", runs=runs, health_status="COMPLETE",
+        )
+        self.assertEqual(result["decision"], "SKIP")
+        self.assertEqual(result["reasonCode"], "SKIP_ALREADY_SUCCEEDED")
+
     def test_data_unhealthy_run_does_not_skip_fallback(self):
         runs = [{
             "status": "completed", "conclusion": "success", "headSha": "abc",
