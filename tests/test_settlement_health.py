@@ -33,7 +33,7 @@ class SettlementHealthTests(unittest.TestCase):
                 "ingestionHealth": {"status": "READY"},
             },
             {"portfolio": {"risk": {
-                "beta": {"status": "READY", "policyStatus": "READY", "validationStatus": "NOT_READY", "marketQuotesFresh": True},
+                "beta": {"status": "NOT_READY", "policyStatus": "READY", "validationStatus": "NOT_READY", "marketQuotesFresh": True},
                 "kelly": {"status": "READY", "approvalStatus": "NOT_READY"},
             }}},
             {"status": "SENT", "notificationType": "settlement", "windowDate": "2026-10-07", "window": "tw"},
