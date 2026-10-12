@@ -49,6 +49,9 @@ AUTO_VALIDATION_CHECKS = [
     "source_content_hash",
     "finite_coefficients",
     "kelly_formula",
+    "close_only_observation_and_official_correction",
+    "split_adjustment_applied_once",
+    "us_issuer_event_window_coverage",
 ]
 
 
@@ -566,7 +569,12 @@ def ensure_quarterly_risk_policies(
                     "attemptedAt": _iso_utc(now_utc),
                 }
         evidence_hashes = {
-            symbol: (record.get("corporateActionEvidence") or {}).get("seriesHash")
+            symbol: _canonical_hash({
+                "seriesHash": (record.get("corporateActionEvidence") or {}).get("seriesHash"),
+                "eventsHash": (record.get("corporateActionEvidence") or {}).get("eventsHash"),
+                "priceCorrectionsHash": (record.get("corporateActionEvidence") or {}).get("priceCorrectionsHash"),
+                "priceBasis": (record.get("corporateActionEvidence") or {}).get("priceBasis"),
+            })
             for symbol, record in sorted(candidate_assets.items())
             if isinstance(record, Mapping)
         }
@@ -575,7 +583,7 @@ def ensure_quarterly_risk_policies(
             "completedWeekCutoff": completed_week_cutoff.isoformat(),
             "benchmarkSeriesHash": (benchmark or {}).get("seriesHash") if isinstance(benchmark, Mapping) else None,
             "fxSeriesHash": (fx_history or {}).get("seriesHash") if isinstance(fx_history, Mapping) else None,
-            "assetSeriesHashes": evidence_hashes,
+            "assetEvidenceHashes": evidence_hashes,
             "holdings": sorted(beta_symbols),
         })
         candidate_payload = {
@@ -735,23 +743,18 @@ def ensure_quarterly_risk_policies(
                     "symbol": symbol,
                     "status": record.get("status"),
                     "reasonCode": record.get("reasonCode") or record.get("reason") or "BETA_EVIDENCE_UNAVAILABLE",
+                    "reason": record.get("reason"),
+                    "derivedReason": record.get("derivedReason"),
+                    "failureStage": record.get("failureStage"),
                     "observations": record.get("observations", 0),
                     "attemptedAt": record.get("attemptedAt"),
                 }
                 for symbol, record in sorted(((_read_json(beta_candidate_output) or {}).get("assets") or {}).items())
                 if isinstance(record, Mapping) and not _candidate_record_ready(record)
             ] if beta_candidate_output.exists() else [],
-            "activationReady": bool(
-                beta_is_current or (
-                    beta_candidate_output.exists()
-                    and (_read_json(beta_candidate_output) or {}).get("status") == "CANDIDATE"
-                    and not unmodeled_symbols
-                    and not any(
-                        not _candidate_record_ready(((_read_json(beta_candidate_output) or {}).get("assets") or {}).get(symbol))
-                        for symbol in beta_symbols
-                    )
-                )
-            ),
+            "activationReady": bool(beta_is_current),
+            "activationReadinessStage": "CURRENT_POLICY_ACTIVE" if beta_is_current else "LIVE_PORTFOLIO_QUALIFICATION_REQUIRED",
+            "portfolioQualificationRequired": not beta_is_current,
             "retryPolicy": {
                 "sourceFailure": "NEXT_SCHEDULED_SETTLEMENT",
                 "structuralInsufficiency": "NEXT_QUARTER_OR_DATA_CHANGE",
@@ -849,11 +852,25 @@ def promote_beta_candidate_if_qualified(
         market_by_symbol=market_by_symbol,
     )
     if result.get("status") != "READY":
+        missing_items = [item for item in result.get("missing", []) if isinstance(item, Mapping)]
+        material_missing = sorted(str(item.get("symbol", "")) for item in missing_items if item.get("material"))
+        missing_symbols = sorted(str(item.get("symbol", "")) for item in missing_items)
+        coverage_pct = result.get("coveragePct")
+        if material_missing:
+            reason_code = "MATERIAL_HOLDING_BETA_UNMODELED"
+        elif isinstance(coverage_pct, (int, float)) and coverage_pct < 95.0:
+            reason_code = "BETA_COVERAGE_BELOW_POLICY_MINIMUM"
+        else:
+            reason_code = result.get("quality") or "BETA_PORTFOLIO_QUALIFICATION_FAILED"
         return {
             "status": "WAITING_FOR_PORTFOLIO_QUALIFICATION",
-            "reasonCode": result.get("quality") or "beta_coverage_unavailable",
-            "coveragePct": result.get("coveragePct"),
-            "missingSymbols": sorted(item.get("symbol", "") for item in result.get("missing", [])),
+            "reasonCode": reason_code,
+            "coveragePct": coverage_pct,
+            "coverageMinimumPct": 95.0,
+            "coveragePassed": isinstance(coverage_pct, (int, float)) and coverage_pct >= 95.0,
+            "hasMaterialMissing": bool(material_missing),
+            "missingSymbols": missing_symbols,
+            "materialMissingSymbols": material_missing,
         }
     _write_json_atomic(active_path, active)
     return {
@@ -867,3 +884,4 @@ def promote_beta_candidate_if_qualified(
 def active_policy_path(state_dir: str | Path, filename: str, fallback: str) -> str:
     path = Path(state_dir) / filename
     return str(path) if path.exists() else fallback
+
