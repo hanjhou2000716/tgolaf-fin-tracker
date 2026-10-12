@@ -86,14 +86,14 @@ class BetaPolicyTests(unittest.TestCase):
 
         def getter(url, *, params=None, **kwargs):
             calls.append((url, params))
-            if "query1.finance.yahoo.com" in url:
+            if urlsplit(url).hostname == "query1.finance.yahoo.com":
                 return Response(chart)
             if url.endswith("tradingStock"):
                 return Response({"stat": "ok", "tables": [{
                     "fields": ["日期", "代號", "名稱", "開盤", "最高", "最低", "收盤"],
                     "data": [["112/09/22", "00886", "ETF", "23.90", "23.96", "23.89", "23.96"]],
                 }]})
-            if "tpex.org.tw" in url:
+            if (urlsplit(url).hostname or "").endswith(".tpex.org.tw"):
                 return Response({"stat": "ok", "tables": [{"fields": ["除權息日期", "代號", "名稱"], "data": []}]})
             self.fail(f"unexpected source URL: {url}")
 
@@ -490,7 +490,7 @@ class BetaPolicyTests(unittest.TestCase):
 
         def getter(url, **kwargs):
             calls.append(url)
-            if "yahoo" in url:
+            if (urlsplit(url).hostname or "").endswith(".yahoo.com"):
                 return Response(error=RuntimeError("upstream unavailable"))
             return Response([{"日期": "20260928", "NTD_USD": "31.2"}, {"日期": "20260929", "NTD_USD": "31.3"}])
 
@@ -501,8 +501,8 @@ class BetaPolicyTests(unittest.TestCase):
         self.assertEqual(result["fxEvidence"]["provider"], "Taiwan CBC OpenData")
         self.assertIn("RuntimeError", result["fxEvidence"]["primaryFailure"])
         self.assertEqual([row["close"] for row in result["rows"]], [31.2, 31.3])
-        self.assertEqual(sum("yahoo" in url for url in calls), 3)
-        self.assertEqual(sum("cbc.gov.tw" in url for url in calls), 1)
+        self.assertEqual(sum((urlsplit(url).hostname or "").endswith(".yahoo.com") for url in calls), 3)
+        self.assertEqual(sum((urlsplit(url).hostname or "").endswith(".cbc.gov.tw") for url in calls), 1)
 
     def test_compact_cbc_session_date_is_python_310_compatible(self):
         self.assertEqual(_as_date("20260928"), date(2026, 9, 28))
@@ -560,7 +560,7 @@ class BetaPolicyTests(unittest.TestCase):
                 return self.payload
 
         def getter(url, *, params, **kwargs):
-            if "/split/TWTCAU" in url:
+            if urlsplit(url).path.endswith("/split/TWTCAU"):
                 return Response({"stat": "OK", "fields": ["恢復買賣日期", "證券代號", "基金名稱", "停止買賣前最後收盤價", "恢復買賣參考價"], "data": [["2025/06/10", "00685L", "ETF", "25.5", "12.75"]]})
             return Response({"stat": "OK", "fields": ["日期", "代號", "名稱"], "data": []})
 
