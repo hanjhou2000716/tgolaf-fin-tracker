@@ -271,7 +271,7 @@ class QuarterlyRiskPolicyTests(unittest.TestCase):
             }
             old = _sealed_cache({
                 "dataCutoff": "2026-09-30",
-                "algorithmVersion": "quarterly-risk-v6",
+                "algorithmVersion": "quarterly-risk-v5",
                 "assets": {"TEST": failed},
             })
             (state_dir / "beta-policy-candidate-cache.json").write_text(json.dumps(old), encoding="utf-8")
@@ -290,7 +290,7 @@ class QuarterlyRiskPolicyTests(unittest.TestCase):
                 fetcher=fetcher,
             )
             self.assertIn("TEST", calls)
-            self.assertEqual(summary["algorithmVersion"], "quarterly-risk-v5")
+            self.assertEqual(summary["algorithmVersion"], "quarterly-risk-v6")
             candidate = json.loads((candidate_dir / "beta-policy-candidate.json").read_text(encoding="utf-8"))
             self.assertEqual(candidate["algorithmVersion"], "quarterly-risk-v6")
 
