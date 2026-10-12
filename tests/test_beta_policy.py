@@ -5,6 +5,7 @@ import unittest
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
+from unittest.mock import patch
 
 from beta_policy import (
     _as_date,
@@ -15,7 +16,9 @@ from beta_policy import (
     _valid_corporate_action_evidence,
     estimate_beta_policy,
     fetch_official_taiwan_corporate_actions,
+    fetch_official_taiwan_daily_closes,
     fetch_research_series,
+    fetch_sec_edgar_corporate_action_evidence,
     fetch_yahoo_research_series,
     load_active_beta_policy,
     load_active_kelly_policy,
@@ -42,6 +45,8 @@ def _corporate_evidence(start="2019-01-01", end="2026-09-30"):
         "requestedEnd": end,
         "verifiedAt": "2026-10-05T00:00:00Z",
         "requestedEvents": ["history", "splits", "dividends"],
+        "priceBasis": "raw-close-plus-verified-actions-v1",
+        "priceCorrections": [],
     }
 
 
@@ -53,6 +58,265 @@ def _rows(values, start="2020-01-01"):
 
 
 class BetaPolicyTests(unittest.TestCase):
+    def test_tpex_close_repair_replaces_only_anomalous_yahoo_session(self):
+        from datetime import datetime, timezone
+
+        class Response:
+            status_code = 200
+
+            def __init__(self, payload=None, text=None):
+                self.payload = payload
+                self.text = text
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        session = date(2023, 9, 22)
+        stamp = int(datetime.combine(session, datetime.min.time(), tzinfo=timezone.utc).timestamp())
+        chart = {"chart": {"result": [{
+            "meta": {"exchangeTimezoneName": "Asia/Taipei", "currency": "TWD"},
+            "timestamp": [stamp],
+            "indicators": {"quote": [{"open": [23.95], "high": [23.96], "low": [23.90], "close": [23.97]}]},
+            "events": {},
+        }]}}
+        calls = []
+
+        def getter(url, *, params=None, **kwargs):
+            calls.append((url, params))
+            if urlsplit(url).hostname == "query1.finance.yahoo.com":
+                return Response(chart)
+            if url.endswith("tradingStock"):
+                return Response({"stat": "ok", "tables": [{
+                    "fields": ["日期", "代號", "名稱", "開盤", "最高", "最低", "收盤"],
+                    "data": [["112/09/22", "00886", "ETF", "23.90", "23.96", "23.89", "23.96"]],
+                }]})
+            if (urlsplit(url).hostname or "").endswith(".tpex.org.tw"):
+                return Response({"stat": "ok", "tables": [{"fields": ["除權息日期", "代號", "名稱"], "data": []}]})
+            self.fail(f"unexpected source URL: {url}")
+
+        result = fetch_yahoo_research_series(
+            "00886", market="tw", start=session, end=session, http_get=getter, attempts=1,
+        )
+        self.assertEqual(result.get("status"), "READY", result)
+        self.assertEqual(result["rows"][0]["close"], 23.96)
+        self.assertEqual(result["rows"][0]["yahooClose"], 23.97)
+        correction = result["priceEvidence"]["corrections"][0]
+        self.assertEqual(correction["provider"], "TPEx official daily close")
+        self.assertEqual(correction["sourceHash"], _canonical_hash({"stat": "ok", "tables": [{
+            "fields": ["日期", "代號", "名稱", "開盤", "最高", "最低", "收盤"],
+            "data": [["112/09/22", "00886", "ETF", "23.90", "23.96", "23.89", "23.96"]],
+        }]}))
+        self.assertTrue(_valid_corporate_action_evidence(result["corporateActionEvidence"]))
+        self.assertTrue(any(url.endswith("tradingStock") and params["code"] == "00886" for url, params in calls))
+
+    def test_twse_pure_rights_uses_official_reference_price_once(self):
+        class Response:
+            status_code = 200
+
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        fields = ["資料日期", "股票代號", "股票名稱", "除權息前收盤價", "除權息參考價", "權值+息值", "權/息"]
+        rows = [
+            ["114年02月18日", "8033", "雷虎", "66.70", "65.59", "1.107255", "權"],
+            ["115年05月14日", "8033", "雷虎", "140.00", "137.66", "2.332507", "權"],
+        ]
+
+        def getter(url, *, params=None, **kwargs):
+            if url.endswith("TWT49U"):
+                return Response({"stat": "OK", "fields": fields, "data": rows})
+            return Response({"stat": "查詢日期範圍內無資料", "fields": ["資料日期", "股票代號"], "data": []})
+
+        result = fetch_official_taiwan_corporate_actions(
+            "8033", market="twse", start=date(2024, 9, 30), end=date(2026, 9, 30), http_get=getter,
+        )
+        self.assertEqual(result["status"], "EVENTS_VERIFIED", result)
+        adjustments = result["events"]["splits"]
+        self.assertEqual(len(adjustments), 2)
+        self.assertAlmostEqual(adjustments[0]["factor"], 65.59 / 66.70)
+        self.assertAlmostEqual(adjustments[1]["factor"], 137.66 / 140.0)
+        adjusted = normalize_research_price(
+            [{"date": "2025-02-17", "close": 66.70}, {"date": "2025-02-18", "close": 65.59}],
+            splits=adjustments[:1],
+        )
+        self.assertAlmostEqual(adjusted[0]["splitAdjustedClose"], 65.59)
+        self.assertAlmostEqual(adjusted[1]["splitAdjustedClose"], 65.59)
+
+    def test_sec_window_can_verify_no_events_only_with_complete_filing_documents(self):
+        class Response:
+            status_code = 200
+
+            def __init__(self, payload=None, text=None):
+                self.payload, self.text = payload, text
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        report_dates = [
+            "2023-09-30", "2023-12-31", "2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31",
+            "2025-03-31", "2025-06-30", "2025-09-30", "2025-12-31", "2026-03-31", "2026-06-30",
+        ]
+        arrays = {"accessionNumber": [], "filingDate": [], "form": [], "primaryDocument": [], "reportDate": []}
+        for index, report_date in enumerate(report_dates):
+            year, month, _ = (int(part) for part in report_date.split("-"))
+            form = "10-K" if month == 12 else "10-Q"
+            filing_date = (date.fromisoformat(report_date) + timedelta(days=35)).isoformat()
+            arrays["accessionNumber"].append(f"0001628280-{str(year)[-2:]}-{index + 1:06d}")
+            arrays["filingDate"].append(filing_date)
+            arrays["form"].append(form)
+            arrays["primaryDocument"].append(f"report-{index}.htm")
+            arrays["reportDate"].append(report_date)
+        arrays["accessionNumber"].append("0001628280-26-000099")
+        arrays["filingDate"].append("2026-05-20")
+        arrays["form"].append("8-K")
+        arrays["primaryDocument"].append("event.htm")
+        arrays["reportDate"].append("2026-05-20")
+        submissions = {"cik": 1318605, "filings": {"recent": arrays}}
+
+        def getter(url, *, headers=None, **kwargs):
+            if url.endswith("submissions/CIK0001318605.json"):
+                return Response(submissions)
+            return Response(text="Tesla quarterly filing. No corporate action was announced during this period.")
+
+        evidence = fetch_sec_edgar_corporate_action_evidence(
+            "TSLA", start=date(2023, 9, 22), end=date(2026, 9, 30), http_get=getter,
+        )
+        self.assertEqual(evidence["status"], "NO_EVENTS_VERIFIED", evidence)
+        self.assertGreaterEqual(evidence["reviewedFilingCount"], 10)
+        self.assertIn("8-K", evidence["sourceFamilies"])
+        self.assertGreaterEqual(len(evidence["sourceResponseHashes"]), 2)
+        evidence.update({
+            "eventsHash": _canonical_hash(evidence["events"]), "seriesHash": "b" * 64,
+            "requestedEvents": ["history", "splits", "dividends"],
+            "verificationStatus": evidence["status"],
+            "priceBasis": "raw-close-plus-verified-actions-v1", "priceCorrections": [],
+        })
+        self.assertTrue(_valid_corporate_action_evidence(
+            evidence, window_start=date(2023, 9, 22), window_end=date(2026, 9, 25),
+        ), evidence)
+        tampered = dict(evidence)
+        tampered["events"] = dict(evidence["events"])
+        tampered["events"]["reviewManifest"] = list(evidence["events"]["reviewManifest"])
+        tampered["events"]["reviewManifest"][0] = dict(
+            tampered["events"]["reviewManifest"][0],
+            documentUrl="https://www.sec.gov/Archives/edgar/data/1318605/000162828026999999/report-0.htm",
+        )
+        self.assertFalse(_valid_corporate_action_evidence(
+            tampered, window_start=date(2023, 9, 22), window_end=date(2026, 9, 25),
+        ))
+        tampered = dict(evidence)
+        tampered["events"] = dict(evidence["events"])
+        tampered["events"]["reviewManifest"] = [dict(item) for item in evidence["events"]["reviewManifest"]]
+        tampered["events"]["reviewManifest"][0]["filingDate"] = "2020-01-01"
+        self.assertFalse(_valid_corporate_action_evidence(
+            tampered, window_start=date(2023, 9, 22), window_end=date(2026, 9, 25),
+        ))
+        tampered = dict(evidence)
+        tampered["sourceResponseHashes"] = dict(evidence["sourceResponseHashes"])
+        tampered["sourceResponseHashes"].pop(next(iter(evidence["events"]["reviewManifest"]))["accession"])
+        self.assertFalse(_valid_corporate_action_evidence(
+            tampered, window_start=date(2023, 9, 22), window_end=date(2026, 9, 25),
+        ))
+
+        # Enough filings can still leave a hole in the issuer's quarterly coverage.
+        remove_dates = {"2024-03-31", "2024-06-30"}
+        keep = [index for index, report_date in enumerate(arrays["reportDate"]) if report_date not in remove_dates]
+        for name, values in arrays.items():
+            arrays[name] = [values[index] for index in keep]
+        incomplete_coverage = fetch_sec_edgar_corporate_action_evidence(
+            "TSLA", start=date(2023, 9, 22), end=date(2026, 9, 30), http_get=getter,
+        )
+        self.assertEqual(incomplete_coverage["status"], "UNVERIFIED")
+        self.assertIn("do not cover", incomplete_coverage["reason"])
+
+    def test_sec_possible_action_disclosure_and_incomplete_filing_set_stay_unverified(self):
+        class Response:
+            status_code = 200
+
+            def __init__(self, payload=None, text=None):
+                self.payload, self.text = payload, text
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        incomplete = {"cik": 1318605, "filings": {"recent": {
+            "accessionNumber": [], "filingDate": [], "form": [], "primaryDocument": [], "reportDate": [],
+        }}}
+        result = fetch_sec_edgar_corporate_action_evidence(
+            "TSLA", start=date(2023, 9, 22), end=date(2026, 9, 30),
+            http_get=lambda *args, **kwargs: Response(incomplete),
+        )
+        self.assertEqual(result["status"], "UNVERIFIED")
+        self.assertEqual(result["reasonCode"], "US_ACTION_EVIDENCE_UNVERIFIED")
+
+    def test_sec_zero_event_manifest_survives_yahoo_series_normalization(self):
+        from datetime import timezone
+
+        class Response:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self.payload
+
+        start, end = date(2023, 9, 22), date(2026, 9, 30)
+        manifest = []
+        hashes = {"submissions": "f" * 64}
+        forms = ["10-K", "10-Q", "10-Q", "8-K"] * 3
+        for index, form in enumerate(forms):
+            accession = f"0001318605-26-{index + 1:06d}"
+            digest = f"{index + 1:064x}"
+            hashes[accession] = digest
+            manifest.append({
+                "form": form, "accession": accession, "filingDate": "2026-09-01",
+                "reportDate": None if form == "8-K" else "2026-06-30",
+                "documentUrl": f"https://www.sec.gov/Archives/edgar/data/1318605/{accession.replace('-', '')}/report.htm",
+                "contentHash": digest, "reviewStatus": "NO_ACTION_DISCLOSURE",
+            })
+        sec_result = {
+            "status": "NO_EVENTS_VERIFIED", "provider": "SEC EDGAR issuer filings",
+            "issuerCik": "0001318605", "events": {"splits": [], "dividends": [], "reviewManifest": manifest},
+            "sourceFamilies": ["submissions", "10-K", "10-Q", "8-K"],
+            "sourceResponseHashes": hashes, "eventCount": 0, "reviewedFilingCount": len(manifest),
+            "coverageComplete": True, "requestedStart": start.isoformat(), "requestedEnd": end.isoformat(),
+            "verifiedAt": "2026-10-05T00:00:00Z",
+        }
+        session = date(2026, 9, 25)
+        timestamp = int(datetime.combine(session, datetime.min.time(), tzinfo=timezone.utc).timestamp())
+        chart = {"chart": {"result": [{
+            "meta": {"exchangeTimezoneName": "America/New_York", "currency": "USD"},
+            "timestamp": [timestamp],
+            "indicators": {"quote": [{"open": [100], "high": [101], "low": [99], "close": [100]}]},
+        }]}}
+        with patch("beta_policy.fetch_sec_edgar_corporate_action_evidence", return_value=sec_result):
+            result = fetch_yahoo_research_series(
+                "TSLA", market="us", start=start, end=end,
+                http_get=lambda *args, **kwargs: Response(chart), attempts=1,
+            )
+        self.assertEqual(result["corporateActionStatus"], "PASS")
+        self.assertEqual(len(result["corporateActionEvents"]["reviewManifest"]), len(manifest))
+        self.assertTrue(_valid_corporate_action_evidence(
+            result["corporateActionEvidence"], window_start=start, window_end=date(2026, 9, 25),
+        ), result["corporateActionEvidence"])
+
     def test_official_complete_no_event_response_is_distinct_from_missing_yahoo_events(self):
         class Response:
             status_code = 200
@@ -87,6 +351,8 @@ class BetaPolicyTests(unittest.TestCase):
             "requestedEnd": "2026-09-30",
             "verifiedAt": "2026-10-05T00:00:00Z",
             "requestedEvents": ["history", "splits", "dividends"],
+            "priceBasis": "raw-close-plus-verified-actions-v1",
+            "priceCorrections": [],
         }
         self.assertTrue(_valid_corporate_action_evidence(
             evidence, window_start=date(2023, 9, 22), window_end=date(2026, 9, 25),
@@ -224,7 +490,7 @@ class BetaPolicyTests(unittest.TestCase):
 
         def getter(url, **kwargs):
             calls.append(url)
-            if "yahoo" in url:
+            if (urlsplit(url).hostname or "").endswith(".yahoo.com"):
                 return Response(error=RuntimeError("upstream unavailable"))
             return Response([{"日期": "20260928", "NTD_USD": "31.2"}, {"日期": "20260929", "NTD_USD": "31.3"}])
 
@@ -235,8 +501,8 @@ class BetaPolicyTests(unittest.TestCase):
         self.assertEqual(result["fxEvidence"]["provider"], "Taiwan CBC OpenData")
         self.assertIn("RuntimeError", result["fxEvidence"]["primaryFailure"])
         self.assertEqual([row["close"] for row in result["rows"]], [31.2, 31.3])
-        self.assertEqual(sum("yahoo" in url for url in calls), 3)
-        self.assertEqual(sum("cbc.gov.tw" in url for url in calls), 1)
+        self.assertEqual(sum((urlsplit(url).hostname or "").endswith(".yahoo.com") for url in calls), 3)
+        self.assertEqual(sum((urlsplit(url).hostname or "").endswith(".cbc.gov.tw") for url in calls), 1)
 
     def test_compact_cbc_session_date_is_python_310_compatible(self):
         self.assertEqual(_as_date("20260928"), date(2026, 9, 28))
@@ -294,7 +560,7 @@ class BetaPolicyTests(unittest.TestCase):
                 return self.payload
 
         def getter(url, *, params, **kwargs):
-            if "/split/TWTCAU" in url:
+            if urlsplit(url).path.endswith("/split/TWTCAU"):
                 return Response({"stat": "OK", "fields": ["恢復買賣日期", "證券代號", "基金名稱", "停止買賣前最後收盤價", "恢復買賣參考價"], "data": [["2025/06/10", "00685L", "ETF", "25.5", "12.75"]]})
             return Response({"stat": "OK", "fields": ["日期", "代號", "名稱"], "data": []})
 
@@ -338,6 +604,12 @@ class BetaPolicyTests(unittest.TestCase):
         self.assertEqual(rows[0]["close"], 100)
         self.assertEqual(rows[0]["splitAdjustedClose"], 50)
         self.assertEqual(rows[1]["splitAdjustedClose"], 50)
+
+    def test_split_event_list_and_mapping_use_the_same_ratio_contract(self):
+        raw = [{"date": "2024-01-01", "close": 100}, {"date": "2024-01-02", "close": 50}]
+        as_mapping = normalize_research_price(raw, splits={"0": {"date": "2024-01-02", "numerator": 2, "denominator": 1}})
+        as_list = normalize_research_price(raw, splits=[{"date": "2024-01-02", "numerator": 2, "denominator": 1}])
+        self.assertEqual(as_mapping, as_list)
 
     def test_weekly_beta_aligns_by_iso_week_and_converts_usd_to_twd(self):
         benchmark = normalize_research_price([{"date": f"2024-01-{day:02d}", "close": 100 + day} for day in range(1, 29)])
@@ -556,3 +828,4 @@ class BetaPolicyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

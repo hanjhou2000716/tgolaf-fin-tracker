@@ -199,6 +199,9 @@ class PublicSiteSecurityTests(unittest.TestCase):
             public_html = (Path(directory) / "index.html").read_text(encoding="utf-8")
             public_risk = public_html[public_html.index('<section class="card" aria-labelledby="risk-title">'):public_html.index('<footer>')]
             self.assertIn('class="risk-card-label">Beta(NAV)', public_risk)
+            self.assertIn('class="risk-card-status risk-badge risk-unavailable">僅示範', public_risk)
+            self.assertIn('.risk-badge.risk-good{background:', public_html)
+            self.assertIn('betaStatusClasses=[\'risk-good\',\'risk-watch\'', private_html)
             self.assertNotIn("計算依據", public_risk)
             self.assertIn('class="risk-card-label">質押維持率', public_risk)
             self.assertIn("僅示範", public_risk)
@@ -294,3 +297,4 @@ class PublicSiteSecurityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

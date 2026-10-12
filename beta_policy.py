@@ -10,14 +10,18 @@ values are never accepted.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import html
 import hashlib
 import json
 import math
+import os
 import re
 import time
 import threading
 from pathlib import Path
 from typing import Any, Mapping
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
@@ -26,7 +30,7 @@ from risk import estimate_beta_from_returns, quarterly_half_kelly
 
 
 POLICY_SCHEMA_VERSION = 1
-AUTO_VALIDATION_ALGORITHM = "quarterly-risk-v5"
+AUTO_VALIDATION_ALGORITHM = "quarterly-risk-v6"
 AUTO_VALIDATION_REQUIRED_CHECKS = frozenset({
     "point_in_time_cutoff",
     "completed_week_window",
@@ -40,6 +44,9 @@ AUTO_VALIDATION_REQUIRED_CHECKS = frozenset({
     "source_content_hash",
     "finite_coefficients",
     "kelly_formula",
+    "close_only_observation_and_official_correction",
+    "split_adjustment_applied_once",
+    "us_issuer_event_window_coverage",
 })
 MIN_WEEKLY_OBSERVATIONS = 104
 DEFAULT_ACTIVE_POLICY_PATH = "config/beta-policy-active.json"
@@ -184,6 +191,84 @@ def _valid_corporate_action_evidence(value: Any, *, window_start: date | None = 
             return False
         if verified_at.tzinfo is None:
             return False
+    elif provider == "SEC EDGAR issuer filings":
+        if verification_status not in {"EVENTS_VERIFIED", "NO_EVENTS_VERIFIED"}:
+            return False
+        if value.get("coverageComplete") is not True or value.get("issuerCik") != "0001318605":
+            return False
+        try:
+            event_count = int(value.get("eventCount", -1))
+        except (TypeError, ValueError):
+            return False
+        if event_count < 0 or (verification_status == "NO_EVENTS_VERIFIED" and event_count != 0):
+            return False
+        families = {str(item) for item in value.get("sourceFamilies", [])}
+        if not {"submissions", "10-K", "10-Q", "8-K"}.issubset(families):
+            return False
+        hashes = value.get("sourceResponseHashes")
+        events = value.get("events")
+        manifest = value.get("reviewManifest")
+        if not isinstance(manifest, list) and isinstance(events, Mapping):
+            manifest = events.get("reviewManifest")
+        if not isinstance(manifest, list) or len(manifest) < 10:
+            return False
+        if not isinstance(hashes, Mapping) or len(hashes) != len(manifest) + 1 or "submissions" not in hashes:
+            return False
+        try:
+            reviewed_filing_count = int(value.get("reviewedFilingCount", 0))
+        except (TypeError, ValueError):
+            return False
+        if reviewed_filing_count != len(manifest):
+            return False
+        requested_start = _as_date(value.get("requestedStart"))
+        requested_end = _as_date(value.get("requestedEnd"))
+        if requested_start is None or requested_end is None or requested_start > requested_end:
+            return False
+        accessions: set[str] = set()
+        manifest_families: set[str] = {"submissions"}
+        for filing in manifest:
+            if not isinstance(filing, Mapping):
+                return False
+            form = str(filing.get("form", ""))
+            accession = str(filing.get("accession", ""))
+            filing_date = _as_date(filing.get("filingDate"))
+            if form not in {"10-K", "10-Q", "8-K"} or not re.fullmatch(r"\d{10}-\d{2}-\d{6}", accession):
+                return False
+            if (
+                accession in accessions or filing_date is None
+                or not requested_start - timedelta(days=120) <= filing_date <= requested_end + timedelta(days=45)
+                or filing.get("reviewStatus") != "NO_ACTION_DISCLOSURE"
+            ):
+                return False
+            url = urlsplit(str(filing.get("documentUrl", "")))
+            if url.scheme != "https" or url.hostname not in {"sec.gov", "www.sec.gov"}:
+                return False
+            expected_path_prefix = f"/Archives/edgar/data/1318605/{accession.replace('-', '')}/"
+            if not url.path.startswith(expected_path_prefix) or url.path.endswith("/"):
+                return False
+            digest = str(filing.get("contentHash", ""))
+            if not re.fullmatch(r"[0-9a-f]{64}", digest) or hashes.get(accession) != digest:
+                return False
+            accessions.add(accession)
+            manifest_families.add(form)
+        if manifest_families != families or set(hashes) != {"submissions", *accessions}:
+            return False
+        if any(not re.fullmatch(r"[0-9a-f]{64}", str(item)) for item in hashes.values()):
+            return False
+        requested_start = _as_date(value.get("requestedStart"))
+        requested_end = _as_date(value.get("requestedEnd"))
+        if requested_start is None or requested_end is None or requested_start > requested_end:
+            return False
+        if window_start is not None and requested_start > window_start:
+            return False
+        if window_end is not None and requested_end < window_end:
+            return False
+        try:
+            verified_at = datetime.fromisoformat(str(value.get("verifiedAt", "")).replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if verified_at.tzinfo is None:
+            return False
     else:
         return False
     requested_events = value.get("requestedEvents")
@@ -199,6 +284,27 @@ def _valid_corporate_action_evidence(value: Any, *, window_start: date | None = 
         return False
     if window_end is not None and requested_end < window_end:
         return False
+    price_basis = str(value.get("priceBasis", ""))
+    if price_basis not in {"raw-close-plus-official-repair-v1", "raw-close-plus-verified-actions-v1"}:
+        return False
+    corrections = value.get("priceCorrections", [])
+    if not isinstance(corrections, list):
+        return False
+    correction_hash = value.get("priceCorrectionsHash")
+    if corrections:
+        if not re.fullmatch(r"[0-9a-f]{64}", str(correction_hash or "")):
+            return False
+        for correction in corrections:
+            if not isinstance(correction, Mapping) or correction.get("provider") not in {
+                "TWSE official daily close", "TPEx official daily close"
+            }:
+                return False
+            if _as_date(correction.get("date")) is None:
+                return False
+            if _finite(correction.get("officialClose")) is None or _finite(correction.get("officialClose")) <= 0:
+                return False
+            if not re.fullmatch(r"[0-9a-f]{64}", str(correction.get("sourceHash", ""))):
+                return False
     try:
         verified_at = datetime.fromisoformat(str(value.get("verifiedAt", "")).replace("Z", "+00:00"))
     except ValueError:
@@ -452,23 +558,62 @@ def fetch_official_taiwan_corporate_actions(
                 if cash > 0:
                     dividends.append({"date": row["__eventDate"], "amount": cash})
             else:
-                event_kind = " ".join(str(value).strip() for key, value in row.items() if key in {"權/息", "權息", "種類"})
+                event_kind = " ".join(str(value).strip() for key, value in row.items() if "權/息" in key or "權息" in key or "種類" in key)
                 right_key = next((key for key in row if key == "權值" or key.startswith("權值 ")), None)
                 cash_key = next((key for key in row if key == "息值" or key.startswith("息值 ")), None)
                 combined_key = next((key for key in row if "權值+息值" in key or "權值＋息值" in key), None)
-                right_value = _finite(str(row.get(right_key, "0")).replace(",", "")) if right_key else 0.0
+                combined_value = _finite(str(row.get(combined_key, "")).replace(",", "")) if combined_key else None
                 cash_value = _finite(str(row.get(cash_key, "")).replace(",", "")) if cash_key else None
-                if cash_value is None and combined_key and event_kind.strip() in {"息", "除息", "現金股利"}:
-                    cash_value = _finite(str(row.get(combined_key, "")).replace(",", ""))
-                if combined_key and any(marker in event_kind for marker in ("權", "股")):
-                    right_value = 1.0
-                if right_value is None or cash_value is None:
-                    unsupported.append("twt49u_schema")
+                rights_event = "權" in event_kind or "股票" in event_kind
+                cash_event = "息" in event_kind or "股利" in event_kind
+                if rights_event:
+                    previous_key = next((key for key in row if "除權息前收盤價" in key), None)
+                    reference_key = next((key for key in row if "除權息參考價" in key), None)
+                    previous_close = _finite(str(row.get(previous_key, "")).replace(",", "")) if previous_key else None
+                    reference_price = _finite(str(row.get(reference_key, "")).replace(",", "")) if reference_key else None
+                    if previous_close is None or reference_price is None or previous_close <= 0 or reference_price <= 0:
+                        unsupported.append(f"twt49u_rights_reference_missing:{row.get('__eventDate')}")
+                        continue
+                    rights_value = _finite(str(row.get(right_key, "")).replace(",", "")) if right_key else combined_value
+                    if rights_value is None or rights_value < 0:
+                        unsupported.append(f"twt49u_rights_value_missing:{row.get('__eventDate')}")
+                        continue
+                    if cash_event and cash_key is None:
+                        unsupported.append(f"twt49u_mixed_rights_cash_details_missing:{row.get('__eventDate')}")
+                        continue
+                    cash_amount = cash_value if cash_event else 0.0
+                    if cash_amount is None or cash_amount < 0:
+                        unsupported.append(f"twt49u_cash_value_missing:{row.get('__eventDate')}")
+                        continue
+                    expected_reference = previous_close - rights_value - cash_amount
+                    if abs(expected_reference - reference_price) > 0.015:
+                        unsupported.append(f"twt49u_reference_price_conflict:{row.get('__eventDate')}")
+                        continue
+                    adjustment_factor = reference_price / previous_close
+                    if not math.isfinite(adjustment_factor) or adjustment_factor <= 0:
+                        unsupported.append(f"twt49u_adjustment_factor_invalid:{row.get('__eventDate')}")
+                        continue
+                    # The exchange reference price is the authoritative
+                    # capital-adjustment factor for pre-event closes.
+                    splits.append({
+                        "date": row["__eventDate"], "factor": adjustment_factor,
+                        "adjustmentType": "TWSE_RIGHTS_REFERENCE_PRICE",
+                        "previousClose": previous_close, "referencePrice": reference_price,
+                        "rightsValue": rights_value, "cashAmount": cash_amount,
+                    })
+                    if cash_amount > 0:
+                        dividends.append({"date": row["__eventDate"], "amount": cash_amount})
+                elif cash_event:
+                    if cash_value is None:
+                        cash_value = combined_value
+                    if cash_value is None or cash_value < 0:
+                        unsupported.append(f"twt49u_cash_value_missing:{row.get('__eventDate')}")
+                        continue
+                    if cash_value > 0:
+                        dividends.append({"date": row["__eventDate"], "amount": cash_value})
+                else:
+                    unsupported.append(f"twt49u_action_kind_unrecognized:{row.get('__eventDate')}:{event_kind}")
                     continue
-                if right_value > 0 or any(marker in event_kind for marker in ("權", "股票")):
-                    unsupported.append(f"stock_rights:{row.get('__eventDate')}:{event_kind}:{right_value}")
-                if cash_value > 0:
-                    dividends.append({"date": row["__eventDate"], "amount": cash_value})
             events.append(row)
         for row in matched.get("twtcau", []):
             fields = {str(key): value for key, value in row.items() if not str(key).startswith("__")}
@@ -537,6 +682,243 @@ def yahoo_chart_symbols(symbol: str, market: str) -> tuple[str, ...]:
     return (key,)
 
 
+def fetch_official_taiwan_daily_closes(
+    symbol: str,
+    *,
+    market: str,
+    session_dates: list[date] | tuple[date, ...],
+    http_get: Any = None,
+    timeout: float = 12,
+) -> list[dict[str, Any]]:
+    """Read exchange closes for selected anomalous sessions, grouped by month."""
+    getter = http_get or requests.get
+    otc = _symbol(symbol) in OTC_SYMBOLS or str(market).lower() in {"otc", "tpex"}
+    grouped: dict[tuple[int, int], set[date]] = {}
+    for item in session_dates:
+        if isinstance(item, date):
+            grouped.setdefault((item.year, item.month), set()).add(item)
+    output: list[dict[str, Any]] = []
+    for year, month in sorted(grouped):
+        month_start = date(year, month, 1)
+        if otc:
+            url = "https://www.tpex.org.tw/www/zh-tw/afterTrading/tradingStock"
+            params = {"code": _symbol(symbol), "date": month_start.strftime("%Y/%m/%d"), "response": "json"}
+            provider = "TPEx official daily close"
+        else:
+            url = "https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY"
+            params = {"date": month_start.strftime("%Y%m%d"), "stockNo": _symbol(symbol), "response": "json"}
+            provider = "TWSE official daily close"
+        payload, response_hash = _official_payload(getter, url, params, timeout)
+        if not isinstance(payload, Mapping):
+            raise ValueError("official close response is not an object")
+        status = str(payload.get("stat", "ok")).strip().lower()
+        if status not in {"ok", "success", "查詢日期範圍內無資料".lower()}:
+            raise ValueError("official close response status is not complete")
+        tables: list[tuple[list[Any], list[Any]]] = []
+        if otc:
+            raw_tables = payload.get("tables")
+            if not isinstance(raw_tables, list):
+                raise ValueError("TPEx official close tables missing")
+            for table in raw_tables:
+                if isinstance(table, Mapping) and isinstance(table.get("fields"), list) and isinstance(table.get("data"), list):
+                    tables.append((table["fields"], table["data"]))
+        else:
+            fields, data = payload.get("fields"), payload.get("data")
+            if isinstance(fields, list) and isinstance(data, list):
+                tables.append((fields, data))
+        if not tables:
+            raise ValueError("official close fields/data missing")
+        found: dict[date, float] = {}
+        for fields, data in tables:
+            date_index = next((index for index, field in enumerate(fields) if "日期" in str(field)), None)
+            close_index = next((index for index, field in enumerate(fields) if "收盤" in str(field) and "漲跌" not in str(field)), None)
+            symbol_index = next((index for index, field in enumerate(fields) if "代號" in str(field) or "代碼" in str(field)), None)
+            if date_index is None or close_index is None:
+                if data:
+                    raise ValueError("official close date/close columns missing")
+                continue
+            for row in data:
+                if not isinstance(row, (list, tuple)) or len(row) != len(fields):
+                    raise ValueError("official close row schema mismatch")
+                if symbol_index is not None and str(row[symbol_index]).strip() != _symbol(symbol):
+                    continue
+                row_date = _parse_taiwan_date(row[date_index])
+                close = _finite(str(row[close_index]).replace(",", ""))
+                if row_date is None:
+                    raise ValueError("official close contains an invalid session date")
+                if row_date not in grouped[(year, month)]:
+                    continue
+                if close is None or close <= 0:
+                    raise ValueError(f"official close is invalid for {row_date.isoformat()}")
+                found[row_date] = close
+        missing = grouped[(year, month)] - set(found)
+        if missing:
+            raise ValueError("official close missing requested session: " + ",".join(sorted(day.isoformat() for day in missing)))
+        for session, close in sorted(found.items()):
+            output.append({
+                "date": session.isoformat(),
+                "officialClose": close,
+                "provider": provider,
+                "sourceUrl": url,
+                "sourceHash": response_hash,
+            })
+    return output
+
+
+def fetch_sec_edgar_corporate_action_evidence(
+    symbol: str,
+    *,
+    start: date,
+    end: date,
+    http_get: Any = None,
+    timeout: float = 12,
+) -> dict[str, Any]:
+    """Verify a no-action US window against the issuer's complete SEC filing set.
+
+    The first supported issuer is Tesla (CIK 0001318605). Positive Yahoo
+    events continue through the event normalization path; this fallback is
+    only capable of certifying a complete, event-free window. Any ambiguous
+    action disclosure remains UNVERIFIED.
+    """
+    key = _symbol(symbol)
+    cik_by_symbol = {"TSLA": "0001318605"}
+    cik = cik_by_symbol.get(key)
+    if cik is None:
+        return {
+            "status": "UNVERIFIED", "provider": "SEC EDGAR issuer filings",
+            "reasonCode": "US_ISSUER_ADAPTER_UNAVAILABLE",
+            "reason": f"no official filing adapter is registered for {key}",
+        }
+    getter = http_get or requests.get
+    user_agent = os.getenv("SEC_USER_AGENT", "PRStK quarterly risk research")
+    headers = {"User-Agent": user_agent, "Accept": "application/json,text/html,text/plain"}
+    submissions_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+    try:
+        response = getter(submissions_url, headers=headers, timeout=timeout)
+        response.raise_for_status()
+        submissions = response.json()
+        if not isinstance(submissions, Mapping) or str(submissions.get("cik", "")).zfill(10) != cik:
+            raise ValueError("SEC issuer identity mismatch")
+        recent = ((submissions.get("filings") or {}).get("recent") or {})
+        names = ("accessionNumber", "filingDate", "form", "primaryDocument", "reportDate")
+        arrays = [recent.get(name) for name in names]
+        if any(not isinstance(values, list) for values in arrays) or len({len(values) for values in arrays}) != 1:
+            raise ValueError("SEC submissions filing arrays are incomplete")
+        rows = [dict(zip(names, values)) for values in zip(*arrays)]
+        filed_from = start - timedelta(days=120)
+        filed_to = end + timedelta(days=45)
+        periodic = [
+            row for row in rows
+            if row["form"] in {"10-K", "10-Q"}
+            and _as_date(row["filingDate"]) is not None
+            and filed_from <= _as_date(row["filingDate"]) <= filed_to
+            and _as_date(row["reportDate"]) is not None
+        ]
+        report_dates = sorted(_as_date(row["reportDate"]) for row in periodic)
+        if (
+            len(periodic) < 10
+            or not report_dates
+            or report_dates[0] > start + timedelta(days=90)
+            or report_dates[-1] < end - timedelta(days=120)
+            or any((right - left).days > 125 for left, right in zip(report_dates, report_dates[1:]))
+        ):
+            raise ValueError("SEC periodic filings do not cover the requested window")
+        selected = []
+        for row in rows:
+            form = str(row.get("form") or "")
+            filed = _as_date(row.get("filingDate"))
+            report = _as_date(row.get("reportDate"))
+            if form in {"10-K", "10-Q"} and row in periodic:
+                selected.append(row)
+            elif form == "8-K" and filed is not None and start <= filed <= filed_to and (report is None or report <= end):
+                selected.append(row)
+        if len(selected) < 10:
+            raise ValueError("SEC action-filing set is incomplete")
+        if len(selected) > 48:
+            raise ValueError("SEC action-filing set exceeds the bounded verification budget")
+        submission_hash = _canonical_hash(submissions)
+
+        def read_filing(row: Mapping[str, Any]) -> tuple[str, str, str]:
+            accession = str(row.get("accessionNumber") or "")
+            document = str(row.get("primaryDocument") or "")
+            if not re.fullmatch(r"\d{10}-\d{2}-\d{6}", accession) or not document or ".." in document or "/" in document or "\\" in document:
+                raise ValueError("SEC filing identity is malformed")
+            accession_path = accession.replace("-", "")
+            url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession_path}/{document}"
+            with _OFFICIAL_SOURCE_SEMAPHORE:
+                document_response = getter(url, headers={"User-Agent": user_agent}, timeout=timeout)
+                document_response.raise_for_status()
+            body = getattr(document_response, "text", None)
+            if body is None:
+                content = getattr(document_response, "content", b"")
+                body = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else str(content)
+            if not body.strip():
+                raise ValueError("SEC filing document is empty")
+            return accession, url, body
+
+        documents: list[tuple[Mapping[str, Any], str, str, str]] = []
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            future_rows = {executor.submit(read_filing, row): row for row in selected}
+            for future in as_completed(future_rows, timeout=180):
+                row = future_rows[future]
+                accession, url, body = future.result()
+                documents.append((row, accession, url, body))
+        if len(documents) != len(selected):
+            raise ValueError("SEC filing download set is incomplete")
+
+        disclosure_pattern = re.compile(
+            r"(?:announc\w*|declar\w*|approv\w*|effect\w*|implement\w*|distribut\w*|paid|payable)"
+            r".{0,180}(?:stock split|reverse split|stock dividend|cash dividend|share split)"
+            r"|(?:stock split|reverse split|stock dividend|cash dividend|share split)"
+            r".{0,180}(?:announc\w*|declar\w*|approv\w*|effect\w*|implement\w*|distribut\w*|paid|payable)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        evidence_hashes: dict[str, str] = {"submissions": submission_hash}
+        review_manifest = []
+        for row, accession, url, body in documents:
+            digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+            evidence_hashes[accession] = digest
+            plain = html.unescape(re.sub(r"<[^>]*>", " ", body))
+            plain = re.sub(r"\s+", " ", plain)
+            # Tesla's filings repeat historical split labels. Those events
+            # predate this estimator window and are recorded separately.
+            plain = re.sub(r"(?:five[- ]for[- ]one|5-for-1|three[- ]for[- ]one|3-for-1) stock split[^.]{0,120}\b(?:2020|2022)\b", " ", plain, flags=re.IGNORECASE)
+            plain = re.sub(r"\b(?:2020|2022) stock split\b", " ", plain, flags=re.IGNORECASE)
+            plain = re.sub(r"(?:we have never|we have not|no cash dividends have been|no dividends have been)[^.]{0,180}(?:declared|paid|distributed)[^.]{0,80}", " ", plain, flags=re.IGNORECASE)
+            plain = re.sub(r"do not anticipate (?:declaring|paying)[^.]{0,180}dividends?", " ", plain, flags=re.IGNORECASE)
+            possible_action = bool(disclosure_pattern.search(plain))
+            if possible_action:
+                raise ValueError(f"SEC action disclosure requires event normalization: {row['form']} {accession}")
+            review_manifest.append({
+                "form": row["form"], "accession": accession,
+                "filingDate": row["filingDate"], "reportDate": row["reportDate"],
+                "documentUrl": url, "contentHash": digest, "reviewStatus": "NO_ACTION_DISCLOSURE",
+            })
+        if len(review_manifest) < 10:
+            raise ValueError("SEC review manifest is incomplete")
+        return {
+            "status": "NO_EVENTS_VERIFIED",
+            "provider": "SEC EDGAR issuer filings",
+            "issuerCik": cik,
+            "events": {"splits": [], "dividends": [], "reviewManifest": review_manifest},
+            "sourceFamilies": sorted({"submissions", *(str(row["form"]) for row in selected)}),
+            "sourceResponseHashes": evidence_hashes,
+            "eventCount": 0,
+            "reviewedFilingCount": len(review_manifest),
+            "coverageComplete": True,
+            "requestedStart": start.isoformat(),
+            "requestedEnd": end.isoformat(),
+            "verifiedAt": datetime.now(timezone.utc).isoformat(),
+        }
+    except Exception as error:  # noqa: BLE001 - no absence is inferred from a failed filing query
+        return {
+            "status": "UNVERIFIED", "provider": "SEC EDGAR issuer filings",
+            "reasonCode": "US_ACTION_EVIDENCE_UNVERIFIED",
+            "reason": f"{type(error).__name__}: {error}",
+            "requestedStart": start.isoformat(), "requestedEnd": end.isoformat(),
+        }
+
+
 def fetch_yahoo_research_series(
     symbol: str,
     *,
@@ -597,6 +979,8 @@ def fetch_yahoo_research_series(
                 rows = []
                 clipped_rows = 0
                 seen_sessions: set[date] = set()
+                ohlc_diagnostics: list[dict[str, Any]] = []
+                official_repair_dates: list[date] = []
                 for index, timestamp in enumerate(timestamps):
                     try:
                         item_date = datetime.fromtimestamp(float(timestamp), tz=timezone.utc).astimezone(source_tz).date()
@@ -623,17 +1007,48 @@ def fetch_yahoo_research_series(
                     open_value = _finite(quote.get("open", [None] * len(timestamps))[index]) if index < len(quote.get("open", [])) else None
                     high_value = _finite(quote.get("high", [None] * len(timestamps))[index]) if index < len(quote.get("high", [])) else None
                     low_value = _finite(quote.get("low", [None] * len(timestamps))[index]) if index < len(quote.get("low", [])) else None
-                    if any(value is None or value <= 0 for value in (open_value, high_value, low_value, close_value)):
-                        raise ValueError(f"invalid Yahoo OHLC values for {item_date.isoformat()}")
-                    if low_value > high_value or low_value > min(open_value, close_value) or high_value < max(open_value, close_value):
-                        raise ValueError(f"inconsistent Yahoo OHLC values for {item_date.isoformat()}")
-                    rows.append({
-                        "date": item_date.isoformat(),
-                        "open": open_value,
-                        "high": high_value,
-                        "low": low_value,
-                        "close": close_value,
-                    })
+                    if close_value is None or close_value <= 0:
+                        raise ValueError(f"invalid Yahoo close for {item_date.isoformat()}")
+                    diagnostic = None
+                    if any(value is None or value <= 0 for value in (open_value, high_value, low_value)):
+                        diagnostic = "OHLC_COMPONENT_MISSING_OR_INVALID"
+                    elif low_value > high_value or low_value > min(open_value, close_value) or high_value < max(open_value, close_value):
+                        diagnostic = "OHLC_RELATION_INVALID"
+                    if diagnostic:
+                        ohlc_diagnostics.append({
+                            "date": item_date.isoformat(), "reasonCode": diagnostic,
+                            "open": open_value, "high": high_value, "low": low_value,
+                            "yahooClose": close_value,
+                        })
+                        if str(market).lower() in {"tw", "taiwan", "twd"}:
+                            official_repair_dates.append(item_date)
+                        rows.append({"date": item_date.isoformat(), "close": close_value})
+                    else:
+                        rows.append({
+                            "date": item_date.isoformat(), "open": open_value,
+                            "high": high_value, "low": low_value, "close": close_value,
+                        })
+                price_corrections: list[dict[str, Any]] = []
+                if official_repair_dates:
+                    try:
+                        price_corrections = fetch_official_taiwan_daily_closes(
+                            symbol, market=market, session_dates=official_repair_dates,
+                            http_get=getter, timeout=timeout,
+                        )
+                    except Exception as error:  # noqa: BLE001 - keep the exact official repair failure
+                        raise ValueError(f"OFFICIAL_CLOSE_REPAIR_UNAVAILABLE:{type(error).__name__}:{error}") from error
+                    corrected = {item["date"]: item["officialClose"] for item in price_corrections}
+                    for row in rows:
+                        if row["date"] in corrected:
+                            row["yahooClose"] = row["close"]
+                            row["close"] = corrected[row["date"]]
+                            row["closeSource"] = "official_exchange_correction"
+                price_evidence = {
+                    "priceBasis": "raw-close-plus-official-repair-v1",
+                    "ohlcDiagnostics": ohlc_diagnostics,
+                    "corrections": price_corrections,
+                    "correctionsHash": _canonical_hash(price_corrections),
+                }
                 if _symbol(symbol) == "TWD=X" or str(market).lower() == "fx":
                     fx_rows = normalize_research_price(rows)
                     if not fx_rows:
@@ -713,6 +1128,17 @@ def fetch_yahoo_research_series(
                         action_payload = dict(events)
                 else:
                     action_payload = {"splits": splits, "dividends": dividends}
+                    if not event_count:
+                        official_evidence = fetch_sec_edgar_corporate_action_evidence(
+                            symbol, start=start, end=end, http_get=getter, timeout=timeout,
+                        )
+                        if official_evidence.get("status") in {"EVENTS_VERIFIED", "NO_EVENTS_VERIFIED"}:
+                            official_events = official_evidence.get("events")
+                            if not isinstance(official_events, Mapping):
+                                raise ValueError("SEC issuer event evidence omitted the reviewed event manifest")
+                            action_payload = dict(official_events)
+                            splits = list(action_payload.get("splits", []))
+                            dividends = list(action_payload.get("dividends", []))
                 normalized = normalize_research_price(rows, splits=splits, dividends=dividends)
                 if not normalized:
                     raise ValueError("empty normalized research series")
@@ -722,10 +1148,16 @@ def fetch_yahoo_research_series(
                     events_hash = _canonical_hash(action_payload)
                     corporate_evidence = {
                         "provider": official_evidence["provider"],
+                        **({"issuerCik": official_evidence["issuerCik"]}
+                           if official_evidence.get("provider") == "SEC EDGAR issuer filings"
+                           and official_evidence.get("issuerCik") else {}),
                         "verificationStatus": official_evidence["status"],
                         "coverageComplete": official_evidence["coverageComplete"],
                         "sourceFamilies": official_evidence["sourceFamilies"],
                         "sourceResponseHashes": official_evidence["sourceResponseHashes"],
+                        **({"reviewedFilingCount": official_evidence["reviewedFilingCount"]}
+                           if official_evidence.get("provider") == "SEC EDGAR issuer filings"
+                           and isinstance(official_evidence.get("reviewedFilingCount"), int) else {}),
                         "eventCount": len(action_payload.get("officialRows", [])),
                         "eventsHash": events_hash,
                         "seriesHash": series_hash,
@@ -733,6 +1165,13 @@ def fetch_yahoo_research_series(
                         "requestedEnd": end.isoformat(),
                         "verifiedAt": datetime.now(timezone.utc).isoformat(),
                         "requestedEvents": ["history", "splits", "dividends"],
+                        "priceBasis": price_evidence["priceBasis"],
+                        "priceCorrections": price_evidence["corrections"],
+                        "priceCorrectionsHash": price_evidence["correctionsHash"],
+                        "priceDiagnosticsHash": _canonical_hash(price_evidence["ohlcDiagnostics"]),
+                        **({"reviewManifest": action_payload["reviewManifest"]}
+                           if official_evidence.get("provider") == "SEC EDGAR issuer filings"
+                           and isinstance(action_payload.get("reviewManifest"), list) else {}),
                     }
                 elif event_count and isinstance(raw_events, Mapping):
                     events_hash = _canonical_hash(action_payload)
@@ -748,16 +1187,22 @@ def fetch_yahoo_research_series(
                         "requestedEvents": ["history", "splits", "dividends"],
                         "eventCount": event_count,
                         "eventCounts": {"splits": len(splits), "dividends": len(dividends)},
+                        "priceBasis": price_evidence["priceBasis"],
+                        "priceCorrections": price_evidence["corrections"],
+                        "priceCorrectionsHash": price_evidence["correctionsHash"],
+                        "priceDiagnosticsHash": _canonical_hash(price_evidence["ohlcDiagnostics"]),
                     }
                 return {
                     "symbol": _symbol(symbol),
                     "market": str(market).lower(),
                     "currency": "USD" if str(market).lower() in {"us", "usa", "usd"} else "TWD",
                     "rows": normalized,
+                    "status": "READY",
                     "corporateActionEvents": action_payload,
                     "source": f"Yahoo Chart raw OHLC ({chart_symbol}) + research-price contract v1",
                     "corporateActionStatus": "PASS" if corporate_evidence else "UNAVAILABLE",
                     "corporateActionEvidence": corporate_evidence,
+                    "priceEvidence": price_evidence,
                     "seriesHash": series_hash,
                     "reason": None if corporate_evidence else (official_evidence or {}).get("reason", "corporate action evidence unavailable"),
                     "reasonCode": None if corporate_evidence else (official_evidence or {}).get("reasonCode", "CORPORATE_ACTION_EVIDENCE_UNAVAILABLE"),
@@ -775,7 +1220,7 @@ def fetch_yahoo_research_series(
                         "corporateActionStatus": "UNAVAILABLE",
                         "status": "UNAVAILABLE",
                         "reason": str(error),
-                        "reasonCode": "SOURCE_DATA_INVALID",
+                        "reasonCode": "OFFICIAL_CLOSE_REPAIR_UNAVAILABLE" if str(error).startswith("OFFICIAL_CLOSE_REPAIR_UNAVAILABLE:") else "SOURCE_DATA_INVALID",
                         "attempts": total_attempts,
                     }
                 if attempt + 1 < max(1, attempts):
@@ -1038,21 +1483,28 @@ def normalize_research_price(
     the event date when building the total-return index.  Conflicting dates or
     invalid prices are rejected instead of being silently overwritten.
     """
-    split_events = _event_rows(splits, value_keys=("ratio", "factor", "splitRatio"))
-    if isinstance(splits, Mapping):
-        split_events = {}
-        for item in splits.values():
-            if not isinstance(item, Mapping):
-                continue
-            event_date = _as_date(item.get("date") or item.get("exDate"))
-            numerator = _finite(item.get("numerator"))
-            denominator = _finite(item.get("denominator"))
-            if event_date is not None and numerator and denominator:
-                split_events[event_date] = denominator / numerator
-            elif event_date is not None:
-                ratio = _finite(item.get("ratio") or item.get("factor") or item.get("splitRatio"))
-                if ratio and ratio > 0:
-                    split_events[event_date] = ratio
+    split_events: dict[date, float] = {}
+    split_items = splits.values() if isinstance(splits, Mapping) else splits if isinstance(splits, (list, tuple)) else []
+    for item in split_items:
+        if not isinstance(item, Mapping):
+            continue
+        event_date = _as_date(item.get("date") or item.get("exDate") or item.get("ex_date"))
+        if event_date is None:
+            continue
+        direct_factor = _finite(item.get("adjustmentFactor"))
+        if direct_factor is None:
+            direct_factor = _finite(item.get("factor"))
+        numerator, denominator = _finite(item.get("numerator")), _finite(item.get("denominator"))
+        if direct_factor is not None and direct_factor > 0:
+            split_events[event_date] = direct_factor
+        elif numerator is not None and denominator is not None and numerator > 0 and denominator > 0:
+            # Provider ratios are shares-after / shares-before; multiply
+            # pre-event closes by the reciprocal exactly once.
+            split_events[event_date] = denominator / numerator
+        else:
+            ratio = _finite(item.get("ratio") or item.get("splitRatio"))
+            if ratio is not None and ratio > 0:
+                split_events[event_date] = ratio
     dividend_events = _event_rows(dividends, value_keys=("amount", "dividend", "cashAmount", "value"))
 
     by_date: dict[date, tuple[float, Mapping[str, Any]]] = {}
@@ -1091,6 +1543,8 @@ def normalize_research_price(
             "high": _finite(by_date[item_date][1].get("high")),
             "low": _finite(by_date[item_date][1].get("low")),
             "close": raw_close,
+            "yahooClose": _finite(by_date[item_date][1].get("yahooClose")),
+            "closeSource": by_date[item_date][1].get("closeSource", "yahoo"),
             "splitAdjustedClose": adjusted_close,
             "totalReturnIndex": total_return,
         })
@@ -1257,17 +1711,28 @@ def estimate_beta_policy(
             window_end=pair_end,
         )
         if estimate.get("status") != "READY" or not latest_pair_fresh or corporate_status != "PASS" or not evidence_ok or not source:
-            if not latest_pair_fresh:
-                reason = "latest paired observation is stale"
-            else:
-                reason = (
-                    (record.get("reasonCode") or record.get("reason"))
-                    if isinstance(record, Mapping) and (corporate_status != "PASS" or not evidence_ok)
-                    else None
-                ) or estimate.get("reason") or "corporate action or source evidence unavailable"
+            source_reason_code = (
+                str(record.get("reasonCode"))
+                if isinstance(record, Mapping) and record.get("reasonCode") else None
+            )
+            source_reason = (
+                str(record.get("reason"))
+                if isinstance(record, Mapping) and record.get("reason") else None
+            )
+            derived_reason = "latest paired observation is stale" if not latest_pair_fresh else (
+                estimate.get("reason") or "corporate action or source evidence unavailable"
+            )
+            # Keep the acquisition/verification failure as the primary reason;
+            # freshness is a downstream effect and remains separately visible.
+            reason = source_reason or derived_reason if corporate_status != "PASS" or not evidence_ok else derived_reason
             assets[symbol] = {
                 "status": "INSUFFICIENT_EVIDENCE",
                 "reason": reason,
+                "reasonCode": source_reason_code or (
+                    "LATEST_PAIRED_OBSERVATION_STALE" if not latest_pair_fresh else "BETA_ESTIMATION_UNAVAILABLE"
+                ),
+                "derivedReason": derived_reason if source_reason_code else None,
+                "failureStage": "SOURCE_VALIDATION" if source_reason_code else "BETA_ESTIMATION",
                 "observations": estimate.get("observations", len(asset_returns)),
                 "windowStart": pair_start.isoformat(),
                 "windowEnd": pair_end.isoformat(),
@@ -1483,3 +1948,4 @@ def load_active_kelly_policy(path: str | Path | None = None, *, as_of: date | No
         return {"status": "UNAVAILABLE", "quality": "policy_invalid", "reason": error, "policy": None,
                 "referencePolicy": None}
     return {"status": "READY", "quality": "policy_complete", "reason": None, "policy": policy}
+

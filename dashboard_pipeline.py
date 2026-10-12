@@ -1333,10 +1333,19 @@ def main():
         if isinstance(item, Mapping)
     ] if isinstance(quarterly_beta, Mapping) else []
     normalized_beta_reasons = " ".join(beta_validation_reasons).upper()
+    beta_failed_symbols = quarterly_beta.get("failedSymbols", []) if isinstance(quarterly_beta, Mapping) else []
+    beta_failure_details = [
+        f"{item.get('symbol')}: {item.get('reasonCode') or 'BETA_EVIDENCE_UNAVAILABLE'}"
+        + (f" — {item.get('reason')}" if item.get('reason') and item.get('reason') != item.get('reasonCode') else "")
+        for item in beta_failed_symbols if isinstance(item, Mapping) and item.get("symbol")
+    ]
+    material_missing_symbols = beta_activation.get("materialMissingSymbols", []) if isinstance(beta_activation, Mapping) else []
     if beta_stale_reference:
-        if "FX_" in normalized_beta_reasons or "USD/TWD" in normalized_beta_reasons:
+        if len(beta_failure_details) > 1 or len(set(beta_validation_reasons)) > 1:
+            display_beta_status = "Beta資料待確認"
+        elif "FX_" in normalized_beta_reasons or "USD/TWD" in normalized_beta_reasons:
             display_beta_status = "匯率資料待更新"
-        elif "OFFICIAL_ACTION" in normalized_beta_reasons or "CORPORATE_ACTION" in normalized_beta_reasons:
+        elif any(code in normalized_beta_reasons for code in ("OFFICIAL_ACTION", "CORPORATE_ACTION", "US_ACTION_EVIDENCE", "TWSE_RIGHTS")):
             display_beta_status = "事件資料待驗證"
         elif "INSUFFICIENT PAIRED" in normalized_beta_reasons or "INSUFFICIENT_BETA" in normalized_beta_reasons:
             display_beta_status = "Beta歷史不足"
@@ -1740,11 +1749,13 @@ def main():
     beta_boundary_display = f"{display_kelly_limit:.2f}" if display_kelly_limit is not None else "—"
     beta_display_title = (
         "Beta 參數為上一季度參考值；本季 Beta 重新驗證完成前禁止增加風險。"
+        + ("\n" + "\n".join(beta_failure_details) if beta_failure_details else "")
+        + ("\n重大未建模持倉：" + ", ".join(str(item) for item in material_missing_symbols) if material_missing_symbols else "")
         if beta_stale_reference else
         "凱利邊界為上一季度參考值；本季凱利重新驗證完成前禁止增加風險。"
         if kelly_stale_reference else
         str(
-            beta_validation_reasons[0]
+            "\n".join(beta_failure_details)
             if beta_validation_reasons and beta_policy.get("status") != "READY"
             else beta_policy.get("reason") or kelly_policy.get("reason")
             or "資料品質驗證未完成；禁止增加風險。"
@@ -2442,6 +2453,7 @@ def main():
         "displayKellyLimit": round(display_kelly_limit, 8) if display_kelly_limit is not None else None,
         "displayUsagePct": round(display_usage, 4) if display_usage is not None else None,
         "displayStatus": display_beta_status,
+        "displayStatusClass": display_beta_class,
         "displayLifecycle": (
             "BETA_STALE_REFERENCE" if beta_stale_reference else
             "KELLY_STALE_REFERENCE" if kelly_stale_reference else

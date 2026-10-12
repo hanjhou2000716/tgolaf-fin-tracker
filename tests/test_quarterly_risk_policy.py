@@ -70,6 +70,8 @@ def _research_series(symbol, market, start, cutoff):
         "verifiedAt": "2026-10-05T01:00:00Z",
         "requestedEvents": ["history", "splits", "dividends"],
         "eventCounts": {"splits": 0, "dividends": 0},
+        "priceBasis": "raw-close-plus-verified-actions-v1",
+        "priceCorrections": [],
     }
     return {
         "symbol": symbol,
@@ -256,20 +258,20 @@ class QuarterlyRiskPolicyTests(unittest.TestCase):
             path.write_text(json.dumps(payload), encoding="utf-8")
             self.assertIsNone(_candidate_cache(path, cutoff=date(2026, 9, 30)))
 
-    def test_v4_recent_failure_does_not_cool_down_v5_candidate_rebuild(self):
+    def test_v5_recent_failure_does_not_cool_down_v6_candidate_rebuild(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             state_dir, candidate_dir = root / "state", root / "audit"
             state_dir.mkdir()
             failed = {
                 "status": "INSUFFICIENT_EVIDENCE",
-                "reason": "stale v4 result",
+                "reason": "stale v5 result",
                 "attemptedAt": "2026-10-07T00:00:00Z",
                 "observations": 0,
             }
             old = _sealed_cache({
                 "dataCutoff": "2026-09-30",
-                "algorithmVersion": "quarterly-risk-v4",
+                "algorithmVersion": "quarterly-risk-v5",
                 "assets": {"TEST": failed},
             })
             (state_dir / "beta-policy-candidate-cache.json").write_text(json.dumps(old), encoding="utf-8")
@@ -288,9 +290,9 @@ class QuarterlyRiskPolicyTests(unittest.TestCase):
                 fetcher=fetcher,
             )
             self.assertIn("TEST", calls)
-            self.assertEqual(summary["algorithmVersion"], "quarterly-risk-v5")
+            self.assertEqual(summary["algorithmVersion"], "quarterly-risk-v6")
             candidate = json.loads((candidate_dir / "beta-policy-candidate.json").read_text(encoding="utf-8"))
-            self.assertEqual(candidate["algorithmVersion"], "quarterly-risk-v5")
+            self.assertEqual(candidate["algorithmVersion"], "quarterly-risk-v6")
 
     def test_v2_sealed_activation_candidate_cannot_be_promoted(self):
         with tempfile.TemporaryDirectory() as directory:
