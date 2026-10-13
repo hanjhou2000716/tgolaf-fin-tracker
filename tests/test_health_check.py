@@ -115,13 +115,19 @@ class HealthCheckTests(unittest.TestCase):
             "status": "ok",
             "generatedAt": generated,
             "service": {"status": "ok", "generatedAt": generated,
-                        "windowDate": window_date, "window": window, "commit": "abc123"},
+                        "windowDate": window_date, "window": window,
+                        "timeContractVersion": 1,
+                        "windowDeadlineAt": (
+                            f"{window_date}T{'07:55' if window == 'morning' else '16:00'}:00+08:00"
+                            if window in ("morning", "afternoon") else None
+                        ),
+                        "commit": "abc123"},
             "calendar": {"status": "verified"},
             "markets": {
                 "taiwan": {"status": tw_status, "latestSessionDate": tw_latest,
                            "expectedSessionDate": tw_expected, "nextDueAt": tw_due},
                 "us": {"status": "fresh", "latestSessionDate": "2026-09-28",
-                       "expectedSessionDate": "2026-09-28", "nextDueAt": "2026-09-29T21:30:00+08:00"},
+                       "expectedSessionDate": "2026-09-28", "nextDueAt": "2026-09-30T06:30:00+08:00"},
             },
             "sources": {"taiex": "ok", "vix": "ok", "006208": "ok"},
         }
@@ -135,6 +141,23 @@ class HealthCheckTests(unittest.TestCase):
         payload = self._skynet_v2(generated="2026-09-29T06:40:00+08:00")
         self.assertEqual(evaluate_status("Skynet Monitoring", payload, now), [])
 
+    def test_invalid_declared_window_deadline_is_a_contract_failure(self):
+        now = datetime.datetime(2026, 9, 29, 9, 23, tzinfo=TAIPEI)
+        payload = self._skynet_v2()
+        payload["service"]["windowDeadlineAt"] = "2026-09-29T08:00:00+08:00"
+        issues = evaluate_status("Skynet Monitoring", payload, now)
+        self.assertTrue(any("TIME_CONTRACT_INVALID" in issue and "window deadline" in issue for issue in issues))
+
+    def test_legacy_v2_without_time_fields_uses_the_supported_schedule(self):
+        now = datetime.datetime(2026, 9, 29, 9, 23, tzinfo=TAIPEI)
+        payload = self._skynet_v2()
+        payload["service"].pop("timeContractVersion")
+        payload["service"].pop("windowDeadlineAt")
+        for market in payload["markets"].values():
+            market.pop("nextUpdateDeadlineAt", None)
+            market.pop("expectedSessionDeadlineAt", None)
+        self.assertEqual(evaluate_status("Skynet Monitoring", payload, now), [])
+
     def test_v2_replays_service_outage_even_when_holiday_data_is_valid(self):
         now = datetime.datetime(2026, 9, 29, 9, 23, tzinfo=TAIPEI)
         payload = self._skynet_v2(generated="2026-09-28T07:56:00+08:00", window_date="2026-09-28")
@@ -144,14 +167,56 @@ class HealthCheckTests(unittest.TestCase):
         self.assertTrue(any("UPDATE_WINDOW_MISSED" in issue for issue in issues))
         self.assertFalse(any("Taiwan MARKET_DATA_STALE" in issue for issue in issues))
 
-    def test_v2_market_stuck_after_close_buffer_is_stale(self):
+    def test_v2_market_waits_through_publication_buffer_then_becomes_stale(self):
         now = datetime.datetime(2026, 9, 29, 14, 31, tzinfo=TAIPEI)
         payload = self._skynet_v2(
             generated="2026-09-29T14:00:00+08:00", window="morning",
             tw_due="2026-09-29T14:30:00+08:00",
         )
         issues = evaluate_status("Skynet Monitoring", payload, now)
+        self.assertTrue(any("WAITING_UPDATE" in issue and "Taiwan" in issue for issue in issues))
+        self.assertFalse(any("Taiwan MARKET_DATA_STALE" in issue for issue in issues))
+
+        before_deadline = datetime.datetime(2026, 9, 29, 15, 59, tzinfo=TAIPEI)
+        issues = evaluate_status("Skynet Monitoring", payload, before_deadline)
+        self.assertFalse(any("Taiwan MARKET_DATA_STALE" in issue for issue in issues))
+
+        deadline = datetime.datetime(2026, 9, 29, 16, 0, tzinfo=TAIPEI)
+        issues = evaluate_status("Skynet Monitoring", payload, deadline)
         self.assertTrue(any("Taiwan MARKET_DATA_STALE" in issue for issue in issues))
+
+    def test_v2_stale_instrument_waits_only_for_valid_lagging_sources(self):
+        now = datetime.datetime(2026, 10, 13, 14, 47, tzinfo=TAIPEI)
+        payload = self._skynet_v2(
+            generated="2026-10-13T14:46:00+08:00", window="afternoon",
+            window_date="2026-10-13", tw_latest="2026-10-12", tw_expected="2026-10-13",
+            tw_status="stale", tw_due="2026-10-14T14:30:00+08:00",
+        )
+        payload["markets"]["taiwan"].update({
+            "expectedSessionDeadlineAt": "2026-10-13T16:00:00+08:00",
+        })
+        payload["markets"]["us"].update({
+            "nextDueAt": "2026-10-14T06:30:00+08:00",
+        })
+        payload["instruments"] = {
+            "006208": {
+                "status": "stale", "latestSessionDate": "2026-10-12",
+                "expectedSessionDate": "2026-10-13", "reasonCode": "SOURCE_LAGGING",
+                "selectedSource": "Yahoo",
+                "sourceResults": {
+                    "TWSE": {"status": "AVAILABLE", "latestSessionDate": "2026-10-12"},
+                    "Yahoo": {"status": "AVAILABLE", "latestSessionDate": "2026-10-12"},
+                },
+            },
+        }
+        issues = evaluate_status("Skynet Monitoring", payload, now)
+        self.assertTrue(any("WAITING_UPDATE" in issue and "Taiwan" in issue for issue in issues))
+        self.assertFalse(any("006208" in issue and "MARKET_DATA_STALE" in issue for issue in issues))
+
+        payload["instruments"]["006208"]["sourceResults"]["TWSE"]["status"] = "UNAVAILABLE"
+        issues = evaluate_status("Skynet Monitoring", payload, now)
+        self.assertTrue(any("006208" in issue and "MARKET_DATA_STALE" in issue for issue in issues))
+        self.assertFalse(any("WAITING_UPDATE" in issue and "Taiwan" in issue for issue in issues))
 
     def test_publication_mismatch_collapses_window_and_stale_impact_only_with_verified_run(self):
         now = datetime.datetime(2026, 10, 7, 8, 0, tzinfo=TAIPEI)
@@ -401,6 +466,32 @@ class HealthCheckTests(unittest.TestCase):
         due, recovered = alert_plan([], state, self.now + datetime.timedelta(hours=1))
         self.assertEqual(due, [])
         self.assertEqual(recovered["active"], {})
+
+    def test_same_market_incident_keeps_all_instrument_evidence_in_one_message(self):
+        issues = [
+            "Skynet Monitoring Taiwan MARKET_DATA_STALE: symbol=^TWII actual=2026-10-12 expected=2026-10-13",
+            "Skynet Monitoring Taiwan MARKET_DATA_STALE: symbol=006208 actual=2026-10-12 expected=2026-10-13",
+        ]
+        due, state = alert_plan(issues, {"schemaVersion": 1, "active": {}}, self.now)
+        self.assertEqual(len(due), 1)
+        self.assertIn("^TWII", due[0])
+        self.assertIn("006208", due[0])
+        self.assertEqual(len(state["active"]), 1)
+
+    def test_waiting_window_is_not_alerted_and_clears_prior_false_alarm(self):
+        waiting = "Skynet Monitoring WAITING_UPDATE: Taiwan update window remains open until 16:00"
+        key = "Skynet Monitoring|MARKET_DATA_STALE|taiwan"
+        previous = {"schemaVersion": 1, "active": {key: {
+            "firstSeenAt": self.now.isoformat(), "lastAlertAt": self.now.isoformat(),
+        }}}
+        with patch("health_check.fetch_status", return_value=[waiting]), \
+             patch("health_check.load_incident_state", return_value=previous), \
+             patch("health_check.save_incident_state") as save_state, \
+             patch("health_check.send_alert") as send_alert:
+            result = __import__("health_check").main(dry_run=False, now=self.now)
+        self.assertEqual(result, 0)
+        send_alert.assert_not_called()
+        save_state.assert_called_once_with({"schemaVersion": 1, "active": {}})
 
     def test_corrupt_incident_state_fails_open(self):
         issue = "Growth Dashboard stale for 73.0h (limit 72h)"
