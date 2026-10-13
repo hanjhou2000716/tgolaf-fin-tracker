@@ -31,6 +31,8 @@ GITHUB_API = os.getenv("GITHUB_API_URL", "https://api.github.com").rstrip("/")
 SKYNET_REPOSITORY = "hanjhou2000716/skynet-monitoring"
 SKYNET_PUBLICATION_URL = "https://hanjhou2000716.github.io/skynet-monitoring/publication.json"
 SKYNET_PUBLICATION_ARTIFACT = "skynet-publication-verification"
+WAITING_UPDATE_PREFIX = "WAITING_UPDATE:"
+TRANSIENT_LAG_REASONS = {"SOURCE_LAGGING", "MARKET_DATA_STALE", "CACHE_STALE"}
 
 
 def default_stale_after_hours(name):
@@ -88,6 +90,77 @@ def _as_taipei(value):
     return parsed
 
 
+def _session_deadline(market_key, session_date):
+    """Derive the completion deadline for an already expected market session."""
+    day = datetime.date.fromisoformat(str(session_date))
+    if market_key == "taiwan":
+        return datetime.datetime.combine(day, datetime.time(16, 0), TAIPEI)
+    if market_key == "us":
+        return datetime.datetime.combine(day + datetime.timedelta(days=1), datetime.time(7, 55), TAIPEI)
+    raise ValueError(f"unknown market key {market_key!r}")
+
+
+def _expected_session_deadline(market_key, market):
+    value = market.get("expectedSessionDeadlineAt")
+    if value not in (None, ""):
+        return _as_taipei(value)
+    session_date = market.get("expectedSessionDate")
+    return _session_deadline(market_key, session_date) if session_date else None
+
+
+def _next_update_deadline(market_key, market):
+    due_value = market.get("nextDueAt")
+    deadline_value = market.get("nextUpdateDeadlineAt")
+    if deadline_value not in (None, ""):
+        deadline = _as_taipei(deadline_value)
+        if due_value in (None, ""):
+            raise ValueError("nextUpdateDeadlineAt requires nextDueAt")
+        due = _as_taipei(due_value)
+        if not due < deadline <= due + datetime.timedelta(hours=2):
+            raise ValueError("nextUpdateDeadlineAt must follow availability by at most two hours")
+        return _as_taipei(due_value), deadline
+    if due_value in (None, ""):
+        return None, None
+
+    due = _as_taipei(due_value)
+    local_time = (due.hour, due.minute)
+    if market_key == "taiwan" and local_time == (14, 30):
+        buffer = datetime.timedelta(minutes=90)
+    elif market_key == "us" and local_time == (6, 30):
+        buffer = datetime.timedelta(minutes=85)
+    else:
+        raise ValueError("nextDueAt is not a recognized market availability time")
+    return due, due + buffer
+
+
+def _is_transient_session_lag(market_key, market, details, now):
+    if not isinstance(details, dict) or details.get("status") != "stale":
+        return False
+    reason = str(details.get("reasonCode") or "").upper()
+    if reason not in TRANSIENT_LAG_REASONS:
+        return False
+    expected = details.get("expectedSessionDate")
+    market_expected = market.get("expectedSessionDate") if isinstance(market, dict) else None
+    if not expected or expected != market_expected:
+        return False
+    try:
+        deadline = _expected_session_deadline(market_key, market)
+    except (TypeError, ValueError):
+        return False
+    if deadline is None or now >= deadline:
+        return False
+
+    source_results = details.get("sourceResults")
+    if isinstance(source_results, dict) and source_results:
+        results = [item for item in source_results.values() if isinstance(item, dict)]
+        if not results or any(item.get("status") != "AVAILABLE" for item in results):
+            return False
+        return any(item.get("latestSessionDate") for item in results)
+    # VIX currently records the selected valid source directly instead of a
+    # per-provider result map; a selected lagging history is sufficient evidence.
+    return bool(details.get("selectedSource"))
+
+
 def evaluate_skynet_v2(name, payload, now):
     """Evaluate service liveness and each market's session freshness separately."""
     if now.tzinfo is None:
@@ -96,10 +169,31 @@ def evaluate_skynet_v2(name, payload, now):
         now = now.astimezone(TAIPEI)
 
     issues = []
+    waiting_updates = []
     service = payload.get("service") if isinstance(payload.get("service"), dict) else {}
     markets = payload.get("markets") if isinstance(payload.get("markets"), dict) else {}
     calendar = payload.get("calendar") if isinstance(payload.get("calendar"), dict) else {}
     instruments = payload.get("instruments") if isinstance(payload.get("instruments"), dict) else {}
+
+    if service.get("timeContractVersion") == 1:
+        window_name = service.get("window")
+        window_date = service.get("windowDate")
+        if window_name in ("morning", "afternoon"):
+            try:
+                expected_deadline = datetime.datetime.combine(
+                    datetime.date.fromisoformat(window_date),
+                    datetime.time(7, 55) if window_name == "morning" else datetime.time(16, 0),
+                    TAIPEI,
+                )
+                actual_deadline = _as_taipei(service.get("windowDeadlineAt"))
+                if actual_deadline != expected_deadline:
+                    raise ValueError("windowDeadlineAt does not match the declared window")
+            except (TypeError, ValueError) as error:
+                issues.append(f"{name} TIME_CONTRACT_INVALID: invalid service window deadline ({error})")
+        elif window_name == "manual" and service.get("windowDeadlineAt") not in (None, ""):
+            issues.append(f"{name} TIME_CONTRACT_INVALID: manual window must not declare a deadline")
+        else:
+            issues.append(f"{name} TIME_CONTRACT_INVALID: unknown service window")
 
     if service.get("status") not in (None, "ok") and not markets:
         issues.append(f"{name} SERVICE_DEGRADED: service status={service.get('status')}")
@@ -115,22 +209,25 @@ def evaluate_skynet_v2(name, payload, now):
     except (TypeError, ValueError) as error:
         issues.append(f"{name} TIME_CONTRACT_INVALID: {error}")
 
-    # Daily update windows run every calendar day, independently of market holidays.
-    expected_window = None
-    if now.hour >= 17:
-        expected_window = (now.date().isoformat(), "afternoon")
-    elif now.hour >= 8:
-        expected_window = (now.date().isoformat(), "morning")
-    if expected_window:
-        actual_window_date = service.get("windowDate")
-        actual_window = service.get("window")
-        # The fallback time determines when we report a missed window, not
-        # whether an earlier successful primary run counts for that window.
-        if (actual_window_date != expected_window[0] or actual_window != expected_window[1]
-                or service.get("status") != "ok"):
-            issues.append(
-                f"{name} UPDATE_WINDOW_MISSED: expected {expected_window[0]} {expected_window[1]} update"
+    # The afternoon trigger starts at 14:45 but its verified completion deadline
+    # is 16:00. Do not mistake a still-running publication for a missed window.
+    today = now.date().isoformat()
+    actual_window_date = service.get("windowDate")
+    actual_window = service.get("window")
+    service_ok = service.get("status") == "ok"
+    if now.hour * 60 + now.minute >= 16 * 60:
+        if actual_window_date != today or actual_window != "afternoon" or not service_ok:
+            issues.append(f"{name} UPDATE_WINDOW_MISSED: expected {today} afternoon update")
+    elif now.hour * 60 + now.minute >= 14 * 60 + 45:
+        if actual_window_date == today and actual_window == "afternoon" and service_ok:
+            pass
+        else:
+            waiting_updates.append(
+                f"{name} {WAITING_UPDATE_PREFIX} afternoon update window remains open until 16:00"
             )
+    elif now.hour * 60 + now.minute >= 7 * 60 + 55:
+        if actual_window_date != today or actual_window != "morning" or not service_ok:
+            issues.append(f"{name} UPDATE_WINDOW_MISSED: expected {today} morning update")
     if service.get("status") not in (None, "ok") and markets:
         detailed_markets = any(
             isinstance(item, dict) and item.get("status") not in ("fresh", "market_closed")
@@ -148,6 +245,7 @@ def evaluate_skynet_v2(name, payload, now):
 
     instrument_markets = {"^TWII": "taiwan", "006208": "taiwan", "^VIX": "us"}
     instrument_issues_by_market = set()
+    waiting_markets = set()
     for symbol, details in instruments.items():
         if not isinstance(details, dict):
             continue
@@ -157,6 +255,19 @@ def evaluate_skynet_v2(name, payload, now):
         instrument_status = details.get("status")
         reason = details.get("reasonCode") or instrument_status or "UNKNOWN"
         if instrument_status not in ("fresh", "market_closed") or actual != expected:
+            market = markets.get(market_key)
+            if _is_transient_session_lag(market_key, market, details, now):
+                try:
+                    deadline = _expected_session_deadline(market_key, market)
+                    waiting_markets.add(market_key)
+                    waiting_label = "Taiwan" if market_key == "taiwan" else "US"
+                    waiting_updates.append(
+                        f"{name} {WAITING_UPDATE_PREFIX} {waiting_label} session {expected} "
+                        f"is still within its publication window until {deadline.strftime('%Y-%m-%d %H:%M')}"
+                    )
+                    continue
+                except (TypeError, ValueError):
+                    pass
             instrument_issues_by_market.add(market_key)
             attempts = details.get("sourceAttempts")
             attempts_text = f" attempts={attempts}" if isinstance(attempts, int) else ""
@@ -202,7 +313,7 @@ def evaluate_skynet_v2(name, payload, now):
         # Prefer per-instrument evidence when the producer supplies it. The
         # aggregate market summary would otherwise repeat the same incident
         # without identifying which instrument is behind.
-        if market_key in instrument_issues_by_market:
+        if market_key in instrument_issues_by_market or market_key in waiting_markets:
             continue
 
         if status in ("fresh", "market_closed"):
@@ -212,13 +323,24 @@ def evaluate_skynet_v2(name, payload, now):
                 )
                 continue
             due_value = market.get("nextDueAt")
-            if due_value:
+            if due_value or market.get("nextUpdateDeadlineAt"):
                 try:
-                    due_at = _as_taipei(due_value)
+                    due_at, deadline_at = _next_update_deadline(market_key, market)
+                    if due_at is None or deadline_at is None:
+                        continue
                     if due_at - now > FUTURE_TIMESTAMP_TOLERANCE and due_at.date() < now.date():
                         issues.append(f"{name} {market_label} TIME_CONTRACT_INVALID: nextDueAt is inconsistent")
-                    elif now > due_at:
-                        issues.append(f"{name} {market_label} MARKET_DATA_STALE: next expected session deadline passed")
+                    elif now >= due_at and now < deadline_at:
+                        waiting_updates.append(
+                            f"{name} {WAITING_UPDATE_PREFIX} {market_label} next session data became available "
+                            f"at {due_at.strftime('%Y-%m-%d %H:%M')}; update deadline "
+                            f"{deadline_at.strftime('%H:%M')}"
+                        )
+                    elif now >= deadline_at:
+                        issues.append(
+                            f"{name} {market_label} MARKET_DATA_STALE: next expected session update deadline "
+                            f"passed at {deadline_at.strftime('%Y-%m-%d %H:%M')}"
+                        )
                 except (TypeError, ValueError) as error:
                     issues.append(f"{name} {market_label} TIME_CONTRACT_INVALID: invalid nextDueAt ({error})")
         elif status == "calendar_unverified":
@@ -248,11 +370,11 @@ def evaluate_skynet_v2(name, payload, now):
             if current.get("status") not in ("unavailable", "stale", "calendar_unverified"):
                 issues.append(f"{name} SOURCE_UNAVAILABLE: source {source} is {state}")
 
-    if payload.get("status") != "ok" and not issues:
+    if payload.get("status") != "ok" and not issues and not waiting_updates:
         issues.append(f"{name} status={payload.get('status', 'missing')}")
 
     # Do not repeat a generic degraded status when an actionable cause is present.
-    return list(dict.fromkeys(issues))
+    return list(dict.fromkeys([*issues, *waiting_updates]))
 
 
 def fetch_status(name, url, now):
@@ -523,11 +645,19 @@ def alert_plan(issues, state, now, repeat_hours=ALERT_REPEAT_HOURS):
     """Select first/24-hour reminder messages and drop incidents that recovered."""
     now = _taipei_time(now)
     previous = normalize_incident_state(state)["active"]
-    current = {}
+    grouped = {}
     due = {}
     for issue in issues:
         key = incident_key(issue)
-        current.setdefault(key, str(issue))
+        grouped.setdefault(key, [])
+        if str(issue) not in grouped[key]:
+            grouped[key].append(str(issue))
+    current = {
+        key: messages[0] if len(messages) == 1 else messages[0] + "\n" + "\n".join(
+            f"  - {message}" for message in messages[1:]
+        )
+        for key, messages in grouped.items()
+    }
     next_state = {}
     for key, issue in current.items():
         prior = previous.get(key)
@@ -630,10 +760,15 @@ def main(dry_run=None, now=None):
     issues = []
     for name, url in ENDPOINTS.items():
         issues.extend(fetch_status(name, url, now))
+    waiting = [issue for issue in issues if f" {WAITING_UPDATE_PREFIX}" in issue]
+    issues = [issue for issue in issues if f" {WAITING_UPDATE_PREFIX}" not in issue]
+    if waiting:
+        print("Health watchdog: waiting for the current publication window:\n" + "\n".join(waiting))
     if not issues:
         if not dry_run:
             save_incident_state({"schemaVersion": STATE_SCHEMA_VERSION, "active": {}})
-        print("Health watchdog: both systems are current and healthy")
+        if not waiting:
+            print("Health watchdog: both systems are current and healthy")
         return 0
     print("Health watchdog found issues:\n" + "\n".join(issues))
     if dry_run:

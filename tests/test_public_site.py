@@ -128,7 +128,7 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertIn("風險摘要", html)
             self.assertIn("Beta", html)
             self.assertIn("質押維持率", html)
-            self.assertIn("僅示範", html)
+            self.assertNotIn("僅示範", html)
             self.assertNotIn('<details class="card health-card" open>', private_html)
             self.assertNotIn("min-height:126px", private_html)
             self.assertNotIn("selectedTreeNode", private_html)
@@ -201,12 +201,13 @@ class PublicSiteSecurityTests(unittest.TestCase):
             public_html = (Path(directory) / "index.html").read_text(encoding="utf-8")
             public_risk = public_html[public_html.index('<section class="card" aria-labelledby="risk-title">'):public_html.index('<footer>')]
             self.assertIn('class="risk-card-label">Beta(NAV)', public_risk)
-            self.assertIn('class="risk-card-status risk-badge risk-unavailable">僅示範', public_risk)
+            self.assertNotIn('class="risk-card-status', public_risk)
             self.assertIn('.risk-badge.risk-good{background:', public_html)
+            self.assertIn('.risk-card-status { display: none !important; }', private_html)
             self.assertIn('betaStatusClasses=[\'risk-good\',\'risk-watch\'', private_html)
             self.assertNotIn("計算依據", public_risk)
             self.assertIn('class="risk-card-label">質押維持率', public_risk)
-            self.assertIn("僅示範", public_risk)
+            self.assertNotIn("僅示範", public_risk)
             self.assertNotIn("1.32", public_risk)
             self.assertNotIn("1,870,000", public_risk)
 
@@ -218,7 +219,12 @@ class PublicSiteSecurityTests(unittest.TestCase):
             self.assertIn("Beta(NAV)", beta_card)
             self.assertIn("半凱利邊界:", beta_card)
             self.assertIn("(使用率：", beta_card)
-            self.assertIn('id="betaStatus"', beta_card)
+            self.assertNotIn('class="risk-card-status', beta_card)
+            maintenance_card = private_html[private_html.index('<div class="risk-box"><label class="risk-card-label">質押維持率'):private_html.index('<div class="risk-group buyhold-group">')]
+            self.assertNotIn('class="risk-card-status', maintenance_card)
+            self.assertIn('id="betaStatus"', private_html)  # Hidden presentation target; API status remains available.
+            self.assertIn('id="maintenanceStatus"', private_html)
+            self.assertIn('.risk-card-status { display: none !important; }', private_html)
             for removed in ("容量：", "計算依據", "risk-evidence", "betaEvidence", "betaDetail", "betaCoverage", 'id="capacity"'):
                 self.assertNotIn(removed, private_html)
 
