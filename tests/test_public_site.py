@@ -21,6 +21,7 @@ class PublicSiteSecurityTests(unittest.TestCase):
         self.assertNotIn("totalAsset", encoded)
         self.assertNotIn("netAsset", encoded)
         self.assertNotIn("assetTree", encoded)
+        self.assertNotIn("riskValidationInputs", encoded)
         self.assertNotIn("006208", encoded)
         self.assertNotIn("QQQM", encoded)
 
@@ -55,6 +56,7 @@ class PublicSiteSecurityTests(unittest.TestCase):
                 self.assertNotIn("006208", content)
                 self.assertNotIn("QQQM", content)
                 self.assertNotIn("assetTree", content)
+                self.assertNotIn("riskValidationInputs", content)
                 self.assertIsNone(re.search(r"NT\$[0-9]", content))
             self.assertIn("telegram.org/js/telegram-web-app.js", html)
             self.assertIn("window.location.replace('./private/')", html)

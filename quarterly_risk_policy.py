@@ -51,6 +51,8 @@ AUTO_VALIDATION_CHECKS = [
     "kelly_formula",
     "close_only_observation_and_official_correction",
     "split_adjustment_applied_once",
+    "explicit_provider_price_basis",
+    "post_cutoff_adjustments_excluded_from_returns",
     "us_issuer_event_window_coverage",
 ]
 
@@ -194,6 +196,14 @@ def _load_research(state_dir: Path, cutoff: date, symbol: str) -> dict[str, Any]
     if not _valid_sealed_cache(payload) or payload.get("dataCutoff") != cutoff.isoformat():
         return None
     result = payload.get("series")
+    if symbol != "TWD=X" and (
+        not isinstance(result, Mapping)
+        or result.get("researchPriceContractVersion") != 2
+    ):
+        # v6 cached rows may already contain a split-adjusted close that was
+        # adjusted a second time. Re-fetch source observations under v7 rather
+        # than promoting a derived historical series as if it were raw data.
+        return None
     valid = _fx_history_is_valid(result, cutoff=cutoff) if symbol == "TWD=X" else _history_is_valid(result)
     return result if valid else None
 
@@ -644,6 +654,7 @@ def ensure_quarterly_risk_policies(
             benchmark_evidence,
             window_start=window_start,
             window_end=window_end,
+            required_event_types=("stock_split", "capital_adjustment", "cash_dividend"),
         )
         kelly_ready = (
             kelly_result.get("status") == "CANDIDATE"

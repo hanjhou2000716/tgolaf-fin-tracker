@@ -145,6 +145,7 @@ jobs:
           TELEGRAM_SEND_ENABLED: ${{ inputs.notification_mode != 'disabled' }}
           GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
           FORCE_TELEGRAM: ${{ inputs.force_telegram || false }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_FUNCTION_URL: ${{ secrets.SUPABASE_FUNCTION_URL }}

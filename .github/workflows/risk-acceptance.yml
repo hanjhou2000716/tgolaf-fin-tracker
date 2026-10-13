@@ -1,0 +1,137 @@
+name: Risk parameter acceptance
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact reviewed commit SHA being accepted
+        required: true
+        type: string
+      effective_quarter:
+        description: Expected policy quarter
+        required: true
+        default: 2026Q4
+        type: string
+      as_of:
+        description: Taiwan policy date; Q4 2026 acceptance uses 2026-10-13
+        required: true
+        default: "2026-10-13"
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: risk-parameter-acceptance-${{ inputs.candidate_sha }}
+  cancel-in-progress: false
+
+jobs:
+  accept:
+    name: Risk parameter acceptance
+    runs-on: ubuntu-24.04
+    environment: risk-acceptance
+    timeout-minutes: 12
+    steps:
+      - name: Validate reviewed candidate identity
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          test "$GITHUB_REF_TYPE" = branch
+          test "$GITHUB_SHA" = "$CANDIDATE_SHA"
+          [[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.candidate_sha }}
+          persist-credentials: false
+
+      - name: Set up production Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: |
+            requirements.lock
+            requirements-test.lock
+
+      - name: Install locked dependencies
+        run: python -m pip install --requirement requirements.lock --requirement requirements-test.lock
+
+      - name: Restore trusted state from a successful main run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p .risk-policy-cache .private-build
+          for run_id in $(gh run list --repo "$GITHUB_REPOSITORY" --workflow cron.yml --branch main --status success --limit 50 --json databaseId --jq '.[].databaseId'); do
+            if gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name quarterly-risk-policy-state --dir .risk-policy-cache; then
+              echo "Trusted policy artifact restored from successful main run $run_id"
+              break
+            fi
+          done
+
+      - name: Read the latest exact private risk snapshot
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_USER_ID: ${{ secrets.SUPABASE_USER_ID }}
+        run: python risk_acceptance_snapshot.py --output .private-build/risk-inputs.private.json
+
+      - name: Rebuild and validate Beta and Kelly without settlement side effects
+        id: validation
+        continue-on-error: true
+        env:
+          SEC_USER_AGENT: ${{ secrets.SEC_USER_AGENT }}
+        run: >-
+          python quarterly_risk_validation.py
+          --snapshot .private-build/risk-inputs.private.json
+          --state-dir .risk-policy-cache
+          --output .private-build/risk-acceptance.private.json
+          --as-of "${{ inputs.as_of }}"
+          --expected-effective-quarter "${{ inputs.effective_quarter }}"
+
+      - name: Ensure a private blocked report exists on source or validation failure
+        if: always()
+        run: |
+          if [ ! -f .private-build/risk-acceptance.private.json ]; then
+            mkdir -p .private-build
+            printf '{"schemaVersion":1,"status":"BLOCKED","reasonCode":"SNAPSHOT_OR_VALIDATION_STAGE_FAILED"}\n' > .private-build/risk-acceptance.private.json
+          fi
+
+      - name: Encrypt detailed private report and create sanitized check output
+        if: always()
+        env:
+          RISK_ACCEPTANCE_ENCRYPTION_KEY: ${{ secrets.RISK_ACCEPTANCE_ENCRYPTION_KEY }}
+        run: >-
+          python risk_acceptance_report.py
+          --report .private-build/risk-acceptance.private.json
+          --candidate-sha "${{ inputs.candidate_sha }}"
+          --encrypted-output .private-build/risk-acceptance.encrypted.json
+          --summary-output .private-build/risk-acceptance-summary.json
+
+      - name: Upload encrypted private acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: risk-acceptance-encrypted-${{ inputs.candidate_sha }}
+          path: .private-build/risk-acceptance.encrypted.json
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload sanitized acceptance marker
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: risk-acceptance-summary-${{ inputs.candidate_sha }}
+          path: .private-build/risk-acceptance-summary.json
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Require actual-data acceptance PASS
+        if: always()
+        run: jq -e '.status == "PASS"' .private-build/risk-acceptance-summary.json >/dev/null
+
+      - name: Remove temporary private snapshot and state
+        if: always()
+        run: rm -rf .private-build .risk-policy-cache
