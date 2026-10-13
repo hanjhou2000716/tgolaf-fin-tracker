@@ -19,6 +19,7 @@ import os
 import re
 import time
 import threading
+import unicodedata
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit
@@ -30,7 +31,7 @@ from risk import estimate_beta_from_returns, quarterly_half_kelly
 
 
 POLICY_SCHEMA_VERSION = 1
-AUTO_VALIDATION_ALGORITHM = "quarterly-risk-v6"
+AUTO_VALIDATION_ALGORITHM = "quarterly-risk-v7"
 AUTO_VALIDATION_REQUIRED_CHECKS = frozenset({
     "point_in_time_cutoff",
     "completed_week_window",
@@ -46,6 +47,8 @@ AUTO_VALIDATION_REQUIRED_CHECKS = frozenset({
     "kelly_formula",
     "close_only_observation_and_official_correction",
     "split_adjustment_applied_once",
+    "explicit_provider_price_basis",
+    "post_cutoff_adjustments_excluded_from_returns",
     "us_issuer_event_window_coverage",
 })
 MIN_WEEKLY_OBSERVATIONS = 104
@@ -136,7 +139,13 @@ def _auto_validation_error(payload: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _valid_corporate_action_evidence(value: Any, *, window_start: date | None = None, window_end: date | None = None) -> bool:
+def _valid_corporate_action_evidence(
+    value: Any,
+    *,
+    window_start: date | None = None,
+    window_end: date | None = None,
+    required_event_types: tuple[str, ...] = ("stock_split", "capital_adjustment"),
+) -> bool:
     if not isinstance(value, Mapping):
         return False
     if not re.fullmatch(r"[0-9a-f]{64}", str(value.get("eventsHash", ""))):
@@ -241,9 +250,13 @@ def _valid_corporate_action_evidence(value: Any, *, window_start: date | None = 
             ):
                 return False
             url = urlsplit(str(filing.get("documentUrl", "")))
-            if url.scheme != "https" or url.hostname not in {"sec.gov", "www.sec.gov"}:
+            if url.scheme != "https" or url.hostname not in {"sec.gov", "www.sec.gov", "ir.tesla.com"}:
                 return False
-            expected_path_prefix = f"/Archives/edgar/data/1318605/{accession.replace('-', '')}/"
+            expected_path_prefix = (
+                f"/_flysystem/s3/sec/{accession.replace('-', '')}/"
+                if url.hostname == "ir.tesla.com"
+                else f"/Archives/edgar/data/1318605/{accession.replace('-', '')}/"
+            )
             if not url.path.startswith(expected_path_prefix) or url.path.endswith("/"):
                 return False
             digest = str(filing.get("contentHash", ""))
@@ -272,9 +285,13 @@ def _valid_corporate_action_evidence(value: Any, *, window_start: date | None = 
     else:
         return False
     requested_events = value.get("requestedEvents")
-    if not isinstance(requested_events, (list, tuple)) or not {"history", "splits", "dividends"}.issubset(
-        {str(item).lower() for item in requested_events}
-    ):
+    if not isinstance(requested_events, (list, tuple)) or "history" not in {str(item).lower() for item in requested_events}:
+        return False
+    verified_event_types = value.get("verifiedEventTypes")
+    if not isinstance(verified_event_types, (list, tuple, set)):
+        return False
+    verified = {str(item).lower() for item in verified_event_types}
+    if not set(required_event_types).issubset(verified):
         return False
     requested_start = _as_date(value.get("requestedStart"))
     requested_end = _as_date(value.get("requestedEnd"))
@@ -285,8 +302,17 @@ def _valid_corporate_action_evidence(value: Any, *, window_start: date | None = 
     if window_end is not None and requested_end < window_end:
         return False
     price_basis = str(value.get("priceBasis", ""))
-    if price_basis not in {"raw-close-plus-official-repair-v1", "raw-close-plus-verified-actions-v1"}:
+    if price_basis not in {
+        "raw-close-plus-official-repair-v1",
+        "raw-close-plus-verified-actions-v1",
+        "split-adjusted-close-plus-official-repair-v2",
+    }:
         return False
+    if price_basis == "split-adjusted-close-plus-official-repair-v2":
+        if _as_date(value.get("providerBasisAsOfDate")) is None:
+            return False
+        if value.get("researchPriceBasis") != "split-adjusted-research-v2":
+            return False
     corrections = value.get("priceCorrections", [])
     if not isinstance(corrections, list):
         return False
@@ -335,6 +361,12 @@ def _parse_taiwan_date(value: Any) -> date | None:
         except ValueError:
             return None
     return _as_date(text)
+
+
+def _normalized_exchange_field(value: Any) -> str:
+    """Normalize exchange headers before matching (e.g. TPEx ``日 期``)."""
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    return re.sub(r"[\s\u3000\u200b\ufeff]+", "", text).casefold()
 
 
 def _official_action_specs(market: str, start: date, end: date) -> tuple[str, list[tuple[str, str, dict[str, str]]]]:
@@ -405,7 +437,7 @@ def _official_rows(payload: Any, *, provider: str, family: str) -> list[tuple[di
             if data:
                 raise ValueError(f"{family}: TPEx data has no field schema")
             continue
-        field_names = [str(field) for field in fields]
+        field_names = [_normalized_exchange_field(field) for field in fields]
         has_symbol = any(("代號" in field or "代碼" in field) for field in field_names)
         has_date = any("日期" in field for field in field_names)
         if not (has_symbol and has_date):
@@ -520,8 +552,8 @@ def fetch_official_taiwan_corporate_actions(
             parsed = _official_rows(raw_payload, provider=provider, family=family)
             response_hashes[family] = response_hash
             for row, _ in parsed:
-                code_key = next((key for key in row if "代號" in key or "代碼" in key), None)
-                event_key = next((key for key in row if "日期" in key), None)
+                code_key = next((key for key in row if "代號" in _normalized_exchange_field(key) or "代碼" in _normalized_exchange_field(key)), None)
+                event_key = next((key for key in row if "日期" in _normalized_exchange_field(key)), None)
                 code = str(row.get(code_key, "")).strip() if code_key else ""
                 if code != _symbol(symbol):
                     continue
@@ -628,7 +660,10 @@ def fetch_official_taiwan_corporate_actions(
             if not math.isfinite(ratio) or ratio <= 0:
                 unsupported.append("twtcau_split_ratio_invalid")
                 continue
-            splits.append({"date": row["__eventDate"], "numerator": ratio, "denominator": 1.0})
+            splits.append({
+                "date": row["__eventDate"], "numerator": ratio, "denominator": 1.0,
+                "adjustmentAlreadyIncluded": True, "source": "TWSE_TWTCAU_PROVIDER_SPLIT_BASIS",
+            })
             events.append(row)
         if unsupported:
             raise ValueError("unsupported official capital-action type: " + "; ".join(unsupported[:8]))
@@ -711,32 +746,48 @@ def fetch_official_taiwan_daily_closes(
         payload, response_hash = _official_payload(getter, url, params, timeout)
         if not isinstance(payload, Mapping):
             raise ValueError("official close response is not an object")
+        response_code = str(payload.get("code", "")).strip()
+        if response_code and response_code != _symbol(symbol):
+            raise ValueError("official close response symbol mismatch")
+        response_date = str(payload.get("date", "")).strip()
+        if response_date:
+            response_month = re.sub(r"\D", "", response_date)[:6]
+            if response_month and response_month != f"{year}{month:02d}":
+                raise ValueError("official close response month mismatch")
         status = str(payload.get("stat", "ok")).strip().lower()
         if status not in {"ok", "success", "查詢日期範圍內無資料".lower()}:
             raise ValueError("official close response status is not complete")
-        tables: list[tuple[list[Any], list[Any]]] = []
+        tables: list[tuple[list[Any], list[Any], str]] = []
         if otc:
             raw_tables = payload.get("tables")
             if not isinstance(raw_tables, list):
                 raise ValueError("TPEx official close tables missing")
             for table in raw_tables:
                 if isinstance(table, Mapping) and isinstance(table.get("fields"), list) and isinstance(table.get("data"), list):
-                    tables.append((table["fields"], table["data"]))
+                    tables.append((table["fields"], table["data"], str(table.get("title", ""))))
         else:
             fields, data = payload.get("fields"), payload.get("data")
             if isinstance(fields, list) and isinstance(data, list):
-                tables.append((fields, data))
+                tables.append((fields, data, ""))
         if not tables:
             raise ValueError("official close fields/data missing")
         found: dict[date, float] = {}
-        for fields, data in tables:
-            date_index = next((index for index, field in enumerate(fields) if "日期" in str(field)), None)
-            close_index = next((index for index, field in enumerate(fields) if "收盤" in str(field) and "漲跌" not in str(field)), None)
-            symbol_index = next((index for index, field in enumerate(fields) if "代號" in str(field) or "代碼" in str(field)), None)
+        matched_table = False
+        for fields, data, title in tables:
+            normalized_fields = [_normalized_exchange_field(field) for field in fields]
+            date_index = next((index for index, field in enumerate(normalized_fields) if "日期" in field), None)
+            close_index = next((index for index, field in enumerate(normalized_fields) if "收盤" in field and "漲跌" not in field), None)
+            symbol_index = next((index for index, field in enumerate(normalized_fields) if "代號" in field or "代碼" in field), None)
             if date_index is None or close_index is None:
                 if data:
+                    # TPEx responses may contain unrelated informational tables.
+                    # Skip only tables clearly unrelated to daily trading data.
+                    normalized_title = _normalized_exchange_field(title) if otc else ""
+                    if otc and normalized_title and "個股日成交資訊" not in normalized_title:
+                        continue
                     raise ValueError("official close date/close columns missing")
                 continue
+            matched_table = True
             for row in data:
                 if not isinstance(row, (list, tuple)) or len(row) != len(fields):
                     raise ValueError("official close row schema mismatch")
@@ -750,7 +801,11 @@ def fetch_official_taiwan_daily_closes(
                     continue
                 if close is None or close <= 0:
                     raise ValueError(f"official close is invalid for {row_date.isoformat()}")
+                if row_date in found and abs(found[row_date] / close - 1) > 1e-9:
+                    raise ValueError(f"official close conflict for {row_date.isoformat()}")
                 found[row_date] = close
+        if not matched_table:
+            raise ValueError("official close daily table schema missing")
         missing = grouped[(year, month)] - set(found)
         if missing:
             raise ValueError("official close missing requested session: " + ",".join(sorted(day.isoformat() for day in missing)))
@@ -790,7 +845,14 @@ def fetch_sec_edgar_corporate_action_evidence(
             "reason": f"no official filing adapter is registered for {key}",
         }
     getter = http_get or requests.get
-    user_agent = os.getenv("SEC_USER_AGENT", "PRStK quarterly risk research")
+    user_agent = os.getenv("SEC_USER_AGENT", "").strip()
+    if not user_agent or not re.search(r"(?:contact\s*[=:]|[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,})", user_agent, re.IGNORECASE):
+        return {
+            "status": "UNVERIFIED", "provider": "SEC EDGAR issuer filings",
+            "reasonCode": "SEC_USER_AGENT_NOT_CONFIGURED",
+            "reason": "a project identifier and contact address are required for SEC access",
+            "requestedStart": start.isoformat(), "requestedEnd": end.isoformat(),
+        }
     headers = {"User-Agent": user_agent, "Accept": "application/json,text/html,text/plain"}
     submissions_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
     try:
@@ -847,13 +909,40 @@ def fetch_sec_edgar_corporate_action_evidence(
             url = f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{accession_path}/{document}"
             with _OFFICIAL_SOURCE_SEMAPHORE:
                 document_response = getter(url, headers={"User-Agent": user_agent}, timeout=timeout)
-                document_response.raise_for_status()
+                status_code = int(getattr(document_response, "status_code", 200))
+                if status_code == 403:
+                    # Tesla republishes filed documents on its official IR
+                    # domain. The mirror is transport-only; identity, accession,
+                    # complete window and content hashes remain mandatory.
+                    mirror_url = (
+                        "https://ir.tesla.com/_flysystem/s3/sec/"
+                        f"{accession_path}/{document}"
+                    )
+                    document_response = getter(
+                        mirror_url,
+                        headers={"User-Agent": user_agent, "Accept": "text/html,application/pdf"},
+                        timeout=timeout,
+                    )
+                    mirror_status = int(getattr(document_response, "status_code", 200))
+                    if mirror_status >= 400:
+                        raise ValueError(f"issuer mirror returned HTTP {mirror_status}")
+                    url = mirror_url
+                else:
+                    document_response.raise_for_status()
             body = getattr(document_response, "text", None)
             if body is None:
                 content = getattr(document_response, "content", b"")
                 body = content.decode("utf-8", errors="replace") if isinstance(content, bytes) else str(content)
             if not body.strip():
                 raise ValueError("SEC filing document is empty")
+            response_url = str(getattr(document_response, "url", url) or url)
+            response_host = urlsplit(response_url).hostname
+            if "ir.tesla.com/_flysystem/s3/sec/" in url and response_host not in {None, "ir.tesla.com"}:
+                raise ValueError("issuer mirror redirected outside Tesla Investor Relations")
+            if "ir.tesla.com/_flysystem/s3/sec/" in url and not re.search(
+                r"Tesla(?:,?\s+Inc\.?|\s+Motors,?\s+Inc\.?)|0001318605", body, re.IGNORECASE
+            ):
+                raise ValueError("issuer mirror document identity is not Tesla")
             return accession, url, body
 
         documents: list[tuple[Mapping[str, Any], str, str, str]] = []
@@ -900,6 +989,7 @@ def fetch_sec_edgar_corporate_action_evidence(
             "status": "NO_EVENTS_VERIFIED",
             "provider": "SEC EDGAR issuer filings",
             "issuerCik": cik,
+            "verifiedEventTypes": ["stock_split", "capital_adjustment", "cash_dividend"],
             "events": {"splits": [], "dividends": [], "reviewManifest": review_manifest},
             "sourceFamilies": sorted({"submissions", *(str(row["form"]) for row in selected)}),
             "sourceResponseHashes": evidence_hashes,
@@ -930,18 +1020,21 @@ def fetch_yahoo_research_series(
     timeout: float = 12,
     sleep_fn: Any = time.sleep,
 ) -> dict[str, Any]:
-    """Fetch raw OHLC and explicit events for candidate construction.
+    """Fetch Yahoo split-adjusted closes, OHLC diagnostics, and action evidence.
 
-    This endpoint is used only as a raw-history transport.  The returned
-    contract never reads ``adjclose`` and always exposes a normalized research
-    price generated by :func:`normalize_research_price`.
+    Yahoo Chart ``quote.close`` is treated as split-adjusted at the provider's
+    current share basis.  The returned contract never reads ``adjclose`` and
+    declares this basis before applying any separately verified capital action.
     """
     getter = http_get or requests.get
     failures: list[str] = []
     # Yahoo daily bars are timestamped against each instrument's exchange
     # timezone. Widen transport bounds, then crop on those local dates.
+    provider_basis_as_of = max(end, datetime.now(ZoneInfo("Asia/Taipei")).date())
     period1 = int(datetime.combine(start - timedelta(days=2), datetime.min.time(), tzinfo=timezone.utc).timestamp())
-    period2 = int(datetime.combine(end + timedelta(days=3), datetime.min.time(), tzinfo=timezone.utc).timestamp())
+    # Ask for action metadata through today's provider basis, while cropping
+    # every price observation to the requested point-in-time window below.
+    period2 = int(datetime.combine(provider_basis_as_of + timedelta(days=3), datetime.min.time(), tzinfo=timezone.utc).timestamp())
     chart_symbols = yahoo_chart_symbols(symbol, market)
     attempt_limit = max(1, attempts)
     per_symbol_attempts = (
@@ -1022,11 +1115,12 @@ def fetch_yahoo_research_series(
                         })
                         if str(market).lower() in {"tw", "taiwan", "twd"}:
                             official_repair_dates.append(item_date)
-                        rows.append({"date": item_date.isoformat(), "close": close_value})
+                        rows.append({"date": item_date.isoformat(), "close": close_value, "priceBasis": "split-adjusted-as-of-provider-v1"})
                     else:
                         rows.append({
                             "date": item_date.isoformat(), "open": open_value,
                             "high": high_value, "low": low_value, "close": close_value,
+                            "priceBasis": "split-adjusted-as-of-provider-v1",
                         })
                 price_corrections: list[dict[str, Any]] = []
                 if official_repair_dates:
@@ -1037,14 +1131,10 @@ def fetch_yahoo_research_series(
                         )
                     except Exception as error:  # noqa: BLE001 - keep the exact official repair failure
                         raise ValueError(f"OFFICIAL_CLOSE_REPAIR_UNAVAILABLE:{type(error).__name__}:{error}") from error
-                    corrected = {item["date"]: item["officialClose"] for item in price_corrections}
-                    for row in rows:
-                        if row["date"] in corrected:
-                            row["yahooClose"] = row["close"]
-                            row["close"] = corrected[row["date"]]
-                            row["closeSource"] = "official_exchange_correction"
+                corrected = {item["date"]: item["officialClose"] for item in price_corrections}
                 price_evidence = {
-                    "priceBasis": "raw-close-plus-official-repair-v1",
+                    "priceBasis": "split-adjusted-close-plus-official-repair-v2",
+                    "providerBasisAsOfDate": provider_basis_as_of.isoformat(),
                     "ohlcDiagnostics": ohlc_diagnostics,
                     "corrections": price_corrections,
                     "correctionsHash": _canonical_hash(price_corrections),
@@ -1081,6 +1171,7 @@ def fetch_yahoo_research_series(
                 raw_events = result.get("events")
                 events = raw_events if isinstance(raw_events, Mapping) else {}
                 splits = []
+                provider_splits = []
                 for item in (events.get("splits") or {}).values():
                     if not isinstance(item, Mapping):
                         raise ValueError("invalid split event evidence")
@@ -1089,13 +1180,18 @@ def fetch_yahoo_research_series(
                     if event_timestamp is None or numerator is None or denominator is None or numerator <= 0 or denominator <= 0:
                         raise ValueError("invalid split event evidence")
                     event_date = datetime.fromtimestamp(event_timestamp, tz=timezone.utc).astimezone(source_tz).date()
-                    if not start <= event_date <= end:
+                    if event_date < start or event_date > provider_basis_as_of:
                         continue
-                    splits.append({
+                    split = {
                         "date": event_date.isoformat(),
                         "numerator": numerator,
                         "denominator": denominator,
-                    })
+                        "adjustmentAlreadyIncluded": True,
+                        "source": "Yahoo Chart split-adjusted close",
+                    }
+                    provider_splits.append(split)
+                    if event_date <= end:
+                        splits.append(split)
                 dividends = []
                 for item in (events.get("dividends") or {}).values():
                     if not isinstance(item, Mapping):
@@ -1122,7 +1218,7 @@ def fetch_yahoo_research_series(
                     if official_evidence.get("status") in {"EVENTS_VERIFIED", "NO_EVENTS_VERIFIED"}:
                         official_events = official_evidence["events"]
                         dividends = official_events.get("dividends", [])
-                        splits = official_events.get("splits", [])
+                        splits = list(splits) + list(official_events.get("splits", []))
                         action_payload = official_events
                     else:
                         action_payload = dict(events)
@@ -1137,9 +1233,32 @@ def fetch_yahoo_research_series(
                             if not isinstance(official_events, Mapping):
                                 raise ValueError("SEC issuer event evidence omitted the reviewed event manifest")
                             action_payload = dict(official_events)
-                            splits = list(action_payload.get("splits", []))
+                            splits = list(splits) + list(action_payload.get("splits", []))
                             dividends = list(action_payload.get("dividends", []))
-                normalized = normalize_research_price(rows, splits=splits, dividends=dividends)
+                # Official daily closes are unadjusted exchange observations.
+                # Convert repaired points to Yahoo's already split-adjusted
+                # share basis using verified provider split events after that day.
+                for row in rows:
+                    if row.get("date") not in corrected:
+                        continue
+                    correction_date = _as_date(row.get("date"))
+                    share_basis_factor = 1.0
+                    for split in provider_splits:
+                        split_date = _as_date(split.get("date"))
+                        numerator, denominator = _finite(split.get("numerator")), _finite(split.get("denominator"))
+                        if split_date and correction_date and split_date > correction_date and numerator and denominator:
+                            share_basis_factor *= denominator / numerator
+                    row["yahooClose"] = row["close"]
+                    row["close"] = corrected[row["date"]] * share_basis_factor
+                    row["closeSource"] = "official_exchange_correction_provider_basis"
+                normalized = normalize_research_price(
+                    rows,
+                    splits=[*provider_splits, *splits],
+                    dividends=dividends,
+                    price_basis="split-adjusted-as-of-provider-v1",
+                    price_basis_as_of=provider_basis_as_of,
+                    research_cutoff=end,
+                )
                 if not normalized:
                     raise ValueError("empty normalized research series")
                 series_hash = _canonical_hash(normalized)
@@ -1165,7 +1284,10 @@ def fetch_yahoo_research_series(
                         "requestedEnd": end.isoformat(),
                         "verifiedAt": datetime.now(timezone.utc).isoformat(),
                         "requestedEvents": ["history", "splits", "dividends"],
+                        "verifiedEventTypes": official_evidence.get("verifiedEventTypes", ["stock_split", "capital_adjustment", "cash_dividend"]),
                         "priceBasis": price_evidence["priceBasis"],
+                        "providerBasisAsOfDate": price_evidence["providerBasisAsOfDate"],
+                        "researchPriceBasis": "split-adjusted-research-v2",
                         "priceCorrections": price_evidence["corrections"],
                         "priceCorrectionsHash": price_evidence["correctionsHash"],
                         "priceDiagnosticsHash": _canonical_hash(price_evidence["ohlcDiagnostics"]),
@@ -1185,9 +1307,15 @@ def fetch_yahoo_research_series(
                         "requestedEnd": end.isoformat(),
                         "verifiedAt": datetime.now(timezone.utc).isoformat(),
                         "requestedEvents": ["history", "splits", "dividends"],
+                        "verifiedEventTypes": sorted({
+                            *(["stock_split", "capital_adjustment"] if splits else []),
+                            *(["cash_dividend"] if dividends else []),
+                        }),
                         "eventCount": event_count,
                         "eventCounts": {"splits": len(splits), "dividends": len(dividends)},
                         "priceBasis": price_evidence["priceBasis"],
+                        "providerBasisAsOfDate": price_evidence["providerBasisAsOfDate"],
+                        "researchPriceBasis": "split-adjusted-research-v2",
                         "priceCorrections": price_evidence["corrections"],
                         "priceCorrectionsHash": price_evidence["correctionsHash"],
                         "priceDiagnosticsHash": _canonical_hash(price_evidence["ohlcDiagnostics"]),
@@ -1197,9 +1325,10 @@ def fetch_yahoo_research_series(
                     "market": str(market).lower(),
                     "currency": "USD" if str(market).lower() in {"us", "usa", "usd"} else "TWD",
                     "rows": normalized,
+                    "researchPriceContractVersion": 2,
                     "status": "READY",
                     "corporateActionEvents": action_payload,
-                    "source": f"Yahoo Chart raw OHLC ({chart_symbol}) + research-price contract v1",
+                    "source": f"Yahoo Chart split-adjusted close ({chart_symbol}) + research-price contract v2",
                     "corporateActionStatus": "PASS" if corporate_evidence else "UNAVAILABLE",
                     "corporateActionEvidence": corporate_evidence,
                     "priceEvidence": price_evidence,
@@ -1475,15 +1604,33 @@ def normalize_research_price(
     *,
     splits: Any = None,
     dividends: Any = None,
+    price_basis: str | None = None,
+    price_basis_as_of: date | str | None = None,
+    research_cutoff: date | str | None = None,
 ) -> list[dict[str, Any]]:
-    """Create split-adjusted and point-in-time total-return prices.
+    """Create one research price series without applying any split twice.
 
-    Input rows must contain a date and a raw executable ``close``.  Split
-    factors are applied only to dates before the event; dividends are added on
-    the event date when building the total-return index.  Conflicting dates or
-    invalid prices are rejected instead of being silently overwritten.
+    Legacy callers default to raw closes.  Providers that return historical
+    closes already adjusted for splits must explicitly set
+    ``split-adjusted-as-of-provider-v1``.  Capital adjustments not included in
+    the provider's close remain applicable when their evidence says so.
     """
-    split_events: dict[date, float] = {}
+    supported_basis = {"raw-close-v1", "split-adjusted-as-of-provider-v1"}
+    row_bases = {str(row.get("priceBasis")) for row in rows or [] if isinstance(row, Mapping) and row.get("priceBasis")}
+    if price_basis is None:
+        if len(row_bases) > 1:
+            raise ValueError("research series mixes incompatible source price bases")
+        price_basis = next(iter(row_bases), "raw-close-v1")
+    if price_basis not in supported_basis or (row_bases and row_bases != {price_basis}):
+        raise ValueError("research series price basis is missing or inconsistent")
+    basis_date = _as_date(price_basis_as_of)
+    if price_basis_as_of is not None and basis_date is None:
+        raise ValueError("research series price-basis as-of date is invalid")
+    cutoff_date = _as_date(research_cutoff)
+    if research_cutoff is not None and cutoff_date is None:
+        raise ValueError("research series cutoff date is invalid")
+
+    split_events: dict[date, tuple[float, bool, str]] = {}
     split_items = splits.values() if isinstance(splits, Mapping) else splits if isinstance(splits, (list, tuple)) else []
     for item in split_items:
         if not isinstance(item, Mapping):
@@ -1495,17 +1642,30 @@ def normalize_research_price(
         if direct_factor is None:
             direct_factor = _finite(item.get("factor"))
         numerator, denominator = _finite(item.get("numerator")), _finite(item.get("denominator"))
+        already_included = item.get("adjustmentAlreadyIncluded") is True
+        event_source = str(item.get("source", "unspecified"))
         if direct_factor is not None and direct_factor > 0:
-            split_events[event_date] = direct_factor
+            factor = direct_factor
         elif numerator is not None and denominator is not None and numerator > 0 and denominator > 0:
-            # Provider ratios are shares-after / shares-before; multiply
-            # pre-event closes by the reciprocal exactly once.
-            split_events[event_date] = denominator / numerator
+            factor = denominator / numerator
         else:
             ratio = _finite(item.get("ratio") or item.get("splitRatio"))
             if ratio is not None and ratio > 0:
-                split_events[event_date] = ratio
+                factor = ratio
+            else:
+                continue
+        if event_date in split_events and split_events[event_date][0] != factor:
+            raise ValueError(f"conflicting price adjustment factors for {event_date.isoformat()}")
+        split_events[event_date] = (factor, already_included, event_source)
     dividend_events = _event_rows(dividends, value_keys=("amount", "dividend", "cashAmount", "value"))
+    cash_flow_split_factors: dict[date, float] = {}
+    for item in split_items:
+        if not isinstance(item, Mapping):
+            continue
+        event_date = _as_date(item.get("date") or item.get("exDate") or item.get("ex_date"))
+        numerator, denominator = _finite(item.get("numerator")), _finite(item.get("denominator"))
+        if event_date is not None and numerator is not None and denominator is not None and numerator > 0 and denominator > 0:
+            cash_flow_split_factors[event_date] = denominator / numerator
 
     by_date: dict[date, tuple[float, Mapping[str, Any]]] = {}
     for row in rows or []:
@@ -1520,6 +1680,7 @@ def normalize_research_price(
         by_date[item_date] = (close, row)
     if not by_date:
         raise ValueError("research series has no valid raw closes")
+    cutoff_date = cutoff_date or max(by_date)
 
     result: list[dict[str, Any]] = []
     total_return: float | None = None
@@ -1527,14 +1688,25 @@ def normalize_research_price(
     for item_date in sorted(by_date):
         raw_close = by_date[item_date][0]
         split_factor = 1.0
-        for event_date, factor in split_events.items():
-            if item_date < event_date:
+        applied_events = []
+        reversed_post_cutoff_events = []
+        for event_date, (factor, included, event_source) in split_events.items():
+            if item_date < event_date and included and event_date > cutoff_date:
+                split_factor *= 1 / factor
+                reversed_post_cutoff_events.append({"date": event_date.isoformat(), "source": event_source, "factor": 1 / factor})
+            elif item_date < event_date and not included and event_date <= cutoff_date:
                 split_factor *= factor
+                applied_events.append({"date": event_date.isoformat(), "source": event_source, "factor": factor})
         adjusted_close = raw_close * split_factor
         if previous_adjusted is None:
             total_return = adjusted_close
         else:
             dividend = dividend_events.get(item_date, 0.0)
+            # Express historical per-share cash flows in the same share-count
+            # basis as the close series after later stock splits.
+            for event_date, factor in cash_flow_split_factors.items():
+                if item_date < event_date <= cutoff_date:
+                    dividend *= factor
             total_return *= (adjusted_close + dividend) / previous_adjusted
         previous_adjusted = adjusted_close
         result.append({
@@ -1547,6 +1719,15 @@ def normalize_research_price(
             "closeSource": by_date[item_date][1].get("closeSource", "yahoo"),
             "splitAdjustedClose": adjusted_close,
             "totalReturnIndex": total_return,
+            "sourcePriceBasis": price_basis,
+            "priceBasisAsOf": basis_date.isoformat() if basis_date else None,
+            "researchPriceBasis": "split-adjusted-research-v2",
+            "adjustmentsIncluded": [
+                {"date": event_date.isoformat(), "source": event_source, "factor": factor}
+                for event_date, (factor, included, event_source) in sorted(split_events.items()) if included
+            ],
+            "adjustmentsApplied": applied_events,
+            "postCutoffAdjustmentsReversed": reversed_post_cutoff_events,
         })
     return result
 

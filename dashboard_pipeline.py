@@ -2631,6 +2631,22 @@ def main():
         "derivedPriceReplayCount": ledger_audit["derivedPriceReplayCount"],
         "conflictCount": ledger_audit["conflictCount"],
     }
+    # Private, exact inputs used by this same NAV Beta calculation. This is
+    # stored only in the authenticated private snapshot for read-only quarterly
+    # acceptance; it is never part of the public Demo contract.
+    risk_validation_inputs = {
+        "schemaVersion": 1,
+        "asOf": generated_at,
+        "inventory": _serialize_inventory(inventory),
+        "assetValuesTwd": beta_values,
+        "totalAsset": total_asset,
+        "totalDebt": total_debt,
+        "marketBySymbol": market_by_symbol,
+    }
+    risk_validation_inputs["inputHash"] = hashlib.sha256(
+        json.dumps(risk_validation_inputs, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    data_for_web["riskValidationInputs"] = risk_validation_inputs
     # Private data is retained only in the ignored build directory. GitHub
     # Pages receives a separate fixed Demo contract and never sees this
     # payload. Supabase Auth + RLS will replace this local handoff in P0-SEC-02.

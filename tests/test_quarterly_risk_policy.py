@@ -15,7 +15,7 @@ from quarterly_risk_policy import (
     inventory_symbol_markets,
     promote_beta_candidate_if_qualified,
 )
-from quarterly_risk_validation import validate_snapshot_readonly
+from quarterly_risk_validation import _precision_reasons, validate_snapshot_readonly
 
 
 def _research_series(symbol, market, start, cutoff):
@@ -32,6 +32,7 @@ def _research_series(symbol, market, start, cutoff):
             "close": price,
             "splitAdjustedClose": price,
             "totalReturnIndex": price,
+            "priceBasis": "split-adjusted-as-of-provider-v1",
         })
     series_hash = _canonical_hash(rows)
     if symbol == "TWD=X":
@@ -70,7 +71,10 @@ def _research_series(symbol, market, start, cutoff):
         "verifiedAt": "2026-10-05T01:00:00Z",
         "requestedEvents": ["history", "splits", "dividends"],
         "eventCounts": {"splits": 0, "dividends": 0},
-        "priceBasis": "raw-close-plus-verified-actions-v1",
+        "verifiedEventTypes": ["stock_split", "capital_adjustment", "cash_dividend"],
+        "priceBasis": "split-adjusted-close-plus-official-repair-v2",
+        "providerBasisAsOfDate": cutoff.isoformat(),
+        "researchPriceBasis": "split-adjusted-research-v2",
         "priceCorrections": [],
     }
     return {
@@ -83,6 +87,7 @@ def _research_series(symbol, market, start, cutoff):
         "corporateActionEvidence": evidence,
         "corporateActionEvents": events,
         "seriesHash": series_hash,
+        "researchPriceContractVersion": 2,
     }
 
 
@@ -258,7 +263,7 @@ class QuarterlyRiskPolicyTests(unittest.TestCase):
             path.write_text(json.dumps(payload), encoding="utf-8")
             self.assertIsNone(_candidate_cache(path, cutoff=date(2026, 9, 30)))
 
-    def test_v5_recent_failure_does_not_cool_down_v6_candidate_rebuild(self):
+    def test_v6_recent_failure_does_not_cool_down_v7_candidate_rebuild(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             state_dir, candidate_dir = root / "state", root / "audit"
@@ -290,9 +295,55 @@ class QuarterlyRiskPolicyTests(unittest.TestCase):
                 fetcher=fetcher,
             )
             self.assertIn("TEST", calls)
-            self.assertEqual(summary["algorithmVersion"], "quarterly-risk-v6")
+            self.assertEqual(summary["algorithmVersion"], "quarterly-risk-v7")
             candidate = json.loads((candidate_dir / "beta-policy-candidate.json").read_text(encoding="utf-8"))
-            self.assertEqual(candidate["algorithmVersion"], "quarterly-risk-v6")
+            self.assertEqual(candidate["algorithmVersion"], "quarterly-risk-v7")
+
+    def test_rounded_readonly_snapshot_blocks_uncertain_risk_boundaries(self):
+        snapshot = {
+            "inputPrecision": "rounded-asset-tree-v1",
+            "roundingErrorBoundTwd": 0.05,
+            "totalAsset": 1_000_000,
+            "totalDebt": 0,
+            "assetValuesTwd": {"KNOWN": 950_000, "UNKNOWN": 10_000},
+        }
+        material = _precision_reasons(snapshot, {
+            "coveragePct": 99.0,
+            "missing": [{"symbol": "UNKNOWN", "valueTwd": 10_000}],
+        })
+        self.assertIn("MATERIALITY_BOUNDARY_AMBIGUOUS", material)
+        coverage = _precision_reasons(snapshot, {
+            "coveragePct": 95.0,
+            "missing": [],
+        })
+        self.assertIn("COVERAGE_BOUNDARY_AMBIGUOUS", coverage)
+        self.assertEqual(_precision_reasons({"inputPrecision": "exact-runtime-inputs-v1"}, {}), [])
+        self.assertEqual(_precision_reasons({"inputPrecision": "unknown"}, {}), ["INPUT_PRECISION_UNSUPPORTED"])
+
+    def test_readonly_parameter_validation_blocks_rounded_legacy_snapshot_at_boundary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            def fetcher(symbol, *, market, start, end, token=None):
+                return _research_series(symbol, market, start, end)
+
+            result = validate_snapshot_readonly(
+                {
+                    "inventory": {"台股": {"006208": 100}, "美股": {}, "基金": {"FUND": 1}},
+                    "assetValuesTwd": {"006208": 990_000, "FUND": 10_000},
+                    "totalAsset": 1_000_000,
+                    "totalDebt": 0,
+                    "marketBySymbol": {"006208": "tw"},
+                    "inputPrecision": "rounded-asset-tree-v1",
+                    "roundingErrorBoundTwd": 0.05,
+                },
+                state_dir=Path(directory) / "trusted-state",
+                today=date(2026, 10, 7),
+                now=datetime(2026, 10, 7, tzinfo=timezone.utc),
+                fetcher=fetcher,
+            )
+            self.assertEqual(result["status"], "BLOCKED")
+            self.assertEqual(result["beta"]["precisionStatus"], "BLOCKED")
+            self.assertIn("MATERIALITY_BOUNDARY_AMBIGUOUS", result["beta"]["precisionReasons"])
+            self.assertIsNone(result["beta"]["navBeta"])
 
     def test_v2_sealed_activation_candidate_cannot_be_promoted(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -411,7 +462,7 @@ class QuarterlyRiskPolicyTests(unittest.TestCase):
                 now=datetime(2026, 10, 7, tzinfo=timezone.utc),
                 fetcher=fetcher,
             )
-            self.assertEqual(result["status"], "PASS")
+            self.assertEqual(result["status"], "PASS", result)
             self.assertEqual(result["beta"]["formalStatus"], "READY")
             self.assertIsNotNone(result["beta"]["navBeta"])
             self.assertEqual(result["beta"]["coveragePct"], 100.0)
