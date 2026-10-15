@@ -44,6 +44,43 @@ class SettlementPricingTests(unittest.TestCase):
         self.assertEqual(result.accepted, ())
         self.assertEqual(len(result.pending), 1)
 
+    def test_historical_quote_for_wrong_date_is_not_used(self):
+        quote = type("Quote", (), {
+            "price": 55.3,
+            "is_stale": False,
+            "fallback_used": False,
+            "source": "official close",
+            "as_of": "2026-08-16T00:00:00+08:00",
+        })()
+        result = enrich_missing_trade_prices([trade()], lambda _: quote)
+        self.assertEqual(result.accepted, ())
+        self.assertEqual(len(result.pending), 1)
+        self.assertIn("quote date does not match", result.pending[0].compatibility_used)
+
+    def test_exact_date_historical_quote_is_audited(self):
+        quote = type("Quote", (), {
+            "price": 55.3,
+            "is_stale": False,
+            "fallback_used": False,
+            "source": "official close",
+            "as_of": "2026-08-15T00:00:00+08:00",
+        })()
+        result = enrich_missing_trade_prices([trade()], lambda _: quote)
+        self.assertEqual(result.pending, ())
+        self.assertIn("as_of=2026-08-15", result.accepted[0].compatibility_used)
+
+    def test_exact_date_quote_evidence_hash_is_preserved_in_ledger_marker(self):
+        quote = type("Quote", (), {
+            "price": 55.3,
+            "is_stale": False,
+            "fallback_used": False,
+            "source": "official close",
+            "as_of": "2026-08-15T00:00:00+08:00",
+            "evidence_hash": "a" * 64,
+        })()
+        result = enrich_missing_trade_prices([trade()], lambda _: quote)
+        self.assertIn(f"evidence_sha256={'a' * 64}", result.accepted[0].compatibility_used)
+
     def test_existing_price_and_non_trade_are_unchanged(self):
         priced = trade(price=Decimal("50"))
         deposit = Transaction(**{**trade(Action.DEPOSIT).__dict__, "asset_type": "現金_TWD", "symbol": "TWD", "unit": "TWD"})

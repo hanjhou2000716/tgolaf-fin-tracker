@@ -70,6 +70,40 @@ class SettlementHealthTests(unittest.TestCase):
         self.assertEqual(result["healthStatus"], "UNHEALTHY")
         self.assertIn("SETTLEMENT_NOTIFICATION_NOT_CONFIRMED", result["reasonCodes"])
 
+    def test_partial_input_is_unhealthy_but_successfully_evaluated(self):
+        result = build_settlement_health(
+            {
+                "status": "ok",
+                "ledgerAudit": {"status": "OK"},
+                "ingestionHealth": {"status": "DEGRADED", "reasonCode": "TRANSACTION_REJECTED"},
+            },
+            {"portfolio": {"risk": {
+                "beta": {"status": "READY", "policyStatus": "READY", "validationStatus": "AUTO_VALIDATED", "marketQuotesFresh": True},
+                "kelly": {"status": "READY", "approvalStatus": "AUTO_VALIDATED"},
+            }}},
+            {"status": "SENT", "notificationType": "settlement", "messageKind": "partial_update", "windowDate": "2026-10-15", "window": "tw"},
+            window_date="2026-10-15", window="tw",
+        )
+        self.assertEqual(result["executionStatus"], "COMPLETED")
+        self.assertEqual(result["settlementStatus"], "INCOMPLETE")
+        self.assertEqual(result["completionStatus"], "INCOMPLETE")
+        self.assertEqual(result["dataStatus"], "UNHEALTHY")
+        self.assertTrue(result["partialUpdate"])
+        self.assertEqual(result["completionReasonCodes"], ["INGESTION_NOT_READY"])
+
+    def test_suppressed_partial_alert_requires_a_confirmed_prior_receipt(self):
+        result = build_settlement_health(
+            {"status": "ok", "ledgerAudit": {"status": "OK"}, "ingestionHealth": {"status": "DEGRADED"}},
+            {"portfolio": {"risk": {
+                "beta": {"status": "READY", "policyStatus": "READY", "validationStatus": "AUTO_VALIDATED", "marketQuotesFresh": True},
+                "kelly": {"status": "READY", "approvalStatus": "AUTO_VALIDATED"},
+            }}},
+            {"status": "SUPPRESSED", "notificationType": "settlement", "messageKind": "partial_update", "priorReceipt": {"status": "SENT"}, "windowDate": "2026-10-15", "window": "tw"},
+            window_date="2026-10-15", window="tw",
+        )
+        self.assertEqual(result["notificationStatus"], "SUPPRESSED")
+        self.assertNotIn("SETTLEMENT_NOTIFICATION_NOT_CONFIRMED", result["reasonCodes"])
+
 
 if __name__ == "__main__":
     unittest.main()

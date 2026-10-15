@@ -49,6 +49,26 @@ class WorkflowCompletionTests(unittest.TestCase):
         health = {"completionStatus": "INCOMPLETE", "completionReasonCodes": ["SETTLEMENT_NOTIFICATION_NOT_CONFIRMED"]}
         self.assertIn("SETTLEMENT_STAGES_NOT_COMPLETE", completion_errors(env, {}, health))
 
+    def test_evaluated_partial_input_with_matching_alert_does_not_fail_job(self):
+        env = {"BUILD_RESULT": "success", "DEPLOY_RESULT": "success", "PUBLICATION_RESULT": "success",
+               "REQUIRE_NOTIFICATION": "true", "EXPECTED_DATE": "2026-10-15", "EXPECTED_WINDOW": "tw"}
+        notification = {"status": "SENT", "notificationType": "settlement", "messageKind": "partial_update",
+                        "windowDate": "2026-10-15", "window": "tw"}
+        health = {"executionStatus": "COMPLETED", "completionStatus": "INCOMPLETE", "settlementStatus": "INCOMPLETE",
+                  "partialUpdate": True, "completionReasonCodes": ["INGESTION_NOT_READY"]}
+        self.assertEqual(completion_errors(env, notification, health), [])
+
+    def test_suppressed_partial_alert_needs_original_receipt(self):
+        env = {"BUILD_RESULT": "success", "DEPLOY_RESULT": "success", "PUBLICATION_RESULT": "success",
+               "REQUIRE_NOTIFICATION": "true", "EXPECTED_DATE": "2026-10-15", "EXPECTED_WINDOW": "tw"}
+        notification = {"status": "SUPPRESSED", "notificationType": "settlement", "messageKind": "partial_update",
+                        "windowDate": "2026-10-15", "window": "tw", "priorReceipt": {"status": "SENT"}}
+        health = {"executionStatus": "COMPLETED", "completionStatus": "INCOMPLETE", "settlementStatus": "INCOMPLETE",
+                  "partialUpdate": True, "completionReasonCodes": ["INGESTION_NOT_READY"]}
+        self.assertEqual(completion_errors(env, notification, health), [])
+        notification["priorReceipt"] = {"status": "DELIVERY_UNKNOWN"}
+        self.assertIn("NOTIFICATION_NOT_CONFIRMED", completion_errors(env, notification, health))
+
     def test_out_of_window_manual_run_does_not_require_settlement_notification(self):
         env = {"BUILD_RESULT": "success", "DEPLOY_RESULT": "success", "PUBLICATION_RESULT": "success",
                "REQUIRE_NOTIFICATION": "false"}

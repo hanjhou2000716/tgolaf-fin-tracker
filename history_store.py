@@ -6,6 +6,7 @@ operator-maintained columns untouched.
 """
 
 import json
+from datetime import datetime, timedelta, timezone
 
 from sheets_retry import retry_sheet_operation
 
@@ -253,3 +254,92 @@ def schema_drift_alert_sent(history_sheet, digest):
 def mark_schema_drift_alert_sent(history_sheet, snapshot_date, digest, sent_at):
     """Record a schema-shape digest after a successful Telegram send."""
     _mark_alert_digest(history_sheet, snapshot_date, digest, sent_at, "Schema_Drift_Alert_Marker")
+
+
+def _latest_transaction_alert_marker(history_sheet):
+    if history_sheet is None:
+        raise RuntimeError("transaction ingestion alert state is unavailable")
+    header_map = build_header_map(retry_sheet_operation("history.row_values", history_sheet.row_values, 1))
+    marker_column = header_map.get("Transaction_Ingestion_Alert_Marker")
+    if not marker_column:
+        raise RuntimeError("transaction ingestion alert marker column is missing")
+    rows = retry_sheet_operation("history.get_all_values", history_sheet.get_all_values)
+    for row_number in range(len(rows), 1, -1):
+        row = rows[row_number - 1]
+        raw = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
+        if not raw:
+            continue
+        try:
+            markers = json.loads(raw)
+        except json.JSONDecodeError as error:
+            raise RuntimeError("transaction ingestion alert marker is malformed") from error
+        if not isinstance(markers, dict):
+            raise RuntimeError("transaction ingestion alert marker has unknown format")
+        return row_number, marker_column, markers
+    dated_rows = [
+        index + 1 for index, row in enumerate(rows[1:], start=1)
+        if row and str(row[0]).strip()
+    ]
+    if not dated_rows:
+        return None, marker_column, {}
+    return dated_rows[-1], marker_column, {}
+
+
+def transaction_ingestion_alert_receipts(history_sheet, incident_keys, *, now, cooldown_hours=24):
+    """Return recent, confirmed incident receipts; corrupt state fails closed."""
+    _, _, markers = _latest_transaction_alert_marker(history_sheet)
+    current = datetime.fromisoformat(str(now).replace("Z", "+00:00"))
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    receipts = {}
+    for key in incident_keys:
+        value = markers.get(key)
+        if value is None or (isinstance(value, dict) and value.get("status") == "RESOLVED"):
+            continue
+        if not isinstance(value, dict) or value.get("status") != "SENT":
+            raise RuntimeError("transaction ingestion alert marker has unknown state")
+        try:
+            sent_at = datetime.fromisoformat(str(value.get("sentAt", "")).replace("Z", "+00:00"))
+        except ValueError as error:
+            raise RuntimeError("transaction ingestion alert marker timestamp is malformed") from error
+        if sent_at.tzinfo is None:
+            sent_at = sent_at.replace(tzinfo=timezone.utc)
+        if current - sent_at.astimezone(current.tzinfo) < timedelta(hours=cooldown_hours):
+            receipts[key] = value
+    return receipts
+
+
+def mark_transaction_ingestion_alert_sent(history_sheet, incident_keys, *, sent_at, message_id):
+    """Persist issue receipts only after Telegram confirms delivery."""
+    row_number, marker_column, markers = _latest_transaction_alert_marker(history_sheet)
+    if row_number is None:
+        raise RuntimeError("transaction ingestion alert history row is missing")
+    for key in incident_keys:
+        markers[key] = {"status": "SENT", "sentAt": sent_at, "messageId": str(message_id)}
+    markers = dict(list(markers.items())[-80:])
+    retry_sheet_operation(
+        "history.update",
+        history_sheet.update,
+        f"{column_to_a1(marker_column)}{row_number}",
+        [[json.dumps(markers, ensure_ascii=False, separators=(",", ":"))]],
+    )
+
+
+def resolve_transaction_ingestion_alerts(history_sheet, active_incident_keys, *, resolved_at):
+    """Reset cleared incidents so a later recurrence is notified immediately."""
+    row_number, marker_column, markers = _latest_transaction_alert_marker(history_sheet)
+    if row_number is None:
+        return
+    active = set(active_incident_keys or ())
+    changed = False
+    for key, value in list(markers.items()):
+        if key not in active and isinstance(value, dict) and value.get("status") == "SENT":
+            markers[key] = {"status": "RESOLVED", "sentAt": value.get("sentAt"), "resolvedAt": resolved_at}
+            changed = True
+    if changed:
+        retry_sheet_operation(
+            "history.update",
+            history_sheet.update,
+            f"{column_to_a1(marker_column)}{row_number}",
+            [[json.dumps(markers, ensure_ascii=False, separators=(",", ":"))]],
+        )
