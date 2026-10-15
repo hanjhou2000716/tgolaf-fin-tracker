@@ -20,15 +20,36 @@ def completion_errors(env=None, notification=None, settlement_health=None, quart
             errors.append("SETTLEMENT_RESULT_MISSING")
         elif settlement_health.get("completionStatus") != "COMPLETE":
             completion_reasons = settlement_health.get("completionReasonCodes", [])
-            errors.append("SETTLEMENT_STAGES_NOT_COMPLETE")
-            errors.extend(completion_reasons or ["SETTLEMENT_COMPLETION_UNVERIFIED"])
+            evaluated_partial_input = (
+                settlement_health.get("executionStatus") == "COMPLETED"
+                and settlement_health.get("partialUpdate") is True
+                and set(completion_reasons) == {"INGESTION_NOT_READY"}
+                and isinstance(notification, dict)
+                and notification.get("status") in {"SENT", "SUPPRESSED"}
+                and notification.get("messageKind") == "partial_update"
+                and notification.get("notificationType") == "settlement"
+                and notification.get("windowDate") == env.get("EXPECTED_DATE")
+                and notification.get("window") == env.get("EXPECTED_WINDOW")
+                and (notification.get("status") != "SUPPRESSED" or (
+                    isinstance(notification.get("priorReceipt"), dict)
+                    and notification["priorReceipt"].get("status") == "SENT"
+                ))
+            )
+            if not evaluated_partial_input:
+                errors.append("SETTLEMENT_STAGES_NOT_COMPLETE")
+                errors.extend(completion_reasons or ["SETTLEMENT_COMPLETION_UNVERIFIED"])
         if not isinstance(notification, dict):
             errors.append("NOTIFICATION_RESULT_MISSING")
         elif (
-            notification.get("status") != "SENT"
+            notification.get("status") not in {"SENT", "SUPPRESSED"}
             or notification.get("notificationType") != "settlement"
             or notification.get("windowDate") != env.get("EXPECTED_DATE")
             or notification.get("window") != env.get("EXPECTED_WINDOW")
+            or (notification.get("status") == "SUPPRESSED" and (
+                notification.get("messageKind") != "partial_update"
+                or not isinstance(notification.get("priorReceipt"), dict)
+                or notification["priorReceipt"].get("status") != "SENT"
+            ))
         ):
             errors.append(str(notification.get("reasonCode") or "NOTIFICATION_NOT_CONFIRMED"))
     return errors

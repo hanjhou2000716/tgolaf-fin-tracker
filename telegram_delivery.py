@@ -41,7 +41,7 @@ def _canonical_json(value: Any) -> bytes:
 
 def encrypt_outbox(envelope: dict[str, Any], *, telegram_token: str, google_credentials: str) -> dict[str, Any]:
     metadata = {key: envelope.get(key) for key in (
-        "schemaVersion", "notificationType", "windowDate", "window", "sourceCommit", "runId"
+        "schemaVersion", "notificationType", "messageKind", "windowDate", "window", "sourceCommit", "runId"
     )}
     nonce = os.urandom(12)
     ciphertext = AESGCM(_outbox_key(telegram_token, google_credentials)).encrypt(
@@ -59,7 +59,7 @@ def decrypt_outbox(value: dict[str, Any], *, telegram_token: str, google_credent
     if not isinstance(value, dict) or value.get("encryption") != "AES-256-GCM/HKDF-SHA256":
         raise ValueError("outbox encryption format is unsupported")
     metadata = {key: value.get(key) for key in (
-        "schemaVersion", "notificationType", "windowDate", "window", "sourceCommit", "runId"
+        "schemaVersion", "notificationType", "messageKind", "windowDate", "window", "sourceCommit", "runId"
     )}
     try:
         plaintext = AESGCM(_outbox_key(telegram_token, google_credentials)).decrypt(

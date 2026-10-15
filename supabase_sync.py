@@ -6,10 +6,13 @@ import math
 import os
 import re
 from collections import Counter
+from dataclasses import replace
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 import requests
 from ledger import transaction_payload
+from transaction_schema import Action
 
 
 class TransactionSyncResult(str):
@@ -80,7 +83,7 @@ def _inventory_has_value(inventory: dict) -> bool:
     return False
 
 
-def _valid_private_snapshot_payload(payload: dict) -> bool:
+def _valid_private_snapshot_payload(payload: dict, *, allow_incomplete_ingestion=False) -> bool:
     """Validate the minimum safety contract for LKG and snapshot writes."""
     if not isinstance(payload, dict):
         return False
@@ -93,6 +96,14 @@ def _valid_private_snapshot_payload(payload: dict) -> bool:
     if not isinstance(inventory, dict) or not _REQUIRED_INVENTORY_BUCKETS.issubset(inventory):
         return False
     portfolio = payload.get("portfolio") if isinstance(payload.get("portfolio"), dict) else {}
+    ingestion = portfolio.get("transactionIngestion")
+    ingestion_health = ingestion.get("ingestionHealth") if isinstance(ingestion, dict) else None
+    if (
+        not allow_incomplete_ingestion
+        and isinstance(ingestion_health, dict)
+        and str(ingestion_health.get("status", "")).upper() == "DEGRADED"
+    ):
+        return False
     total_asset = portfolio.get("totalAsset")
     if total_asset is not None:
         try:
@@ -101,6 +112,71 @@ def _valid_private_snapshot_payload(payload: dict) -> bool:
         except (TypeError, ValueError):
             return False
     return _inventory_has_value(inventory)
+
+
+def _read_complete_transaction_ledger(client, url, headers, *, page_size=1000):
+    """Read the full immutable ledger or fail closed on an incomplete page set."""
+    rows = []
+    seen_ids = set()
+    expected_total = None
+    offset = 0
+    for _ in range(10000):
+        response = client.get(
+            url,
+            headers={
+                **headers,
+                "Range-Unit": "items",
+                "Range": f"{offset}-{offset + page_size - 1}",
+                "Prefer": "count=exact",
+            },
+            params={
+                "user_id": f"eq.{os.getenv('SUPABASE_USER_ID', '').strip()}",
+                "select": "transaction_id,source_row_id,payload",
+                "order": "transaction_id.asc",
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        page = response.json()
+        if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
+            raise ValueError("Supabase transaction ledger response is malformed")
+        content_range = getattr(response, "headers", {}).get("Content-Range", "")
+        if str(content_range).strip() == "*/0":
+            if offset != 0 or page:
+                raise ValueError("Supabase transaction ledger empty range is inconsistent")
+            return rows
+        match = re.fullmatch(r"(\d+)-(\d+)/(\d+|\*)", str(content_range).strip())
+        if match:
+            start, end, total = match.groups()
+            start, end = int(start), int(end)
+            if start != offset or end - start + 1 != len(page):
+                raise ValueError("Supabase transaction ledger page is incomplete")
+            if total != "*":
+                total = int(total)
+                if expected_total is None:
+                    expected_total = total
+                elif expected_total != total:
+                    raise RuntimeError("Supabase transaction ledger changed during preflight")
+        elif content_range:
+            raise ValueError("Supabase transaction ledger range is malformed")
+
+        for row in page:
+            transaction_id = str(row.get("transaction_id") or "")
+            if not transaction_id or transaction_id in seen_ids:
+                raise ValueError("Supabase transaction ledger contains a missing or duplicate identity")
+            seen_ids.add(transaction_id)
+        rows.extend(page)
+        offset += len(page)
+        if expected_total is not None:
+            if offset >= expected_total:
+                if offset != expected_total:
+                    raise ValueError("Supabase transaction ledger exceeded its reported row count")
+                return rows
+            if not page:
+                raise ValueError("Supabase transaction ledger ended before its reported row count")
+        elif len(page) < page_size:
+            return rows
+    raise RuntimeError("Supabase transaction ledger exceeded the safe pagination limit")
 
 
 def _is_derived_price(payload: dict) -> bool:
@@ -257,6 +333,26 @@ def _derived_price_replay(previous: dict, current: dict) -> bool:
     if not _is_derived_price(current) or not _is_derived_price(previous):
         return False
     return _canonical_event(previous, include_price=False) == _canonical_event(current, include_price=False)
+
+
+def _unpriced_current_trade_replay(previous: dict, current: dict) -> bool:
+    """Restore an existing ledger price for a V3 trade whose form omits price.
+
+    Form V3 intentionally carries no成交價. If the immutable row identity and
+    every other transaction fact match, its stored price is canonical and must
+    be restored before reducers instead of fetching a newer close.
+    """
+    if (
+        _canonical_action(current.get("action")) not in {"BUY", "SELL"}
+        or current.get("price") not in (None, "")
+        or previous.get("price") in (None, "")
+    ):
+        return False
+    prior_event = _canonical_event(previous, include_price=False)
+    current_event = _canonical_event(current, include_price=False)
+    prior_event.pop("price_mode", None)
+    current_event.pop("price_mode", None)
+    return prior_event == current_event
 
 
 def _legacy_mixed_derived_price_replay(previous: dict, current: dict) -> bool:
@@ -529,7 +625,7 @@ def upload_private_snapshot(path: str, *, session=None) -> str:
     generated_at = snapshot.get("generatedAt")
     if not generated_at:
         raise ValueError("Private snapshot is missing generatedAt")
-    if not _valid_private_snapshot_payload(snapshot):
+    if not _valid_private_snapshot_payload(snapshot, allow_incomplete_ingestion=True):
         # Never replace a known-good row with an empty/degraded result.  This
         # is intentionally non-fatal so the public Demo can still deploy and
         # the caller can emit a deduplicated operational warning.
@@ -602,7 +698,102 @@ def load_private_snapshot(*, session=None) -> dict | None:
     return None
 
 
-def upload_private_transactions(transactions, *, session=None) -> str:
+def load_private_transaction_ledger(*, session=None):
+    """Read the immutable ledger before rebuilding cash and holdings.
+
+    ``None`` means private synchronization is intentionally unconfigured. If
+    credentials are configured, a read error propagates so historical trades
+    cannot silently be re-priced from today's quote.
+    """
+    config = _required_config()
+    required = os.getenv("SUPABASE_PRIVATE_SYNC_REQUIRED", "false").lower() in {"1", "true", "yes", "on"}
+    if not all(config.values()):
+        if required:
+            raise RuntimeError("Supabase transaction ledger is required but credentials are missing")
+        return None
+    headers = {"apikey": config["service_role_key"], "Authorization": f"Bearer {config['service_role_key']}"}
+    return _read_complete_transaction_ledger(
+        session or requests,
+        f"{config['url']}/rest/v1/portfolio_transactions",
+        headers,
+    )
+
+
+def restore_canonical_ledger_transactions(transactions, existing_rows):
+    """Restore canonical prices before reducer application and quarantine conflicts."""
+    rows = list(existing_rows or [])
+    existing = {
+        str(row.get("transaction_id") or ""): row.get("payload") or {}
+        for row in rows if row.get("transaction_id")
+    }
+    existing_by_source = {
+        str(row.get("source_row_id")): row.get("payload") or {}
+        for row in rows if row.get("source_row_id")
+    }
+    existing_by_fingerprint = {}
+    for existing_id, prior in existing.items():
+        if isinstance(prior, dict):
+            existing_by_fingerprint.setdefault(transaction_fingerprint(prior), (existing_id, prior))
+
+    safe, conflicts = [], []
+    for transaction in transactions:
+        payload = transaction_payload(transaction)
+        payload["source_fingerprint_version"] = _FINGERPRINT_VERSION
+        payload["source_fingerprint"] = transaction_fingerprint(payload)
+        previous = existing.get(str(transaction.transaction_id))
+        matched = None
+        if isinstance(previous, dict):
+            if (
+                previous == payload
+                or _metadata_only_replay(previous, payload)
+                or _unpriced_current_trade_replay(previous, payload)
+                or _derived_price_replay(previous, payload)
+                or _legacy_mixed_derived_price_replay(previous, payload)
+                or transaction_fingerprint(previous) == payload["source_fingerprint"]
+                or _same_legacy_reconciliation(previous, payload)
+            ):
+                matched = previous
+            else:
+                fingerprint_match = existing_by_fingerprint.get(payload["source_fingerprint"])
+                if fingerprint_match and fingerprint_match[0] != str(transaction.transaction_id):
+                    matched = fingerprint_match[1]
+                else:
+                    conflicts.append(_conflict_record(payload, previous))
+                    continue
+        else:
+            fingerprint_match = existing_by_fingerprint.get(payload["source_fingerprint"])
+            if fingerprint_match:
+                matched = fingerprint_match[1]
+            else:
+                source_match = existing_by_source.get(str(transaction.source_row_id))
+                if source_match is not None:
+                    conflicts.append(_conflict_record(payload, source_match))
+                    continue
+
+        if matched is not None:
+            raw_price = matched.get("price")
+            if raw_price not in (None, ""):
+                try:
+                    canonical_price = Decimal(str(raw_price))
+                except (InvalidOperation, TypeError, ValueError):
+                    conflicts.append(_conflict_record(payload, matched))
+                    continue
+                if not canonical_price.is_finite() or canonical_price <= 0:
+                    conflicts.append(_conflict_record(payload, matched))
+                    continue
+                transaction = replace(
+                    transaction,
+                    price=canonical_price,
+                    compatibility_used=matched.get("compatibility_used") or transaction.compatibility_used,
+                )
+            elif transaction.action in {Action.BUY, Action.SELL} and transaction.price is not None:
+                conflicts.append(_conflict_record(payload, matched))
+                continue
+        safe.append(transaction)
+    return tuple(safe), tuple(conflicts)
+
+
+def upload_private_transactions(transactions, *, session=None, existing_rows=None) -> str:
     """Append transactions without overwriting existing ledger entries.
 
     Existing UUIDs are compared before inserts. A matching replay is ignored.
@@ -634,21 +825,21 @@ def upload_private_transactions(transactions, *, session=None) -> str:
         "Content-Type": "application/json",
     }
     http = session or requests
-    response = http.get(
-        f"{config['url']}/rest/v1/portfolio_transactions",
-        headers=headers,
-        params={
-            "user_id": f"eq.{config['user_id']}",
-            "select": "transaction_id,source_row_id,payload",
-        },
-        timeout=20,
-    )
-    response.raise_for_status()
-    existing = {str(row["transaction_id"]): row.get("payload", {}) for row in response.json()}
+    if existing_rows is None:
+        existing_rows = _read_complete_transaction_ledger(
+            http,
+            f"{config['url']}/rest/v1/portfolio_transactions",
+            headers,
+        )
+    if not isinstance(existing_rows, list):
+        raise ValueError("Supabase transaction ledger snapshot is malformed")
+    existing = {
+        str(row["transaction_id"]): row.get("payload", {})
+        for row in existing_rows if row.get("transaction_id")
+    }
     existing_source_rows = {
         str(row.get("source_row_id")): row.get("payload", {})
-        for row in response.json()
-        if row.get("source_row_id")
+        for row in existing_rows if row.get("source_row_id")
     }
     existing_by_fingerprint = {}
     existing_by_derived_core = {}

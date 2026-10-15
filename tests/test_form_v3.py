@@ -32,6 +32,22 @@ class FormV3Tests(unittest.TestCase):
         self.assertEqual((tx.action, tx.asset_type, tx.symbol, tx.quantity, tx.unit, tx.currency),
                          (Action.BUY, "台股", "006208", Decimal("1000"), "SHARE", "TWD"))
 
+    def test_taiwan_etf_letter_suffixes_normalize_without_changing_currency(self):
+        for symbol in ("00685L", "00632R", "00679B", "00980A", "００６８５ｌ"):
+            with self.subTest(symbol=symbol):
+                tx = self.parse(row("台股", symbol, "買入", "張", "1"))
+                self.assertEqual(tx.symbol, "00685L" if symbol == "００６８５ｌ" else symbol)
+                self.assertEqual((tx.quantity, tx.currency, tx.asset_type), (Decimal("1000"), "TWD", "台股"))
+        collateral = self.parse(row("擔保品", "00632R", "存入", "股", "100"))
+        self.assertEqual((collateral.symbol, collateral.currency), ("00632R", "TWD"))
+
+    def test_symbol_keeps_leading_zero_and_rejects_unsupported_suffix(self):
+        tx = self.parse(row("台股", "００６２０８", "買入", "股", "100"))
+        self.assertEqual(tx.symbol, "006208")
+        result = parse_form_v3_rows(HEADERS, [row("台股", "00685LL", "買入", "股", "1")], source_sheet="CURRENT")
+        self.assertEqual(result.accepted, ())
+        self.assertEqual(result.rejected[0].reason, "INVALID_SYMBOL")
+
     def test_us_fractional_and_replacement_zero(self):
         tx = self.parse(row("美股", "QQQM", "買入", "股", "12.5"))
         self.assertEqual((tx.asset_type, tx.currency, tx.quantity), ("美股", "USD", Decimal("12.5")))

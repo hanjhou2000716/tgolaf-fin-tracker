@@ -7,7 +7,10 @@ from history_store import (
     ledger_conflict_alert_sent,
     mark_ledger_conflict_alert_sent,
     mark_schema_drift_alert_sent,
+    mark_transaction_ingestion_alert_sent,
+    resolve_transaction_ingestion_alerts,
     schema_drift_alert_sent,
+    transaction_ingestion_alert_receipts,
     upsert_history_snapshot,
 )
 
@@ -121,6 +124,33 @@ class HistoryStoreTests(unittest.TestCase):
         ])
         mark_schema_drift_alert_sent(sheet, "2026-08-24", "blocked-a", "2026-08-24T05:40:00+08:00")
         self.assertTrue(schema_drift_alert_sent(sheet, "blocked-a"))
+
+    def test_transaction_incident_alert_has_24_hour_cooldown_and_recovery_reset(self):
+        sheet = FakeHistorySheet([
+            ["Date", "Transaction_Ingestion_Alert_Marker"],
+            ["2026-10-15", "{}"],
+        ])
+        key = "stable-incident-key"
+        self.assertEqual(transaction_ingestion_alert_receipts(
+            sheet, [key], now="2026-10-15T05:40:00+00:00"), {})
+        mark_transaction_ingestion_alert_sent(
+            sheet, [key], sent_at="2026-10-15T05:40:00+00:00", message_id="123")
+        recent = transaction_ingestion_alert_receipts(
+            sheet, [key], now="2026-10-15T14:45:00+00:00")
+        self.assertEqual(recent[key]["messageId"], "123")
+        self.assertEqual(transaction_ingestion_alert_receipts(
+            sheet, [key], now="2026-10-16T06:00:00+00:00"), {})
+        resolve_transaction_ingestion_alerts(sheet, [], resolved_at="2026-10-15T16:00:00+00:00")
+        self.assertEqual(transaction_ingestion_alert_receipts(
+            sheet, [key], now="2026-10-15T16:01:00+00:00"), {})
+
+    def test_ingestion_alert_marker_corruption_fails_closed(self):
+        sheet = FakeHistorySheet([
+            ["Date", "Transaction_Ingestion_Alert_Marker"],
+            ["2026-10-15", "{not-json"],
+        ])
+        with self.assertRaisesRegex(RuntimeError, "malformed"):
+            transaction_ingestion_alert_receipts(sheet, ["key"], now="2026-10-15T05:40:00+00:00")
 
 
 if __name__ == "__main__":

@@ -45,6 +45,13 @@ jobs:
         run: |
           python -m unittest discover -s tests -p 'test_beta_policy.py' -v
           python -m unittest discover -s tests -p 'test_telegram_delivery.py' -v
+          python -m unittest discover -s tests -p 'test_form_v3.py' -v
+          python -m unittest discover -s tests -p 'test_transaction_ingestion_repair.py' -v
+          python -m unittest discover -s tests -p 'test_settlement_pricing.py' -v
+          python -m unittest discover -s tests -p 'test_supabase_sync.py' -v
+          python -m unittest discover -s tests -p 'test_settlement_health.py' -v
+          python -m unittest discover -s tests -p 'test_history_store.py' -v
+          python -m unittest discover -s tests -p 'test_workflow_completion.py' -v
       - name: Validate Pages publisher CLI on production Python
         if: matrix.python-version == '3.10.22'
         run: python pages_publication.py --help

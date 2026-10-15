@@ -552,9 +552,13 @@ class Quote:
     is_stale: bool
     fallback_used: bool
     quality: str
+    evidence_hash: str | None = None
 
     def as_dict(self):
-        return self.__dict__.copy()
+        result = self.__dict__.copy()
+        if result.get("evidence_hash") is None:
+            result.pop("evidence_hash", None)
+        return result
 
 
 class MarketDataService:

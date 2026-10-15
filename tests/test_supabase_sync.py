@@ -7,7 +7,7 @@ from unittest.mock import patch
 from datetime import date
 from decimal import Decimal
 
-from supabase_sync import load_goal_state, load_private_snapshot, save_goal_state, transaction_fingerprint, upload_private_snapshot, upload_private_transactions
+from supabase_sync import _read_complete_transaction_ledger, load_goal_state, load_private_snapshot, restore_canonical_ledger_transactions, save_goal_state, transaction_fingerprint, upload_private_snapshot, upload_private_transactions
 from transaction_schema import Action, Transaction
 
 
@@ -73,6 +73,51 @@ class SupabaseSyncTests(unittest.TestCase):
             },
         }
 
+    def test_immutable_ledger_preflight_reads_all_pages(self):
+        values = [{"transaction_id": f"id-{index:04d}", "payload": {}} for index in range(1001)]
+
+        class PagedResponse(FakeResponse):
+            def __init__(self, payload, content_range):
+                super().__init__(payload)
+                self.headers = {"Content-Range": content_range}
+
+        class PagedSession:
+            def __init__(self):
+                self.calls = []
+
+            def get(self, url, *, headers, params, timeout):
+                self.calls.append((headers["Range"], params["order"]))
+                start, end = (int(value) for value in headers["Range"].split("-"))
+                page = values[start : min(end + 1, len(values))]
+                content_range = f"{start}-{start + len(page) - 1}/{len(values)}"
+                return PagedResponse(page, content_range)
+
+        session = PagedSession()
+        rows = _read_complete_transaction_ledger(
+            session, "https://example.invalid/ledger", {"apikey": "test"}
+        )
+        self.assertEqual(len(rows), 1001)
+        self.assertEqual(session.calls, [("0-999", "transaction_id.asc"), ("1000-1999", "transaction_id.asc")])
+
+    def test_immutable_ledger_preflight_rejects_changing_total(self):
+        class ChangingSession:
+            def __init__(self):
+                self.calls = 0
+
+            def get(self, url, *, headers, params, timeout):
+                self.calls += 1
+                class Response(FakeResponse):
+                    pass
+                page = [{"transaction_id": f"id-{index}", "payload": {}} for index in range(1000)] if self.calls == 1 else [{"transaction_id": "id-last", "payload": {}}]
+                response = Response(page)
+                response.headers = {"Content-Range": "0-999/1001" if self.calls == 1 else "1000-1000/1002"}
+                return response
+
+        with self.assertRaisesRegex(RuntimeError, "changed during preflight"):
+            _read_complete_transaction_ledger(
+                ChangingSession(), "https://example.invalid/ledger", {"apikey": "test"}
+            )
+
     def test_zero_or_degraded_snapshot_is_not_uploaded(self):
         env = {
             "SUPABASE_URL": "https://example.supabase.co",
@@ -102,6 +147,27 @@ class SupabaseSyncTests(unittest.TestCase):
         }])
         with patch.dict(os.environ, env, clear=True):
             self.assertIsNone(load_private_snapshot(session=session))
+
+    def test_partial_ingestion_snapshot_is_visible_but_never_lkg(self):
+        env = {
+            "SUPABASE_URL": "https://example.supabase.co",
+            "SUPABASE_SERVICE_ROLE_KEY": "server-only-key",
+            "SUPABASE_USER_ID": "00000000-0000-0000-0000-000000000001",
+            "SUPABASE_PRIVATE_SYNC_REQUIRED": "true",
+        }
+        payload = self.valid_snapshot()
+        payload["portfolio"]["transactionIngestion"] = {
+            "ingestionHealth": {"status": "DEGRADED", "reasonCode": "TRANSACTION_REJECTED"},
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "partial.private.json"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                session = FakeSession()
+                self.assertEqual(upload_private_snapshot(str(path), session=session), "uploaded")
+                self.assertEqual(len(session.calls), 1)
+            latest = FakeSession(existing=[{"generated_at": payload["generatedAt"], "payload": payload}])
+            self.assertIsNone(load_private_snapshot(session=latest))
 
     def test_snapshot_with_only_debt_or_pledge_rate_is_not_a_recoverable_lkg(self):
         env = {
@@ -739,6 +805,39 @@ class SupabaseSyncTests(unittest.TestCase):
         self.assertIn("on_conflict=user_id", post_url[0])
         self.assertEqual(get_kwargs["headers"]["Authorization"], "Bearer server-only-key")
         self.assertEqual(post_kwargs["json"]["state"], state)
+
+    def test_preflight_restores_immutable_historical_quote_before_reducer(self):
+        from ledger import transaction_payload
+
+        canonical = Transaction(**{
+            **sample_transaction().__dict__,
+            "price": Decimal("50"),
+            "compatibility_used": "settlement_quote_estimate:FinMind:as_of=2026-08-04",
+        })
+        replay = Transaction(**{**canonical.__dict__, "price": Decimal("61")})
+        existing = [{
+            "transaction_id": canonical.transaction_id,
+            "source_row_id": canonical.source_row_id,
+            "payload": transaction_payload(canonical),
+        }]
+        restored, conflicts = restore_canonical_ledger_transactions([replay], existing)
+        self.assertEqual(conflicts, ())
+        self.assertEqual(restored[0].price, Decimal("50"))
+
+    def test_preflight_quarantines_financial_fact_conflict(self):
+        from ledger import transaction_payload
+
+        canonical = sample_transaction("100")
+        changed = Transaction(**{**canonical.__dict__, "quantity": Decimal("101")})
+        existing = [{
+            "transaction_id": canonical.transaction_id,
+            "source_row_id": canonical.source_row_id,
+            "payload": transaction_payload(canonical),
+        }]
+        restored, conflicts = restore_canonical_ledger_transactions([changed], existing)
+        self.assertEqual(restored, ())
+        self.assertEqual(len(conflicts), 1)
+        self.assertEqual(conflicts[0]["reason"], "immutable_ledger_conflict")
 
     def test_missing_goal_state_table_is_non_blocking_by_default(self):
         env = {

@@ -8,8 +8,9 @@ never classified as investment P&L or external cash flow.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+import re
 from typing import Any, Mapping
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -183,16 +184,112 @@ def _is_cash_set_balance(transaction: Transaction) -> bool:
     )
 
 
-def build_ingestion_status(*, accepted=(), pending=(), rejected=(), compatibility=()) -> list[dict[str, Any]]:
+def transaction_order_key(transaction: Transaction):
+    """Sort by the full submitted timestamp, then numeric source row and ID."""
+    raw = str(transaction.submitted_at or "").strip()
+    parsed = None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone(timedelta(hours=8)))
+        parsed = parsed.astimezone(timezone.utc)
+    except ValueError:
+        parsed = None
+    match = re.search(
+        r"(\d{4})[/-](\d{1,2})[/-](\d{1,2}).*?(上午|下午|AM|PM)?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?",
+        raw,
+        re.IGNORECASE,
+    )
+    if parsed is None and match:
+        year, month, day, meridiem, hour, minute, second = match.groups()
+    elif parsed is None:
+        match = re.search(
+            r"(\d{1,2})[/-](\d{1,2})[/-](\d{4}).*?(上午|下午|AM|PM)?\s*(\d{1,2}):(\d{2})(?::(\d{2}))?",
+            raw,
+            re.IGNORECASE,
+        )
+        if match:
+            month, day, year, meridiem, hour, minute, second = match.groups()
+        else:
+            year = month = day = meridiem = hour = minute = second = None
+    else:
+        year = month = day = meridiem = hour = minute = second = None
+    if parsed is None and year is not None:
+        hour = int(hour)
+        normalized_meridiem = str(meridiem or "").upper()
+        if normalized_meridiem in {"下午", "PM"} and hour < 12:
+            hour += 12
+        elif normalized_meridiem in {"上午", "AM"} and hour == 12:
+            hour = 0
+        try:
+            parsed = datetime(
+                int(year), int(month), int(day), hour, int(minute), int(second or 0),
+                tzinfo=timezone(timedelta(hours=8)),
+            )
+            parsed = parsed.astimezone(timezone.utc)
+        except ValueError:
+            parsed = None
+    if parsed is None:
+        try:
+            parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.astimezone(timezone.utc)
+        except ValueError:
+            parsed = datetime.combine(transaction.transaction_date, time.min, tzinfo=timezone.utc)
+    source_row = str(transaction.source_row_id or "")
+    row_match = re.search(r":(\d+)$", source_row)
+    row_number = int(row_match.group(1)) if row_match else 0
+    return parsed, row_number, source_row, str(transaction.transaction_id or "")
+
+
+def build_ingestion_status(
+    *, accepted=(), pending=(), rejected=(), compatibility=(), source_role="CURRENT"
+) -> list[dict[str, Any]]:
     """Return the latest status rows without exposing submitter email."""
     rows: list[dict[str, Any]] = []
-    rows.extend(command_from_transaction(item).ingestion_payload() for item in accepted)
-    rows.extend(command_from_transaction(item).ingestion_payload() for item in pending)
+    rows.extend({**command_from_transaction(item).ingestion_payload(), "sourceRole": source_role} for item in accepted)
+    for item in pending:
+        marker = str(item.compatibility_used or "")
+        if marker.startswith("settlement_quote_pending:"):
+            detail = marker.partition(":")[2]
+            reason_code, reason = (
+                ("TRADE_DATE_QUOTE_MISMATCH", "找不到與交易日期相符的收盤價")
+                if detail == "quote date does not match transaction date"
+                else ("TRADE_DATE_QUOTE_UNAVAILABLE", "交易日期收盤價尚無法驗證")
+            )
+            stage = "price"
+        else:
+            reason_code, reason, stage = "APPROVAL_PENDING", "交易尚待核准", "approval"
+        rows.append({
+            **command_from_transaction(item).ingestion_payload(),
+            "status": CommandStatus.PENDING,
+            "sourceRole": source_role,
+            "processingStage": stage,
+            "reasonCode": reason_code,
+            "reason": reason,
+        })
     for item in rejected:
         detail = item.detail or item.reason
-        rows.append({"sourceRowId": item.source_row_id, "status": CommandStatus.REJECTED, "reason": detail, "reasonCode": item.reason, "detail": detail})
-    rows.extend(item.ingestion_payload() if isinstance(item, TransactionCommand) else item for item in compatibility)
-    return rows[-3:]
+        rows.append({
+            "sourceRowId": item.source_row_id,
+            "submittedAt": item.submitted_at,
+            "symbol": item.symbol,
+            "status": CommandStatus.REJECTED,
+            "reason": detail,
+            "reasonCode": item.reason,
+            "detail": detail,
+            "processingStage": item.stage or "parse",
+            "inputHash": item.input_hash,
+            "sourceRole": source_role,
+        })
+    rows.extend(
+        {**item.ingestion_payload(), "sourceRole": source_role}
+        if isinstance(item, TransactionCommand)
+        else {**item, "sourceRole": item.get("sourceRole", source_role)}
+        for item in compatibility
+    )
+    return rows
 
 
 def build_ingestion_contract(rows, *, schema="CURRENT", ingestion_health=None) -> dict[str, Any]:
@@ -203,13 +300,29 @@ def build_ingestion_contract(rows, *, schema="CURRENT", ingestion_health=None) -
     pipeline from a pipeline that ran successfully but quarantined bad input.
     """
     rows = list(rows or [])
-    summary = {
-        "applied": sum(1 for row in rows if row.get("status") in {CommandStatus.APPLIED, CommandStatus.APPLIED_WITH_COMPATIBILITY}),
-        "pending": sum(1 for row in rows if row.get("status") == CommandStatus.PENDING),
-        "rejected": sum(1 for row in rows if row.get("status") == CommandStatus.REJECTED),
-    }
+    current_rows = [row for row in rows if str(row.get("sourceRole") or "CURRENT").upper() == "CURRENT"]
+    legacy_rows = [row for row in rows if str(row.get("sourceRole") or "CURRENT").upper() == "LEGACY_ARCHIVE"]
+
+    def summarize(source_rows):
+        return {
+            "applied": sum(1 for row in source_rows if row.get("status") in {CommandStatus.APPLIED, CommandStatus.APPLIED_WITH_COMPATIBILITY}),
+            "pending": sum(1 for row in source_rows if row.get("status") == CommandStatus.PENDING),
+            "rejected": sum(1 for row in source_rows if row.get("status") == CommandStatus.REJECTED),
+        }
+
+    summary = summarize(current_rows)
+    legacy_summary = summarize(legacy_rows)
+    issues = [
+        {
+            key: row.get(key)
+            for key in ("sourceRowId", "submittedAt", "symbol", "status", "reasonCode", "reason", "processingStage", "inputHash")
+            if row.get(key) is not None
+        }
+        for row in current_rows
+        if row.get("status") in {CommandStatus.PENDING, CommandStatus.REJECTED}
+    ]
     health = {
-        "status": "DEGRADED" if summary["rejected"] else "OK",
+        "status": "DEGRADED" if summary["rejected"] or summary["pending"] else "OK",
         "schema": schema,
         "accepted": summary["applied"],
         "rejected": summary["rejected"],
@@ -218,7 +331,33 @@ def build_ingestion_contract(rows, *, schema="CURRENT", ingestion_health=None) -
     }
     if ingestion_health:
         health.update({key: value for key, value in ingestion_health.items() if value is not None})
-    return {"summary": summary, "recent": rows[-5:], "ingestionHealth": health}
+    recent = current_rows[-5:]
+    result = {"summary": summary, "recent": recent, "issues": issues, "ingestionHealth": health}
+    if legacy_rows:
+        result["legacySummary"] = legacy_summary
+    return result
+
+
+def build_partial_update_message(ingestion_contract: dict[str, Any]) -> str:
+    """Build a loss-only input incident without publishing partial P&L."""
+    issues = ingestion_contract.get("issues") if isinstance(ingestion_contract, dict) else None
+    lines = ["⚠️ Growth 資料部分更新"]
+    for issue in (issues or [])[:5]:
+        symbol = str(issue.get("symbol") or "未識別標的")
+        source_row = str(issue.get("sourceRowId") or "")
+        row_match = re.search(r":(\d+)$", source_row)
+        row_label = f"（第 {row_match.group(1)} 列）" if row_match else ""
+        reason_code = str(issue.get("reasonCode") or "TRADE_PENDING")
+        reason_detail = str(issue.get("reason") or "交易待處理")
+        reason = reason_code if reason_detail == reason_code else f"{reason_code}：{reason_detail}"
+        lines.append(f"{symbol}{row_label}：交易待處理（{reason}）")
+    if len(issues or []) > 5:
+        lines.append(f"另有 {len(issues) - 5} 筆交易待處理")
+    if len(lines) == 1:
+        health = ingestion_contract.get("ingestionHealth", {}) if isinstance(ingestion_contract, dict) else {}
+        lines.append(str(health.get("reasonCode") or "輸入資料尚未完整"))
+    lines.append("損益待交易資料完整後確認。")
+    return "\n".join(lines)
 
 
 def inventory_rows_from_transactions(transactions, accepted_rows):
@@ -251,7 +390,7 @@ def apply_reconciliation_events(inventory: dict[str, dict[str, Any]], transactio
     """
     updated = []
     events: list[dict[str, Any]] = []
-    for transaction in sorted(transactions, key=lambda item: (item.transaction_date, item.source_row_id)):
+    for transaction in sorted(transactions, key=transaction_order_key):
         if not _is_cash_set_balance(transaction):
             updated.append(transaction)
             continue
@@ -295,7 +434,7 @@ def apply_current_transactions(inventory: dict[str, dict[str, Any]], transaction
         currency = currency.upper().strip()
         return inventory.setdefault(f"現金_{currency}", {currency: 0.0})
 
-    for transaction in sorted(tuple(transactions or ()), key=lambda item: (item.transaction_date, item.source_row_id)):
+    for transaction in sorted(tuple(transactions or ()), key=transaction_order_key):
         action = transaction.action
         asset_type = str(transaction.asset_type or "")
         symbol = str(transaction.symbol or "")

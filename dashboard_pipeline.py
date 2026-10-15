@@ -48,9 +48,11 @@ from public_site import (
 from supabase_sync import (
     load_goal_state,
     load_private_snapshot,
+    load_private_transaction_ledger,
     save_goal_state,
     upload_private_snapshot,
     upload_private_transactions,
+    restore_canonical_ledger_transactions,
 )
 from transaction_schema import (
     Action,
@@ -62,10 +64,11 @@ from transaction_schema import (
     parse_transaction_rows,
     schema_drift_digest,
 )
-from transaction_command import apply_current_transactions, apply_reconciliation_events, build_ingestion_contract, build_ingestion_status, inventory_rows_from_transactions
+from transaction_command import apply_current_transactions, apply_reconciliation_events, build_ingestion_contract, build_ingestion_status, build_partial_update_message, inventory_rows_from_transactions
 from settlement_pricing import enrich_missing_trade_prices
 from performance import performance_breakdown
 from market_data import MarketDataService, Quote, get_taiex_history, write_taiex_history_cache
+from quotes import get_tw_stock_close_on_date
 from metrics import summarize_performance
 from attribution import build_pnl_attribution
 from exposure import build_exposure_matrix
@@ -81,6 +84,9 @@ from history_store import (
     mark_ledger_conflict_alert_sent,
     mark_schema_drift_alert_sent,
     schema_drift_alert_sent,
+    transaction_ingestion_alert_receipts,
+    mark_transaction_ingestion_alert_sent,
+    resolve_transaction_ingestion_alerts,
     upsert_history_snapshot,
 )
 from telegram_delivery import (
@@ -128,7 +134,7 @@ LEGACY_TRANSACTION_SPREADSHEET_ID = os.getenv("LEGACY_TRANSACTION_SPREADSHEET_ID
 WEB_APP_URL = "https://hanjhou2000716.github.io/tgolaf-fin-tracker/private/"
 
 
-HISTORY_EXTRA_COLUMNS = ["TW_Stock_Value", "US_Stock_Value", "Cash_Value", "Fund_Value", "NVDA_QQQM_Weight", "NVDA_SPYG_Weight", "NVDA_VOO_Weight", "Settlement_Notification_Sent_At", "Ledger_Conflict_Alert_Marker", "Schema_Drift_Alert_Marker"]
+HISTORY_EXTRA_COLUMNS = ["TW_Stock_Value", "US_Stock_Value", "Cash_Value", "Fund_Value", "NVDA_QQQM_Weight", "NVDA_SPYG_Weight", "NVDA_VOO_Weight", "Settlement_Notification_Sent_At", "Ledger_Conflict_Alert_Marker", "Schema_Drift_Alert_Marker", "Transaction_Ingestion_Alert_Marker"]
 ETF_NVDA_WEIGHT_FALLBACKS = {"QQQM": 0.095, "SPYG": 0.075, "VOO": 0.070}
 MARKET_DATA = MarketDataService()
 # Kept as a module-level compatibility contract for operators and tests.  The
@@ -167,6 +173,24 @@ def _refresh_block_digest(control: dict) -> str:
     ).hexdigest()[:24]
 
 
+def _transaction_incident_keys(ingestion_contract):
+    """Stable per-row incident identities, excluding run IDs and amounts."""
+    issues = ingestion_contract.get("issues", []) if isinstance(ingestion_contract, dict) else []
+    keys = []
+    for issue in issues:
+        shape = {
+            "sourceRole": issue.get("sourceRole", "CURRENT"),
+            "sourceRowId": issue.get("sourceRowId"),
+            "symbol": issue.get("symbol"),
+            "reasonCode": issue.get("reasonCode") or issue.get("reason"),
+        }
+        digest = hashlib.sha256(
+            json.dumps(shape, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:32]
+        keys.append(digest)
+    return tuple(sorted(set(keys)))
+
+
 def open_spreadsheets_with_retry(client, *, attempts=4, sleep=time.sleep):
     """Retry only transient Google Sheets discovery failures.
 
@@ -197,7 +221,26 @@ def settlement_notification_state(history_sheet, snapshot_date, window_key):
         raise RuntimeError("settlement notification marker column is missing")
     row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
     if row_number is None:
-        raise RuntimeError("settlement notification history row is missing")
+        # An incomplete input run intentionally does not write financial
+        # History. Search a date-qualified marker on existing rows instead.
+        global_key = f"{snapshot_date}|{window_key}"
+        rows = retry_sheet_operation("history.get_all_values", history_sheet.get_all_values)
+        for row in reversed(rows[1:]):
+            raw = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
+            if not raw:
+                continue
+            try:
+                markers = json.loads(raw)
+            except json.JSONDecodeError as error:
+                raise RuntimeError("settlement notification marker is malformed") from error
+            if not isinstance(markers, dict):
+                raise RuntimeError("settlement notification marker has unknown format")
+            value = markers.get(global_key)
+            if value is not None:
+                if not isinstance(value, dict) or value.get("status") not in {"SENDING", "SENT", "FAILED", "DELIVERY_UNKNOWN"}:
+                    raise RuntimeError("settlement notification marker has unknown state")
+                return value
+        return {"status": "PENDING"}
     row = retry_sheet_operation("history.row_values", history_sheet.row_values, row_number)
     raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
     if not raw_marker:
@@ -226,6 +269,23 @@ def settlement_notification_state(history_sheet, snapshot_date, window_key):
     if isinstance(value, str) and value:
         return {"status": "SENT", "sentAt": value, "legacy": True}
     if value is None:
+        global_key = f"{snapshot_date}|{window_key}"
+        all_rows = retry_sheet_operation("history.get_all_values", history_sheet.get_all_values)
+        for candidate in reversed(all_rows[1:]):
+            raw_candidate = str(candidate[marker_column - 1]).strip() if len(candidate) >= marker_column else ""
+            if not raw_candidate:
+                continue
+            try:
+                candidate_markers = json.loads(raw_candidate)
+            except json.JSONDecodeError as error:
+                raise RuntimeError("settlement notification marker is malformed") from error
+            if not isinstance(candidate_markers, dict):
+                raise RuntimeError("settlement notification marker has unknown format")
+            global_value = candidate_markers.get(global_key)
+            if global_value is not None:
+                if not isinstance(global_value, dict) or global_value.get("status") not in {"SENDING", "SENT", "FAILED", "DELIVERY_UNKNOWN"}:
+                    raise RuntimeError("settlement notification marker has unknown state")
+                return global_value
         return {"status": "PENDING"}
     if not isinstance(value, dict) or value.get("status") not in {
         "SENDING", "SENT", "FAILED", "DELIVERY_UNKNOWN"
@@ -243,7 +303,11 @@ def mark_settlement_notification_state(history_sheet, snapshot_date, window_key,
         raise RuntimeError("settlement notification marker column is missing")
     row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
     if row_number is None:
-        raise RuntimeError("settlement notification history row is missing")
+        rows = retry_sheet_operation("history.get_all_values", history_sheet.get_all_values)
+        row_number = len(rows) if len(rows) > 1 else None
+        if row_number is None:
+            raise RuntimeError("settlement notification history row is missing")
+        window_key = f"{snapshot_date}|{window_key}"
     row = retry_sheet_operation("history.row_values", history_sheet.row_values, row_number)
     raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
     try:
@@ -431,6 +495,8 @@ def calculate_current_assets():
     schema_recovery_ready = True
     ingestion_rejections = []
     active_current_rejections = []
+    active_current_pending = []
+    preflight_ledger_conflicts = []
     current_schema_versions = []
     current_source_seen = False
     worksheets = []
@@ -439,6 +505,16 @@ def calculate_current_assets():
             f"spreadsheet.worksheets.{workbook_index}",
             workbook.worksheets,
         ))
+    # Read the immutable ledger before any holdings/cash reducer runs. A
+    # replay must retain its original canonical price rather than inherit a
+    # newly fetched quote and drift the rebuilt cash balance.
+    transaction_ledger_rows = load_private_transaction_ledger()
+
+    def _restore_rows_from_ledger(transactions):
+        if transaction_ledger_rows is None:
+            return tuple(transactions), ()
+        return restore_canonical_ledger_transactions(transactions, transaction_ledger_rows)
+
     for ws_index, ws in enumerate(worksheets, start=1):
         role = source_roles.role_for(ws.title)
         if role == "HISTORY":
@@ -489,14 +565,27 @@ def calculate_current_assets():
                         # blocked below so it can never become a zero result.
                         if recovery_mode and not parsed.accepted and (parsed.rejected or parsed.pending):
                             raise TransactionSchemaError("recovery_candidate_has_no_accepted_rows")
+                        canonical_transactions, ledger_conflicts = _restore_rows_from_ledger(parsed.accepted)
+                        preflight_ledger_conflicts.extend(ledger_conflicts)
+                        conflict_ids = {item.get("transaction_id") for item in ledger_conflicts}
+                        ledger_rejections = tuple(
+                            RejectedTransaction(
+                                item.get("source_row_id") or item.get("transaction_id") or "supabase",
+                                item.get("reason", "immutable_ledger_conflict"),
+                                item.get("detail", "immutable ledger conflict"),
+                                symbol=(item.get("current_payload") or {}).get("symbol"),
+                                stage="ledger",
+                            )
+                            for item in ledger_conflicts
+                        )
                         priced = enrich_missing_trade_prices(
-                            parsed.accepted,
+                            canonical_transactions,
                             _settlement_quote_for_transaction,
                         )
                         accepted_ids = {item.transaction_id for item in priced.accepted}
                         accepted_rows = tuple(
                             row for item, row in zip(parsed.accepted, parsed.accepted_rows)
-                            if item.transaction_id in accepted_ids
+                            if item.transaction_id in accepted_ids and item.transaction_id not in conflict_ids
                         )
                         pending = tuple(parsed.pending) + tuple(priced.pending)
                         if recovery_mode and not priced.accepted and pending:
@@ -507,11 +596,13 @@ def calculate_current_assets():
                         transaction_ingestion.extend(build_ingestion_status(
                             accepted=priced.accepted,
                             pending=pending,
-                            rejected=parsed.rejected,
+                            rejected=tuple(parsed.rejected) + ledger_rejections,
+                            source_role=role,
                         ))
-                        ingestion_rejections.extend(parsed.rejected)
+                        ingestion_rejections.extend(tuple(parsed.rejected) + ledger_rejections)
                         if role == "CURRENT":
-                            active_current_rejections.extend(parsed.rejected)
+                            active_current_rejections.extend(tuple(parsed.rejected) + ledger_rejections)
+                            active_current_pending.extend(pending)
                         audit_payload = parsed.audit_payload()
                         audit_payload["accepted"] = len(priced.accepted)
                         audit_payload["pending"].extend(
@@ -602,12 +693,43 @@ def calculate_current_assets():
                         # expose raw V3 rows to the legacy reducer.
                         try:
                             parsed = parse_transaction_rows(rows[0], rows[1:], source_sheet=ws.title, existing_ids=seen_transaction_ids)
-                            accepted_transactions.extend(parsed.accepted)
-                            transaction_ingestion.extend(build_ingestion_status(accepted=parsed.accepted, pending=parsed.pending, rejected=parsed.rejected))
+                            canonical_transactions, ledger_conflicts = _restore_rows_from_ledger(parsed.accepted)
+                            preflight_ledger_conflicts.extend(ledger_conflicts)
+                            conflict_ids = {item.get("transaction_id") for item in ledger_conflicts}
+                            canonical_transactions = tuple(item for item in canonical_transactions if item.transaction_id not in conflict_ids)
+                            ledger_rejections = tuple(
+                                RejectedTransaction(
+                                    item.get("source_row_id") or item.get("transaction_id") or "supabase",
+                                    item.get("reason", "immutable_ledger_conflict"),
+                                    item.get("detail", "immutable ledger conflict"),
+                                    symbol=(item.get("current_payload") or {}).get("symbol"),
+                                    stage="ledger",
+                                ) for item in ledger_conflicts
+                            )
+                            priced = enrich_missing_trade_prices(
+                                canonical_transactions,
+                                _settlement_quote_for_transaction,
+                            )
+                            pending = tuple(parsed.pending) + tuple(priced.pending)
+                            accepted_transactions.extend(priced.accepted)
+                            transaction_ingestion.extend(build_ingestion_status(accepted=priced.accepted, pending=pending, rejected=tuple(parsed.rejected) + ledger_rejections, source_role=role))
                             active_current_rejections.extend(parsed.rejected)
+                            active_current_rejections.extend(ledger_rejections)
+                            active_current_pending.extend(pending)
                             ingestion_rejections.extend(parsed.rejected)
-                            transaction_audits.append({"sheet": ws.title, "role": role, **parsed.audit_payload()})
-                            current_transactions.extend(parsed.accepted)
+                            ingestion_rejections.extend(ledger_rejections)
+                            audit_payload = parsed.audit_payload()
+                            audit_payload["accepted"] = len(priced.accepted)
+                            audit_payload["pending"].extend({
+                                "transaction_id": item.transaction_id,
+                                "source_row_id": item.source_row_id,
+                                "symbol": item.symbol,
+                                "transaction_date": item.transaction_date.isoformat(),
+                                "processing_stage": "price",
+                                "reason_code": "TRADE_DATE_QUOTE_UNAVAILABLE",
+                            } for item in priced.pending)
+                            transaction_audits.append({"sheet": ws.title, "role": role, **audit_payload})
+                            current_transactions.extend(priced.accepted)
                         except (TransactionSchemaError, ValueError) as error:
                             rejection = RejectedTransaction(f"{ws.title}:header", "CURRENT_FORM_V3_REQUIRED", str(error))
                             active_current_rejections.append(rejection)
@@ -659,9 +781,9 @@ def calculate_current_assets():
                 transaction_ingestion,
                 schema=current_schema_versions[-1] if current_schema_versions else "NO_CURRENT_SOURCE",
                 ingestion_health={
-                    "status": "DEGRADED" if active_current_rejections else "OK",
-                    "reasonCode": "SCHEMA_DRIFT" if schema_drift_detected else "TRANSACTION_REJECTED" if active_current_rejections else None,
-                    "message": "Google Form schema drift; affected rows quarantined" if schema_drift_detected else "Some transaction rows were quarantined" if active_current_rejections else None,
+                    "status": "DEGRADED" if active_current_rejections or active_current_pending else "OK",
+                    "reasonCode": "SCHEMA_DRIFT" if schema_drift_detected else "TRANSACTION_REJECTED" if active_current_rejections else "TRANSACTION_PENDING" if active_current_pending else None,
+                    "message": "Google Form schema drift; affected rows quarantined" if schema_drift_detected else "Some transaction rows were quarantined" if active_current_rejections else "Some transaction rows are pending" if active_current_pending else None,
                     "schemaDigest": schema_digest or None,
                     "schemaAffectedRows": schema_affected_rows,
                 },
@@ -820,21 +942,29 @@ def calculate_current_assets():
                 for frame in frames
             ],
         })
-    ledger_sync_result = upload_private_transactions(accepted_transactions)
+    ledger_sync_result = upload_private_transactions(
+        accepted_transactions, existing_rows=transaction_ledger_rows
+    )
     sync_conflicts = tuple(getattr(ledger_sync_result, "conflicts", ()))
+    ledger_sync_result.preflight_conflicts = tuple(preflight_ledger_conflicts)
+    if sync_conflicts:
+        # A conflict that appeared after preflight indicates a concurrent
+        # ledger mutation. Do not publish a reducer result computed before
+        # that conflict was visible; the next idempotent run will re-read it.
+        raise RuntimeError("immutable ledger changed after transaction preflight; settlement must be retried")
     sync_replays = tuple(getattr(ledger_sync_result, "replays", ()))
     derived_price_replays = tuple(getattr(ledger_sync_result, "derived_price_replays", ()))
     conflict_report = tuple(getattr(ledger_sync_result, "conflict_report", sync_conflicts))
     conflict_summary = dict(getattr(ledger_sync_result, "conflict_summary", {}) or {})
     ledger_audit = {
-        "status": "DEGRADED" if sync_conflicts else "OK",
+        "status": "DEGRADED" if sync_conflicts or preflight_ledger_conflicts else "OK",
         "replayCount": len(sync_replays),
         "derivedPriceReplayCount": len(derived_price_replays),
-        "conflictCount": len(sync_conflicts),
+        "conflictCount": len(sync_conflicts) + len(preflight_ledger_conflicts),
         "replays": list(sync_replays),
         "derivedPriceReplays": list(derived_price_replays),
         "conflictSummary": conflict_summary,
-        "conflicts": list(conflict_report),
+        "conflicts": list(conflict_report) + list(preflight_ledger_conflicts),
     }
     # This file is private Actions evidence only. It is never copied into the
     # public-site directory and may contain old/new financial payloads.
@@ -844,19 +974,24 @@ def calculate_current_assets():
     # transaction amounts or complete payloads.
     write_json(
         ".private-build/ledger-conflict-summary.json",
-        ledger_conflict_summary_artifact(sync_conflicts, conflict_summary),
+        ledger_conflict_summary_artifact(
+            tuple(sync_conflicts) + tuple(preflight_ledger_conflicts),
+            conflict_summary,
+        ),
     )
     if sync_conflicts:
+        all_ledger_conflicts = tuple(sync_conflicts) + tuple(preflight_ledger_conflicts)
         conflict_rejections = tuple(
             RejectedTransaction(
                 item.get("source_row_id") or item.get("transaction_id") or "supabase",
                 item.get("reason", "immutable_ledger_conflict"),
                 item.get("detail", "immutable ledger conflict"),
             )
-            for item in sync_conflicts
+            for item in all_ledger_conflicts
         )
         ingestion_rejections.extend(conflict_rejections)
-        transaction_ingestion.extend(build_ingestion_status(rejected=conflict_rejections))
+        transaction_ingestion.extend(build_ingestion_status(rejected=conflict_rejections, source_role="CURRENT"))
+        active_current_rejections.extend(conflict_rejections)
     write_json(".private-build/transaction_audit.json", {
         "strict": FORM_SCHEMA_STRICT,
         "sheets": transaction_audits,
@@ -864,9 +999,9 @@ def calculate_current_assets():
             transaction_ingestion,
             schema=current_schema_versions[-1] if current_schema_versions else "NO_CURRENT_SOURCE",
             ingestion_health={
-                "status": "DEGRADED" if active_current_rejections else "OK",
-                "reasonCode": "SCHEMA_DRIFT" if schema_drift_detected else "TRANSACTION_REJECTED" if active_current_rejections else None,
-                "message": "Google Form schema drift; affected rows quarantined" if schema_drift_detected else "Some transaction rows were quarantined" if active_current_rejections else None,
+                "status": "DEGRADED" if active_current_rejections or active_current_pending else "OK",
+                "reasonCode": "SCHEMA_DRIFT" if schema_drift_detected else "TRANSACTION_REJECTED" if active_current_rejections else "TRANSACTION_PENDING" if active_current_pending else None,
+                "message": "Google Form schema drift; affected rows quarantined" if schema_drift_detected else "Some transaction rows were quarantined" if active_current_rejections else "Some transaction rows are pending" if active_current_pending else None,
                 "schemaDigest": schema_digest or None,
                 "schemaAffectedRows": schema_affected_rows,
                 "lkgUsed": bool(lkg_inventory),
@@ -923,22 +1058,42 @@ def get_us_stock_quote(symbol):
 
 
 def _settlement_quote_for_transaction(transaction):
-    """Return a quality-aware current settlement quote for a missing trade price."""
+    """Return a quality-aware close from the transaction's own trade date."""
+    trade_date = transaction.transaction_date
+    fetched_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
     if transaction.currency.upper() == "TWD":
-        return MARKET_DATA.get_taiwan(transaction.symbol, FINMIND_TOKEN)
-
-    def fetch_us(symbol):
-        value = float(get_us_stock_price(symbol))
-        if not math.isfinite(value) or value <= 0:
-            raise ValueError(f"US quote unavailable for {symbol}")
-        return value
-
-    return MARKET_DATA.get(
-        transaction.symbol,
-        currency="USD",
-        fetcher=fetch_us,
-        source="Yahoo Finance/yfinance",
-    )
+        result = get_tw_stock_close_on_date(transaction.symbol, trade_date, FINMIND_TOKEN)
+        return Quote(
+            transaction.symbol, float(result["price"]), "TWD", result["source"],
+            trade_date.isoformat(), fetched_at, False, False, "historical_close",
+            result.get("evidence_hash"),
+        )
+    start = trade_date.isoformat()
+    end = (trade_date + datetime.timedelta(days=1)).isoformat()
+    history = yf.Ticker(transaction.symbol).history(start=start, end=end, auto_adjust=False)
+    if history.empty or "Close" not in history:
+        raise ValueError("historical_settlement_quote_unavailable")
+    closes = history["Close"].dropna()
+    for index, raw_price in closes.items():
+        quote_date = index.date() if hasattr(index, "date") else datetime.date.fromisoformat(str(index)[:10])
+        if quote_date != trade_date:
+            continue
+        price = float(raw_price)
+        if not math.isfinite(price) or price <= 0:
+            raise ValueError("historical_settlement_quote_invalid")
+        evidence_hash = hashlib.sha256(json.dumps({
+            "symbol": transaction.symbol,
+            "transactionDate": trade_date.isoformat(),
+            "providerDate": quote_date.isoformat(),
+            "close": format(price, ".12g"),
+            "source": "yfinance historical close",
+        }, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        return Quote(
+            transaction.symbol, price, "USD", "yfinance historical close",
+            trade_date.isoformat(), fetched_at, False, False, "historical_close",
+            evidence_hash,
+        )
+    raise ValueError("historical_settlement_quote_unavailable")
 
 # ==========================================
 # 4. 主程序與 HTML (Web App) 生成
@@ -962,7 +1117,9 @@ def main():
         
     inventory, history_sheet, accepted_transactions, ledger_sync_result = calculate_current_assets()
     refresh_control = copy.deepcopy(LAST_REFRESH_CONTROL)
-    sync_conflicts = tuple(getattr(ledger_sync_result, "conflicts", ()))
+    sync_conflicts = tuple(getattr(ledger_sync_result, "conflicts", ())) + tuple(
+        getattr(ledger_sync_result, "preflight_conflicts", ())
+    )
     sync_replays = tuple(getattr(ledger_sync_result, "replays", ()))
     derived_price_replays = tuple(getattr(ledger_sync_result, "derived_price_replays", ()))
     conflict_report = tuple(getattr(ledger_sync_result, "conflict_report", sync_conflicts))
@@ -975,7 +1132,7 @@ def main():
         "replays": list(sync_replays),
         "derivedPriceReplays": list(derived_price_replays),
         "conflictSummary": conflict_summary,
-        "conflicts": list(conflict_report),
+        "conflicts": list(conflict_report) + list(getattr(ledger_sync_result, "preflight_conflicts", ())),
     }
     transaction_ingestion = build_ingestion_contract(build_ingestion_status(accepted=accepted_transactions))
     audit_path = ".private-build/transaction_audit.json"
@@ -1542,11 +1699,26 @@ def main():
     write_taiex_history_cache(".private-build/taiex-history-cache.json", taiex_market_data, now=tw_now)
 
     yesterday_net = next((float(str(row.get('Net_Asset', 0)).replace(',', '')) for row in reversed(history_records) if float(str(row.get('Net_Asset', 0)).replace(',', '')) > 0 and str(row.get('Date', ''))[-5:] != today_str), 0)
-    daily_diff = net_asset - yesterday_net if yesterday_net else 0
-    daily_pct = (daily_diff / yesterday_net * 100) if yesterday_net else 0
+    ingestion_incomplete = str(ingestion_health.get("status", "")).upper() == "DEGRADED"
+    pnl_available = (
+        str(ingestion_health.get("status", "")).upper() in {"OK", "READY", "READY_FROM_FORM"}
+        and not refresh_blocked
+    )
+    daily_diff = (net_asset - yesterday_net if yesterday_net else 0) if pnl_available else None
+    daily_pct = ((daily_diff / yesterday_net * 100) if yesterday_net else 0) if pnl_available else None
     today_transactions = [item for item in accepted_transactions if item.transaction_date == tw_now.date()]
     performance = performance_breakdown(net_asset, yesterday_net if yesterday_net else net_asset, today_transactions)
-    sign, emoji = ("+", "📈") if daily_diff >= 0 else ("", "📉")
+    if not pnl_available:
+        for key in ("income", "expenses", "financingCashFlow", "externalCashFlow", "reconciliationAdjustment", "marketPnl", "netChange"):
+            if key in performance:
+                performance[key] = None
+        performance["reconciled"] = False
+        performance["available"] = False
+        performance["reasonCode"] = "INGESTION_NOT_READY"
+    else:
+        performance["available"] = True
+        performance["reasonCode"] = None
+    sign, emoji = (("+", "📈") if daily_diff >= 0 else ("", "📉")) if daily_diff is not None else ("", "⚪")
 
     stress_cards_html = "".join(
         f'''<div class="stress-card">
@@ -1566,18 +1738,31 @@ def main():
             previous = float(str(previous_categories.get(key, "")).replace(",", "")) if previous_categories else None
         except (TypeError, ValueError):
             previous = None
-        category_daily_changes[key] = None if previous is None else {"amount": round(value - previous, 2), "percent": round((value - previous) / previous * 100, 2) if previous else 0}
-    attribution = build_pnl_attribution(
-        yesterday_net,
-        net_asset,
-        previous_categories or {},
-        category_values,
-        income=performance["income"],
-        expenses=performance["expenses"],
-        financing_cash_flow=performance["financingCashFlow"],
-        external_cash_flow=performance["externalCashFlow"],
-        reconciliation_adjustment=performance.get("reconciliationAdjustment", 0),
-    )
+        category_daily_changes[key] = None if ingestion_incomplete or previous is None else {"amount": round(value - previous, 2), "percent": round((value - previous) / previous * 100, 2) if previous else 0}
+    if pnl_available:
+        attribution = build_pnl_attribution(
+            yesterday_net,
+            net_asset,
+            previous_categories or {},
+            category_values,
+            income=performance["income"],
+            expenses=performance["expenses"],
+            financing_cash_flow=performance["financingCashFlow"],
+            external_cash_flow=performance["externalCashFlow"],
+            reconciliation_adjustment=performance.get("reconciliationAdjustment", 0),
+        )
+        attribution["available"] = True
+        attribution["reasonCode"] = None
+    else:
+        attribution = {
+            "available": False,
+            "reasonCode": "INGESTION_NOT_READY",
+            "reconciled": False,
+            **{key: None for key in (
+                "twStockPrice", "usStockPrice", "fx", "dividends", "fees", "pledgeInterest",
+                "externalCashFlow", "reconciliationAdjustment", "other", "netChange",
+            )},
+        }
     alert_engine = AlertEngine()
     alerts = alert_engine.evaluate({
         "maintenanceRatio": maintenance_ratio,
@@ -1603,7 +1788,7 @@ def main():
         return f'<span class="daily-inline {color}">{marker} {change["percent"]:+.2f}% · ${change["amount"]:+,.0f}</span>'
 
     snapshot_result = "blocked" if refresh_blocked else "skipped"
-    if total_asset > 0 and not refresh_blocked:
+    if total_asset > 0 and not refresh_blocked and not ingestion_incomplete:
         ensure_history_columns(history_sheet, HISTORY_EXTRA_COLUMNS)
         snapshot_values = {
             "Date": tw_now.strftime("%Y-%m-%d"),
@@ -1627,7 +1812,8 @@ def main():
         net_val, total_val = float(str(row.get('Net_Asset', 0)).replace(',', '')), float(str(row.get('Total_Asset', 0)).replace(',', ''))
         if net_val > 0 and len(date_str) == 10: daily_net_history[date_str], daily_total_history[date_str] = net_val, total_val
             
-    daily_net_history[tw_now.strftime("%Y-%m-%d")], daily_total_history[tw_now.strftime("%Y-%m-%d")] = net_asset, total_asset
+    if not ingestion_incomplete and not refresh_blocked:
+        daily_net_history[tw_now.strftime("%Y-%m-%d")], daily_total_history[tw_now.strftime("%Y-%m-%d")] = net_asset, total_asset
     sorted_dates = sorted(daily_net_history.keys())
     all_totals, all_nets = [daily_total_history[d] for d in sorted_dates], [daily_net_history[d] for d in sorted_dates]
 
@@ -1793,7 +1979,7 @@ def main():
             .hero-top {{ position:relative; z-index:1; display:flex; align-items:end; justify-content:space-between; gap:16px; }}
             .hero-value {{ font-family:'Noto Serif TC', serif; font-size:clamp(34px, 6vw, 52px); line-height:1; letter-spacing:-.03em; }}
             .change,.sync {{ display:flex; align-items:center; flex:0 0 auto; width:fit-content; white-space:nowrap; border:1px solid rgba(255,255,255,.16); border-radius:12px; padding:11px 14px; box-shadow:0 4px 10px rgba(10,24,40,.12); }}
-            .change {{ color:{'#91b29d' if daily_diff < 0 else '#ef9a83'}; font-size:clamp(11px, 2vw, 14px); font-weight:700; background:#35536d; }}
+            .change {{ color:{'#91b29d' if daily_diff is not None and daily_diff < 0 else '#ef9a83' if daily_diff is not None else '#d4dce2'}; font-size:clamp(11px, 2vw, 14px); font-weight:700; background:#35536d; }}
             .hero-status-row {{ position:relative; z-index:1; display:flex; align-items:center; gap:10px; border-bottom:1px solid rgba(255,255,255,.22); padding:13px 0 18px; margin-bottom:17px; }}
             .sync {{ justify-content:center; color:#d7e2e1; font-size:clamp(11px, 1.8vw, 12px); font-weight:700; background:#2e4b65; margin-left:auto; }}
             .metric-grid {{ position:relative; z-index:1; display:grid; grid-template-columns:repeat(3, 1fr); gap:12px; }}
@@ -1900,7 +2086,7 @@ def main():
                 <div><div class="metric-label">淨資產 Net</div><div class="hero-value">${net_asset:,.0f}</div></div>
             </div>
             <div class="hero-status-row">
-                <div class="change">今日 {sign}{daily_pct:.1f}% &nbsp;·&nbsp; {sign}${daily_diff:,.0f}</div>
+                <div class="change">{f'今日 {sign}{daily_pct:.1f}% · {sign}${daily_diff:,.0f}' if pnl_available else '今日損益待交易資料完整後確認'}</div>
                 <div class="sync">資料同步 · {tw_now.strftime('%m/%d %H:%M')}</div>
             </div>
             <div class="metric-grid">
@@ -2580,7 +2766,7 @@ def main():
                 "netYearly": net_240ma,
             },
             "categoryDailyChanges": category_daily_changes,
-            "performance": {**performance, "netChangePercent": round(daily_pct, 2)},
+            "performance": {**performance, "netChangePercent": round(daily_pct, 2) if daily_pct is not None else None},
             "performanceMetrics": performance_metrics,
             "pnlAttribution": attribution,
             "exposureMatrix": exposure_matrix,
@@ -2668,12 +2854,15 @@ def main():
     # =================================
 
     # --- 判斷每日損益，動態生成推播文字 ---
+    partial_update = ingestion_incomplete and not refresh_blocked
     if refresh_blocked:
         tg_text = (
             "⚠️ Growth 資料更新已阻止\n"
             "已保留上一份正常資產快照。\n"
             f"原因：{refresh_control.get('reasonCode') or '資料來源驗證失敗'}"
         )
+    elif partial_update:
+        tg_text = build_partial_update_message(transaction_ingestion)
     else:
         tg_text = build_settlement_telegram_message(
             display_date, daily_diff, daily_pct, buy_hold_policy
@@ -2686,7 +2875,7 @@ def main():
     schema_already_alerted = schema_drift_alert_sent(history_sheet, schema_digest) if schema_digest else False
     conflict_alert_due = bool(sync_conflicts and not conflict_already_alerted)
     schema_alert_due = bool(schema_digest and not schema_already_alerted and not conflict_alert_due)
-    if not refresh_blocked and ingestion_health.get("status") == "DEGRADED" and (conflict_alert_due or schema_alert_due or not (sync_conflicts or schema_digest)):
+    if not refresh_blocked and not partial_update and ingestion_health.get("status") == "DEGRADED" and (conflict_alert_due or schema_alert_due or not (sync_conflicts or schema_digest)):
         reason = ingestion_health.get("message") or ingestion_health.get("reasonCode") or "部分資料已隔離"
         tg_text += f"\n⚠️ Growth 資料輸入異常\n原因：{reason}\n有效資料仍已部署，異常資料已隔離。"
 
@@ -2711,6 +2900,22 @@ def main():
         settlement_window = "tw"
     else:
         settlement_window = None
+    incident_keys = _transaction_incident_keys(transaction_ingestion) if partial_update else ()
+    if not refresh_blocked:
+        ensure_history_columns(history_sheet, ["Transaction_Ingestion_Alert_Marker"])
+        resolve_transaction_ingestion_alerts(
+            history_sheet,
+            incident_keys,
+            resolved_at=generated_at,
+        )
+    recent_incident_receipts = {}
+    incident_keys_to_mark = tuple(incident_keys)
+    if partial_update and settlement_window and TELEGRAM_SEND_ENABLED:
+        recent_incident_receipts = transaction_ingestion_alert_receipts(
+            history_sheet, incident_keys, now=generated_at, cooldown_hours=24
+        )
+        incident_keys_to_mark = tuple(key for key in incident_keys if key not in recent_incident_receipts)
+    cooldown_suppressed = bool(incident_keys and len(recent_incident_receipts) == len(incident_keys))
     refresh_digest = _refresh_block_digest(refresh_control) if refresh_blocked else ""
     if refresh_blocked:
         ensure_history_columns(history_sheet, ["Schema_Drift_Alert_Marker"])
@@ -2718,6 +2923,7 @@ def main():
     notification_result = {
         "schemaVersion": 1,
         "notificationType": "settlement" if not refresh_blocked else "data_blocked",
+        "messageKind": "partial_update" if partial_update else "complete" if not refresh_blocked else "blocked",
         "windowDate": snapshot_date,
         "window": settlement_window,
         "status": "NOT_REQUIRED" if not settlement_window else "FAILED",
@@ -2737,6 +2943,7 @@ def main():
         notification_outbox = {
             "schemaVersion": 1,
             "notificationType": "settlement",
+            "messageKind": "partial_update" if partial_update else "complete",
             "windowDate": snapshot_date,
             "window": settlement_window,
             "sourceCommit": os.getenv("GITHUB_SHA", ""),
@@ -2753,7 +2960,15 @@ def main():
                 google_credentials=GCP_CREDENTIALS_JSON,
             )
             write_json(".private-build/settlement-notification-outbox.enc.json", protected_outbox)
-    if should_deliver and not TELEGRAM_SEND_ENABLED:
+    if cooldown_suppressed:
+        prior_receipt = next(iter(recent_incident_receipts.values()), {})
+        notification_result.update(
+            status="SUPPRESSED",
+            reasonCode="INCIDENT_COOLDOWN",
+            priorReceipt={"status": "SENT", "sentAt": prior_receipt.get("sentAt"), "messageId": prior_receipt.get("messageId")},
+            incidentKeys=list(incident_keys),
+        )
+    elif should_deliver and not TELEGRAM_SEND_ENABLED:
         notification_result.update(status="DISABLED", reasonCode="OPERATOR_DISABLED")
     elif should_deliver and not (refresh_blocked and refresh_already_alerted):
         if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -2776,6 +2991,7 @@ def main():
                 now=generated_at,
             )
             notification_result["notificationType"] = "settlement" if not refresh_blocked else "data_blocked"
+            notification_result["messageKind"] = "partial_update" if partial_update else "complete" if not refresh_blocked else "blocked"
             notification_result["window"] = settlement_window
     elif refresh_blocked and refresh_already_alerted:
         notification_result.update(status="SENT", reasonCode="ALREADY_ALERTED")
@@ -2789,6 +3005,13 @@ def main():
         f"window={settlement_window or 'none'}, reason={notification_result.get('reasonCode')}"
     )
     if notification_result["status"] == "SENT":
+        if partial_update and incident_keys_to_mark:
+            mark_transaction_ingestion_alert_sent(
+                history_sheet,
+                incident_keys_to_mark,
+                sent_at=notification_result.get("sentAt") or generated_at,
+                message_id=notification_result.get("messageId") or "unknown",
+            )
         if refresh_blocked:
             mark_schema_drift_alert_sent(
                 history_sheet, snapshot_date, refresh_digest, generated_at

@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal, InvalidOperation
+import hashlib
+import json
 import re
+import unicodedata
 from uuid import NAMESPACE_URL, uuid5
 
 from transaction_schema import (
@@ -77,8 +80,13 @@ _UNIT_ALIASES = {
 }
 
 _QUANTITY_RE = re.compile(r"^\d+(?:\.\d+)?$")
-_TW_SYMBOL_RE = re.compile(r"^\d{4,6}$")
+_TW_SYMBOL_RE = re.compile(r"^(?:\d{4,6}|\d{4,5}[A-Z])$")
 _US_SYMBOL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9.]{0,9}$")
+
+
+def _normalize_symbol(raw: str) -> str:
+    """Normalize equivalent Unicode ticker input without changing identity."""
+    return unicodedata.normalize("NFKC", str(raw or "")).strip().upper()
 
 
 def _mapping(headers) -> dict[str, tuple[int, ...]]:
@@ -157,7 +165,7 @@ def _quantity(value: str, *, allow_zero: bool) -> Decimal:
 
 
 def _symbol(subject: str, raw: str) -> str:
-    value = str(raw or "").strip().upper()
+    value = _normalize_symbol(raw)
     requires_symbol = subject in {"台股", "美股", "擔保品"}
     if requires_symbol and not value:
         raise ValueError("SYMBOL_REQUIRED:此交易主體必須填寫交易標的")
@@ -166,7 +174,7 @@ def _symbol(subject: str, raw: str) -> str:
     if not value:
         return ""
     if subject == "台股" and not _TW_SYMBOL_RE.fullmatch(value):
-        raise ValueError("INVALID_SYMBOL:台股交易標的必須是 4 至 6 碼數字代號")
+        raise ValueError("INVALID_SYMBOL:台股標的須為 4 至 6 碼數字，或 4 至 5 碼數字加一碼英文字母")
     if subject == "美股" and not _US_SYMBOL_RE.fullmatch(value):
         raise ValueError("INVALID_SYMBOL:美股交易標的必須是英文字母股票代號")
     if subject == "擔保品" and not (_TW_SYMBOL_RE.fullmatch(value) or _US_SYMBOL_RE.fullmatch(value)):
@@ -235,6 +243,8 @@ def parse_form_v3_rows(
         row = tuple(str(value) for value in raw_row)
         source_row_id = f"{source_sheet}:{row_number}"
         transaction_id = str(uuid5(NAMESPACE_URL, f"form-v3:{source_row_id}"))
+        submitted_at = ""
+        symbol = ""
         try:
             if transaction_id in seen:
                 raise ValueError("DUPLICATE_TRANSACTION_ID:來源列已處理")
@@ -269,7 +279,29 @@ def parse_form_v3_rows(
         except (ValueError, InvalidOperation) as error:
             message = str(error)
             reason, _, detail = message.partition(":")
-            rejected.append(RejectedTransaction(source_row_id, reason or "INVALID_TRANSACTION", detail or message))
+            if not symbol:
+                try:
+                    symbol = _normalize_symbol(_row_value(row, mapping, "symbol"))
+                except ValueError:
+                    symbol = ""
+            if not submitted_at:
+                try:
+                    submitted_at = _row_value(row, mapping, "timestamp")
+                except ValueError:
+                    submitted_at = ""
+            input_hash = hashlib.sha256(
+                json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            ).hexdigest()
+            stage = "symbol" if (reason or "").startswith("INVALID_SYMBOL") else "parse"
+            rejected.append(RejectedTransaction(
+                source_row_id,
+                reason or "INVALID_TRANSACTION",
+                detail or message,
+                symbol=symbol or None,
+                submitted_at=submitted_at or None,
+                stage=stage,
+                input_hash=input_hash,
+            ))
     return TransactionParseResult(tuple(accepted), tuple(pending), tuple(rejected), tuple(accepted_rows))
 
 

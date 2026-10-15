@@ -60,6 +60,10 @@ class RejectedTransaction:
     source_row_id: str
     reason: str
     detail: str
+    symbol: str | None = None
+    submitted_at: str | None = None
+    stage: str | None = None
+    input_hash: str | None = None
 
 
 @dataclass(frozen=True)

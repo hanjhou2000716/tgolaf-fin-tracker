@@ -31,13 +31,23 @@ def build_settlement_health(
     if window in {"us", "tw"}:
         if not isinstance(notification_payload, Mapping):
             reasons.append("SETTLEMENT_NOTIFICATION_UNVERIFIED")
-        elif (
-            notification_payload.get("status") != "SENT"
-            or notification_payload.get("notificationType") != "settlement"
-            or notification_payload.get("windowDate") != window_date
-            or notification_payload.get("window") != window
-        ):
-            reasons.append("SETTLEMENT_NOTIFICATION_NOT_CONFIRMED")
+        else:
+            notification_matches = (
+                notification_payload.get("notificationType") == "settlement"
+                and notification_payload.get("windowDate") == window_date
+                and notification_payload.get("window") == window
+            )
+            suppressed_with_receipt = (
+                notification_payload.get("status") == "SUPPRESSED"
+                and notification_payload.get("messageKind") == "partial_update"
+                and isinstance(notification_payload.get("priorReceipt"), Mapping)
+                and notification_payload["priorReceipt"].get("status") == "SENT"
+                and notification_matches
+            )
+            if not notification_matches or (
+                notification_payload.get("status") != "SENT" and not suppressed_with_receipt
+            ):
+                reasons.append("SETTLEMENT_NOTIFICATION_NOT_CONFIRMED")
     if not isinstance(private_payload, Mapping):
         reasons.append("PRIVATE_SNAPSHOT_MISSING")
     else:
@@ -78,13 +88,14 @@ def build_settlement_health(
     notification_required = window in {"us", "tw"}
     settlement_status = "COMPLETE" if not settlement_reasons else "INCOMPLETE"
     notification_status = (
-        "SENT" if notification_required and not notification_reasons
+        "SUPPRESSED" if notification_required and not notification_reasons and isinstance(notification_payload, Mapping) and notification_payload.get("status") == "SUPPRESSED"
+        else "SENT" if notification_required and not notification_reasons
         else "UNCONFIRMED" if notification_required
         else "NOT_REQUIRED"
     )
     completion_status = (
         "COMPLETE"
-        if settlement_status == "COMPLETE" and notification_status in {"SENT", "NOT_REQUIRED"}
+        if settlement_status == "COMPLETE" and notification_status in {"SENT", "SUPPRESSED", "NOT_REQUIRED"}
         else "INCOMPLETE"
     )
     risk_codes = {
@@ -99,6 +110,8 @@ def build_settlement_health(
     result = {
         "schemaVersion": 2,
         "executionStatus": "COMPLETED",
+        "partialUpdate": "INGESTION_NOT_READY" in reasons,
+        "dataReasonCodes": ["INGESTION_NOT_READY"] if "INGESTION_NOT_READY" in reasons else [],
         "settlementStatus": settlement_status,
         "notificationStatus": notification_status,
         "completionStatus": completion_status,
