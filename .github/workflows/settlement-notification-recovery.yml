@@ -4,6 +4,27 @@ on:
   workflow_run:
     workflows: ["Tranquil Growth Web App Deployment"]
     types: [completed]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Read-only preflight by default; send requires an explicit target"
+        required: true
+        default: plan
+        type: choice
+        options: [plan, send]
+      source_run_id:
+        description: "Trusted main settlement run ID"
+        required: true
+        type: string
+      date:
+        description: "Taipei settlement date from that run"
+        required: true
+        type: string
+      window:
+        description: "Settlement window"
+        required: true
+        type: choice
+        options: [us, tw]
 
 concurrency:
   group: growth-dashboard
@@ -15,7 +36,7 @@ permissions:
 
 jobs:
   recover-notification:
-    if: github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.event != 'pull_request'
+    if: (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.event != 'pull_request') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout trusted main
@@ -34,7 +55,7 @@ jobs:
         id: outbox
         env:
           GH_TOKEN: ${{ github.token }}
-          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id || inputs.source_run_id }}
           SOURCE_REPOSITORY: ${{ github.repository }}
         run: |
           mkdir -p .private-build
@@ -43,6 +64,39 @@ jobs:
           else
             echo "available=false" >> "$GITHUB_OUTPUT"
             echo "No recoverable same-run settlement outbox was produced."
+          fi
+      - name: Validate source settlement stage and download its private evidence
+        id: source
+        if: steps.outbox.outputs.available == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id || inputs.source_run_id }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          EXPECTED_SOURCE_SHA: ${{ github.event.workflow_run.head_sha || '' }}
+          REQUESTED_DATE: ${{ inputs.date || '' }}
+          REQUESTED_WINDOW: ${{ inputs.window || '' }}
+        run: |
+          mkdir -p .private-build/source-notification .private-build/source-health .private-build/source-publication
+          gh run view "$SOURCE_RUN_ID" --repo "$SOURCE_REPOSITORY" --json headBranch,headSha,event,jobs > .private-build/source-run.json
+          jq -e --arg sha "$EXPECTED_SOURCE_SHA" \
+            '.headBranch == "main" and ($sha == "" or .headSha == $sha) and .event != "pull_request" and any(.jobs[]; .name == "build" and .conclusion == "success")' \
+            .private-build/source-run.json >/dev/null
+          SOURCE_SHA=$(jq -r '.headSha' .private-build/source-run.json)
+          printf 'RECOVERY_SOURCE_COMMIT=%s\n' "$SOURCE_SHA" >> "$GITHUB_ENV"
+          gh run download "$SOURCE_RUN_ID" --repo "$SOURCE_REPOSITORY" --name settlement-notification-result --dir .private-build/source-notification
+          gh run download "$SOURCE_RUN_ID" --repo "$SOURCE_REPOSITORY" --name settlement-health --dir .private-build/source-health
+          printf 'RECOVERY_WINDOW_DATE=%s\n' "$(jq -r '.windowDate // empty' .private-build/source-health/settlement-health.json)" >> "$GITHUB_ENV"
+          printf 'RECOVERY_WINDOW=%s\n' "$(jq -r '.window // empty' .private-build/source-health/settlement-health.json)" >> "$GITHUB_ENV"
+          SOURCE_DATE=$(jq -r '.windowDate // empty' .private-build/source-health/settlement-health.json)
+          SOURCE_WINDOW=$(jq -r '.window // empty' .private-build/source-health/settlement-health.json)
+          test -n "$SOURCE_DATE" && test -n "$SOURCE_WINDOW"
+          if [ -n "$REQUESTED_DATE" ] && [ "$REQUESTED_DATE" != "$SOURCE_DATE" ]; then exit 1; fi
+          if [ -n "$REQUESTED_WINDOW" ] && [ "$REQUESTED_WINDOW" != "$SOURCE_WINDOW" ]; then exit 1; fi
+          printf 'source_run_id=%s\ncommit=%s\ndate=%s\nwindow=%s\n' "$SOURCE_RUN_ID" "$SOURCE_SHA" "$SOURCE_DATE" "$SOURCE_WINDOW" >> "$GITHUB_OUTPUT"
+          if gh run download "$SOURCE_RUN_ID" --repo "$SOURCE_REPOSITORY" --name pages-publication-verification --dir .private-build/source-publication; then
+            echo "publication_evidence=available" >> "$GITHUB_OUTPUT"
+          else
+            echo "publication_evidence=unavailable" >> "$GITHUB_OUTPUT"
           fi
       - name: Recover notification without recalculating the ledger
         if: steps.outbox.outputs.available == 'true'
@@ -55,9 +109,18 @@ jobs:
           CURRENT_TRANSACTION_SOURCE: ${{ vars.CURRENT_TRANSACTION_SOURCE || 'TRANSACTIONS_CURRENT' }}
           LEGACY_TRANSACTION_SOURCES: ${{ vars.LEGACY_TRANSACTION_SOURCES || '表單回覆 3,Form Responses 1,Form Responses 2,Form V2' }}
           HISTORY_SOURCE: ${{ vars.HISTORY_SOURCE || 'History' }}
-          RECOVERY_SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
-          RECOVERY_SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
-        run: python recover_settlement_notification.py
+          RECOVERY_SOURCE_RUN_ID: ${{ steps.source.outputs.source_run_id }}
+          RECOVERY_SOURCE_COMMIT: ${{ steps.source.outputs.commit }}
+          RECOVERY_WINDOW_DATE: ${{ steps.source.outputs.date }}
+          RECOVERY_WINDOW: ${{ steps.source.outputs.window }}
+          RECOVERY_MODE: ${{ github.event_name == 'workflow_run' && 'send' || inputs.mode || 'plan' }}
+          SOURCE_NOTIFICATION_RESULT_PATH: .private-build/source-notification/settlement-notification-result.json
+          SOURCE_SETTLEMENT_HEALTH_PATH: .private-build/source-health/settlement-health.json
+          SOURCE_PUBLICATION_VERIFICATION_PATH: .private-build/source-publication/pages-publication-verification.json
+        run: >-
+          python recover_settlement_notification.py --mode "$RECOVERY_MODE"
+          --source-run-id "$RECOVERY_SOURCE_RUN_ID"
+          --date "$RECOVERY_WINDOW_DATE" --window "$RECOVERY_WINDOW"
       - name: Upload non-sensitive recovery result
         if: always() && steps.outbox.outputs.available == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -82,19 +145,49 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: main
+      - name: Check whether the source publication is already verified
+        id: publication_state
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          mkdir -p .private-build/source-publication
+          if gh run download "$SOURCE_RUN_ID" --repo "$SOURCE_REPOSITORY" --name pages-publication-verification --dir .private-build/source-publication; then
+            python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('.private-build/source-publication/pages-publication-verification.json')
+          try:
+              proof = json.loads(path.read_text(encoding='utf-8'))
+          except Exception:
+              proof = {}
+          verified = isinstance(proof, dict) and proof.get('status') == 'VERIFIED'
+          commit = proof.get('sourceCommit') if isinstance(proof, dict) else None
+          verified = verified and (commit is None or commit == '${{ github.event.workflow_run.head_sha }}')
+          print('needed=false' if verified else 'needed=true')
+          PY
+          else
+            echo "needed=true"
+          fi >> "$GITHUB_OUTPUT"
       - name: Configure GitHub Pages
+        if: steps.publication_state.outputs.needed == 'true'
         id: pages_config
         uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
       - name: Set up Python
+        if: steps.publication_state.outputs.needed == 'true'
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version-file: .python-version
           cache: pip
           cache-dependency-path: requirements.lock
       - name: Install locked publisher dependencies
+        if: steps.publication_state.outputs.needed == 'true'
         run: python -m pip install --requirement requirements.lock
       - name: Download only the failed run's public artifact
         id: source_artifact
+        if: steps.publication_state.outputs.needed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
@@ -108,7 +201,7 @@ jobs:
             echo "No trusted public artifact exists; publication recovery is not applicable."
           fi
       - name: Verify original artifact and issue a unique recovery identity
-        if: steps.source_artifact.outputs.available == 'true'
+        if: steps.publication_state.outputs.needed == 'true' && steps.source_artifact.outputs.available == 'true'
         env:
           RECOVERY_SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
           RECOVERY_SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
@@ -117,19 +210,19 @@ jobs:
           --source-run-id "$RECOVERY_SOURCE_RUN_ID"
           --source-commit "$RECOVERY_SOURCE_COMMIT"
       - name: Create Pages deployment artifact
-        if: steps.source_artifact.outputs.available == 'true'
+        if: steps.publication_state.outputs.needed == 'true' && steps.source_artifact.outputs.available == 'true'
         uses: actions/upload-pages-artifact@98ef48e41587a300b82de4cf298aa98b57b2faae # v3.0.1
         with:
           path: ./public-site
       - name: Publish the existing public data without recalculating or notifying
-        if: steps.source_artifact.outputs.available == 'true'
+        if: steps.publication_state.outputs.needed == 'true' && steps.source_artifact.outputs.available == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           PAGES_BASE_URL: ${{ steps.pages_config.outputs.base_url }}
           PUBLICATION_SUMMARY_PATH: .private-build/pages-publication-recovery-summary.json
         run: python pages_publication.py publish-and-verify public-site
       - name: Upload non-sensitive publication recovery result
-        if: always() && steps.source_artifact.outputs.available == 'true'
+        if: always() && steps.publication_state.outputs.needed == 'true' && steps.source_artifact.outputs.available == 'true'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: publication-recovery-result

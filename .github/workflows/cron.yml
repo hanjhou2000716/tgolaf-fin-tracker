@@ -52,6 +52,8 @@ jobs:
       window: ${{ steps.schedule_gate.outputs.window }}
       snapshot_date: ${{ steps.schedule_gate.outputs.snapshot_date }}
       reason_code: ${{ steps.schedule_gate.outputs.reason_code }}
+      recovery_mode: ${{ steps.schedule_gate.outputs.recovery_mode }}
+      source_run_id: ${{ steps.schedule_gate.outputs.source_run_id }}
     steps:
       - name: Checkout Repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -77,7 +79,7 @@ jobs:
 
   build:
     needs: gate
-    if: needs.gate.outputs.should_run == 'true'
+    if: needs.gate.outputs.should_run == 'true' && !contains(fromJSON('["notification_only","publication_only","notification_and_publication"]'), needs.gate.outputs.recovery_mode)
     runs-on: ubuntu-latest
     outputs:
       pages_base_url: ${{ steps.pages_config.outputs.base_url }}
@@ -341,6 +343,162 @@ jobs:
           path: public-site
           if-no-files-found: error
 
+  recover-notification-stage:
+    needs: gate
+    if: needs.gate.outputs.should_run == 'true' && contains(fromJSON('["notification_only","notification_and_publication"]'), needs.gate.outputs.recovery_mode)
+    runs-on: ubuntu-24.04
+    outputs:
+      recovery_status: ${{ steps.result.outputs.status }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout trusted main
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install locked dependencies
+        run: python -m pip install --requirement requirements.lock
+      - name: Download and validate exact source stage evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          RECOVERY_SOURCE_RUN_ID: ${{ needs.gate.outputs.source_run_id }}
+          EXPECTED_DATE: ${{ needs.gate.outputs.snapshot_date }}
+          EXPECTED_WINDOW: ${{ needs.gate.outputs.window }}
+        run: |
+          mkdir -p .private-build/source-notification .private-build/source-health .private-build/source-publication
+          gh run view "$RECOVERY_SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json headBranch,headSha,event,jobs > .private-build/source-run.json
+          jq -e '.headBranch == "main" and .event == "repository_dispatch" and any(.jobs[]; .name == "build" and .conclusion == "success")' .private-build/source-run.json >/dev/null
+          SOURCE_SHA=$(jq -r '.headSha' .private-build/source-run.json)
+          printf 'RECOVERY_SOURCE_COMMIT=%s\n' "$SOURCE_SHA" >> "$GITHUB_ENV"
+          gh run download "$RECOVERY_SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name settlement-notification-outbox --dir .private-build
+          gh run download "$RECOVERY_SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name settlement-notification-result --dir .private-build/source-notification
+          gh run download "$RECOVERY_SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name settlement-health --dir .private-build/source-health
+          gh run download "$RECOVERY_SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name pages-publication-verification --dir .private-build/source-publication || true
+          jq -e --arg date "$EXPECTED_DATE" --arg window "$EXPECTED_WINDOW" '.windowDate == $date and .window == $window and .settlementStatus == "COMPLETE"' .private-build/source-health/settlement-health.json >/dev/null
+          jq -e --arg date "$EXPECTED_DATE" --arg window "$EXPECTED_WINDOW" '.windowDate == $date and .window == $window' .private-build/source-notification/settlement-notification-result.json >/dev/null
+      - name: Recover only the missing notification stage
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+          CURRENT_TRANSACTION_SPREADSHEET_ID: ${{ vars.CURRENT_TRANSACTION_SPREADSHEET_ID || '' }}
+          LEGACY_TRANSACTION_SPREADSHEET_ID: ${{ vars.LEGACY_TRANSACTION_SPREADSHEET_ID || '' }}
+          CURRENT_TRANSACTION_SOURCE: ${{ vars.CURRENT_TRANSACTION_SOURCE || 'TRANSACTIONS_CURRENT' }}
+          LEGACY_TRANSACTION_SOURCES: ${{ vars.LEGACY_TRANSACTION_SOURCES || '表單回覆 3,Form Responses 1,Form Responses 2,Form V2' }}
+          HISTORY_SOURCE: ${{ vars.HISTORY_SOURCE || 'History' }}
+          RECOVERY_MODE: send
+          RECOVERY_SOURCE_RUN_ID: ${{ needs.gate.outputs.source_run_id }}
+          RECOVERY_WINDOW_DATE: ${{ needs.gate.outputs.snapshot_date }}
+          RECOVERY_WINDOW: ${{ needs.gate.outputs.window }}
+          SOURCE_NOTIFICATION_RESULT_PATH: .private-build/source-notification/settlement-notification-result.json
+          SOURCE_SETTLEMENT_HEALTH_PATH: .private-build/source-health/settlement-health.json
+          SOURCE_PUBLICATION_VERIFICATION_PATH: .private-build/source-publication/pages-publication-verification.json
+        run: >-
+          python recover_settlement_notification.py --mode send
+          --source-run-id "$RECOVERY_SOURCE_RUN_ID"
+          --date "$RECOVERY_WINDOW_DATE" --window "$RECOVERY_WINDOW"
+      - name: Record notification recovery status
+        id: result
+        if: always()
+        run: |
+          if [ -f .private-build/notification-recovery-result.json ]; then
+            STATUS=$(jq -r '.status // "FAILED"' .private-build/notification-recovery-result.json)
+          else
+            STATUS=FAILED
+          fi
+          printf 'status=%s\n' "$STATUS" >> "$GITHUB_OUTPUT"
+      - name: Upload stage recovery result
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: notification-recovery-result
+          path: .private-build/notification-recovery-result.json
+          if-no-files-found: ignore
+
+  recover-publication-stage:
+    needs: gate
+    if: needs.gate.outputs.should_run == 'true' && contains(fromJSON('["publication_only","notification_and_publication"]'), needs.gate.outputs.recovery_mode)
+    runs-on: ubuntu-24.04
+    outputs:
+      publication_status: ${{ steps.result.outputs.status }}
+    environment:
+      name: github-pages
+    permissions:
+      actions: read
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - name: Checkout trusted publisher
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+      - name: Configure GitHub Pages
+        id: pages_config
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install locked publisher dependencies
+        run: python -m pip install --requirement requirements.lock
+      - name: Validate source run and download exact public artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ needs.gate.outputs.source_run_id }}
+        run: |
+          mkdir -p public-site .private-build
+          gh run view "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json headBranch,headSha,event,jobs > .private-build/source-run.json
+          jq -e '.headBranch == "main" and .event == "repository_dispatch" and any(.jobs[]; .name == "build" and .conclusion == "success")' .private-build/source-run.json >/dev/null
+          SOURCE_SHA=$(jq -r '.headSha' .private-build/source-run.json)
+          printf 'RECOVERY_SOURCE_COMMIT=%s\n' "$SOURCE_SHA" >> "$GITHUB_ENV"
+          gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name public-site --dir public-site
+      - name: Prepare a new identity for the existing artifact
+        env:
+          RECOVERY_SOURCE_RUN_ID: ${{ needs.gate.outputs.source_run_id }}
+        run: >-
+          python pages_publication.py prepare-republication public-site
+          --source-run-id "$RECOVERY_SOURCE_RUN_ID" --source-commit "$RECOVERY_SOURCE_COMMIT"
+      - name: Create Pages deployment artifact
+        uses: actions/upload-pages-artifact@98ef48e41587a300b82de4cf298aa98b57b2faae # v3.0.1
+        with:
+          path: ./public-site
+      - name: Publish only the existing artifact
+        id: publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PAGES_BASE_URL: ${{ steps.pages_config.outputs.base_url }}
+          PUBLICATION_SUMMARY_PATH: .private-build/pages-stage-recovery-summary.json
+        run: python pages_publication.py publish-and-verify public-site
+      - name: Record publication recovery status
+        id: result
+        if: always()
+        run: |
+          if [ -f .private-build/pages-stage-recovery-summary.json ]; then
+            STATUS=$(jq -r '.status // "FAILED"' .private-build/pages-stage-recovery-summary.json)
+          else
+            STATUS=FAILED
+          fi
+          printf 'status=%s\n' "$STATUS" >> "$GITHUB_OUTPUT"
+      - name: Upload stage recovery result
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: publication-stage-recovery-result
+          path: .private-build/pages-stage-recovery-summary.json
+          if-no-files-found: ignore
+
   deploy:
     needs: build
     runs-on: ubuntu-latest
@@ -427,7 +585,7 @@ jobs:
 
   verify-settlement-completion:
     name: Verify settlement notification receipt
-    needs: [gate, build, deploy, verify-publication]
+    needs: [gate, build, deploy, verify-publication, recover-notification-stage, recover-publication-stage]
     if: always() && needs.gate.outputs.should_run == 'true'
     runs-on: ubuntu-24.04
     permissions:
@@ -449,7 +607,8 @@ jobs:
           mkdir -p .private-build
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name settlement-notification-result --dir .private-build
           gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --name settlement-health --dir .private-build
-      - name: Require complete stages for scheduled windows
+      - name: Require complete stages for normal settlement runs
+        if: needs.gate.outputs.recovery_mode == 'settlement'
         env:
           BUILD_RESULT: ${{ needs.build.result }}
           DEPLOY_RESULT: ${{ needs.deploy.result }}
@@ -458,3 +617,17 @@ jobs:
           EXPECTED_DATE: ${{ needs.gate.outputs.snapshot_date }}
           EXPECTED_WINDOW: ${{ needs.gate.outputs.window }}
         run: python workflow_completion.py
+      - name: Evaluate stage-only recovery result
+        if: needs.gate.outputs.recovery_mode != 'settlement'
+        env:
+          RECOVERY_MODE: ${{ needs.gate.outputs.recovery_mode }}
+          RECOVERY_NOTIFICATION_STATUS: ${{ needs['recover-notification-stage'].outputs.recovery_status }}
+          RECOVERY_PUBLICATION_STATUS: ${{ needs['recover-publication-stage'].outputs.publication_status }}
+        run: python stage_recovery_completion.py
+      - name: Upload stage recovery completion summary
+        if: always() && needs.gate.outputs.recovery_mode != 'settlement'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: stage-recovery-completion
+          path: .private-build/stage-recovery-completion.json
+          if-no-files-found: ignore

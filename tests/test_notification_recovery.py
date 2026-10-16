@@ -46,6 +46,23 @@ def outbox(run_id="100", commit="a" * 40):
 
 
 class NotificationRecoveryTests(unittest.TestCase):
+    def test_read_only_recovery_plan_never_writes_or_posts(self):
+        sheet = FakeHistory()
+        before = json.dumps(sheet.rows, sort_keys=True)
+        result = recover(
+            outbox(), token="test-token", chat_id="test-chat", history_sheet=sheet,
+            expected_run_id="100", expected_commit="a" * 40,
+            source_result={"status": "FAILED", "reasonCode": "NOTIFICATION_STATE_UNAVAILABLE",
+                           "notificationType": "settlement", "windowDate": "2026-10-08", "window": "tw"},
+            source_health={"settlementStatus": "COMPLETE", "windowDate": "2026-10-08", "window": "tw"},
+            post=lambda *args, **kwargs: self.fail("read-only plan must not post"),
+            now=dt.datetime(2026, 10, 8, 7, 0, tzinfo=dt.timezone.utc),
+            send=False,
+        )
+        self.assertEqual(result["status"], "READY_TO_SEND")
+        self.assertEqual(result["reasonCode"], "DRY_RUN_NO_SIDE_EFFECT")
+        self.assertEqual(json.dumps(sheet.rows, sort_keys=True), before)
+
     def test_valid_same_day_outbox_sends_once_and_writes_history_receipt(self):
         sheet = FakeHistory()
         calls = []
@@ -62,6 +79,55 @@ class NotificationRecoveryTests(unittest.TestCase):
         self.assertEqual(result["status"], "SENT")
         self.assertEqual(len(calls), 1)
         self.assertIn('"status":"SENT"', sheet.rows[1][1])
+
+    def test_same_known_state_failure_is_blocked_without_a_second_send_attempt(self):
+        sheet = FakeHistory()
+        sheet.rows[1][1] = "not-a-valid-marker"
+        calls = []
+        result = recover(
+            outbox(), token="test-token", chat_id="test-chat", history_sheet=sheet,
+            expected_run_id="100", expected_commit="a" * 40,
+            source_result={"status": "FAILED", "reasonCode": "NOTIFICATION_STATE_UNAVAILABLE",
+                           "notificationType": "settlement", "windowDate": "2026-10-08", "window": "tw"},
+            source_health={"settlementStatus": "COMPLETE", "windowDate": "2026-10-08", "window": "tw"},
+            post=lambda *args, **kwargs: calls.append(1),
+            now=dt.datetime(2026, 10, 8, 7, 0, tzinfo=dt.timezone.utc),
+        )
+        self.assertEqual(result["status"], "BLOCKED_UPSTREAM")
+        self.assertEqual(result["completionStatus"], "INCOMPLETE")
+        self.assertEqual(result["httpAttempted"], False)
+        self.assertEqual(calls, [])
+
+    def test_incomplete_source_settlement_never_sends_outbox(self):
+        calls = []
+        result = recover(
+            outbox(), token="test-token", chat_id="test-chat", history_sheet=FakeHistory(),
+            expected_run_id="100", expected_commit="a" * 40,
+            source_result={"status": "FAILED", "reasonCode": "NOTIFICATION_STATE_UNAVAILABLE",
+                           "notificationType": "settlement", "windowDate": "2026-10-08", "window": "tw"},
+            source_health={"settlementStatus": "INCOMPLETE", "windowDate": "2026-10-08", "window": "tw"},
+            post=lambda *args, **kwargs: calls.append(1),
+            now=dt.datetime(2026, 10, 8, 7, 0, tzinfo=dt.timezone.utc),
+        )
+        self.assertEqual(result["status"], "BLOCKED_UPSTREAM")
+        self.assertEqual(result["reasonCode"], "SOURCE_SETTLEMENT_NOT_COMPLETE")
+        self.assertEqual(calls, [])
+
+    def test_non_retryable_source_failure_is_blocked(self):
+        calls = []
+        result = recover(
+            outbox(), token="test-token", chat_id="test-chat", history_sheet=FakeHistory(),
+            expected_run_id="100", expected_commit="a" * 40,
+            source_result={"status": "FAILED", "reasonCode": "TELEGRAM_REJECTED",
+                           "notificationType": "settlement", "windowDate": "2026-10-08", "window": "tw",
+                           "httpAttempted": True},
+            source_health={"settlementStatus": "COMPLETE", "windowDate": "2026-10-08", "window": "tw"},
+            post=lambda *args, **kwargs: calls.append(1),
+            now=dt.datetime(2026, 10, 8, 7, 0, tzinfo=dt.timezone.utc),
+        )
+        self.assertEqual(result["status"], "BLOCKED_UPSTREAM")
+        self.assertEqual(result["reasonCode"], "SOURCE_FAILURE_NOT_AUTOMATICALLY_RETRYABLE")
+        self.assertEqual(calls, [])
 
     def test_failed_or_mismatched_artifacts_do_not_trigger_a_send(self):
         encrypted = encrypt_outbox(outbox(), telegram_token="fixture-token", google_credentials="fixture-gcp")

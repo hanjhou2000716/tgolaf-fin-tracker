@@ -89,6 +89,9 @@ from history_store import (
     resolve_transaction_ingestion_alerts,
     upsert_history_snapshot,
 )
+from settlement_notification_state import read_state as read_settlement_notification_state
+from settlement_notification_state import resolve_history_sheet
+from settlement_notification_state import write_state as write_settlement_notification_state
 from telegram_delivery import (
     deliver_once as deliver_telegram_notification,
     encrypt_outbox as encrypt_telegram_outbox,
@@ -212,116 +215,13 @@ def settlement_notification_sent(history_sheet, snapshot_date, window_key):
 
 
 def settlement_notification_state(history_sheet, snapshot_date, window_key):
-    """Read fail-closed delivery state; legacy timestamps remain SENT."""
-    if history_sheet is None:
-        raise RuntimeError("settlement notification state is unavailable")
-    header_map = build_header_map(retry_sheet_operation("history.row_values", history_sheet.row_values, 1))
-    marker_column = header_map.get("Settlement_Notification_Sent_At")
-    if not marker_column:
-        raise RuntimeError("settlement notification marker column is missing")
-    row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
-    if row_number is None:
-        # An incomplete input run intentionally does not write financial
-        # History. Search a date-qualified marker on existing rows instead.
-        global_key = f"{snapshot_date}|{window_key}"
-        rows = retry_sheet_operation("history.get_all_values", history_sheet.get_all_values)
-        for row in reversed(rows[1:]):
-            raw = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
-            if not raw:
-                continue
-            try:
-                markers = json.loads(raw)
-            except json.JSONDecodeError as error:
-                raise RuntimeError("settlement notification marker is malformed") from error
-            if not isinstance(markers, dict):
-                raise RuntimeError("settlement notification marker has unknown format")
-            value = markers.get(global_key)
-            if value is not None:
-                if not isinstance(value, dict) or value.get("status") not in {"SENDING", "SENT", "FAILED", "DELIVERY_UNKNOWN"}:
-                    raise RuntimeError("settlement notification marker has unknown state")
-                return value
-        return {"status": "PENDING"}
-    row = retry_sheet_operation("history.row_values", history_sheet.row_values, row_number)
-    raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
-    if not raw_marker:
-        return {"status": "PENDING"}
-    try:
-        markers = json.loads(raw_marker)
-    except json.JSONDecodeError as error:
-        # Old versions stored a single send timestamp. It has no window key,
-        # so conservatively regard it as already sent during migration.
-        try:
-            datetime.datetime.fromisoformat(raw_marker.replace("Z", "+00:00"))
-        except ValueError:
-            raise RuntimeError("settlement notification marker is malformed") from error
-        return {"status": "SENT", "sentAt": raw_marker, "legacy": True}
-    if isinstance(markers, str):
-        # Some older writers JSON-encoded the single timestamp before the
-        # per-window object was introduced. Treat it conservatively as sent.
-        try:
-            datetime.datetime.fromisoformat(markers.replace("Z", "+00:00"))
-        except ValueError as error:
-            raise RuntimeError("settlement notification marker is malformed") from error
-        return {"status": "SENT", "sentAt": markers, "legacy": True}
-    if not isinstance(markers, dict):
-        raise RuntimeError("settlement notification marker has unknown format")
-    value = markers.get(window_key)
-    if isinstance(value, str) and value:
-        return {"status": "SENT", "sentAt": value, "legacy": True}
-    if value is None:
-        global_key = f"{snapshot_date}|{window_key}"
-        all_rows = retry_sheet_operation("history.get_all_values", history_sheet.get_all_values)
-        for candidate in reversed(all_rows[1:]):
-            raw_candidate = str(candidate[marker_column - 1]).strip() if len(candidate) >= marker_column else ""
-            if not raw_candidate:
-                continue
-            try:
-                candidate_markers = json.loads(raw_candidate)
-            except json.JSONDecodeError as error:
-                raise RuntimeError("settlement notification marker is malformed") from error
-            if not isinstance(candidate_markers, dict):
-                raise RuntimeError("settlement notification marker has unknown format")
-            global_value = candidate_markers.get(global_key)
-            if global_value is not None:
-                if not isinstance(global_value, dict) or global_value.get("status") not in {"SENDING", "SENT", "FAILED", "DELIVERY_UNKNOWN"}:
-                    raise RuntimeError("settlement notification marker has unknown state")
-                return global_value
-        return {"status": "PENDING"}
-    if not isinstance(value, dict) or value.get("status") not in {
-        "SENDING", "SENT", "FAILED", "DELIVERY_UNKNOWN"
-    }:
-        raise RuntimeError("settlement notification marker has unknown state")
-    return value
+    """Read a date/window receipt through the shared legacy-aware codec."""
+    return read_settlement_notification_state(history_sheet, snapshot_date, window_key)
 
 
 def mark_settlement_notification_state(history_sheet, snapshot_date, window_key, state):
-    if history_sheet is None:
-        raise RuntimeError("settlement notification state is unavailable")
-    header_map = build_header_map(retry_sheet_operation("history.row_values", history_sheet.row_values, 1))
-    marker_column = header_map.get("Settlement_Notification_Sent_At")
-    if not marker_column:
-        raise RuntimeError("settlement notification marker column is missing")
-    row_number = find_row_by_key(history_sheet, "Date", snapshot_date)
-    if row_number is None:
-        rows = retry_sheet_operation("history.get_all_values", history_sheet.get_all_values)
-        row_number = len(rows) if len(rows) > 1 else None
-        if row_number is None:
-            raise RuntimeError("settlement notification history row is missing")
-        window_key = f"{snapshot_date}|{window_key}"
-    row = retry_sheet_operation("history.row_values", history_sheet.row_values, row_number)
-    raw_marker = str(row[marker_column - 1]).strip() if len(row) >= marker_column else ""
-    try:
-        markers = json.loads(raw_marker) if raw_marker else {}
-    except json.JSONDecodeError as error:
-        raise RuntimeError("settlement notification marker is malformed") from error
-    if not isinstance(markers, dict):
-        raise RuntimeError("settlement notification marker has unknown format")
-    markers[window_key] = state
-    marker_a1 = column_to_a1(marker_column)
-    retry_sheet_operation("history.update", history_sheet.update,
-        f"{marker_a1}{row_number}",
-        [[json.dumps(markers, ensure_ascii=False, separators=(",", ":"))]],
-    )
+    """Persist and preserve a date-qualified receipt in the shared codec."""
+    return write_settlement_notification_state(history_sheet, snapshot_date, window_key, state)
 
 
 def mark_settlement_notification_sent(history_sheet, snapshot_date, window_key, sent_at):
@@ -505,6 +405,7 @@ def calculate_current_assets():
             f"spreadsheet.worksheets.{workbook_index}",
             workbook.worksheets,
         ))
+    history_sheet = resolve_history_sheet(worksheets, source_roles.role_for)
     # Read the immutable ledger before any holdings/cash reducer runs. A
     # replay must retain its original canonical price rather than inherit a
     # newly fetched quote and drift the rebuilt cash balance.
@@ -518,7 +419,7 @@ def calculate_current_assets():
     for ws_index, ws in enumerate(worksheets, start=1):
         role = source_roles.role_for(ws.title)
         if role == "HISTORY":
-            history_sheet = ws
+            continue
         elif role in {"CURRENT", "LEGACY_ARCHIVE"}:
             current_source_seen = current_source_seen or role == "CURRENT"
             rows = retry_sheet_operation(
@@ -2989,6 +2890,12 @@ def main():
                 save_state=save_delivery_state,
                 post=requests.post,
                 now=generated_at,
+                source_metadata={
+                    "sourceRunId": os.getenv("GITHUB_RUN_ID"),
+                    "sourceCommit": os.getenv("GITHUB_SHA"),
+                    "notificationType": "settlement" if not refresh_blocked else "data_blocked",
+                    "messageKind": "partial_update" if partial_update else "complete" if not refresh_blocked else "blocked",
+                },
             )
             notification_result["notificationType"] = "settlement" if not refresh_blocked else "data_blocked"
             notification_result["messageKind"] = "partial_update" if partial_update else "complete" if not refresh_blocked else "blocked"
