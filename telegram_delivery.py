@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import time
@@ -156,46 +157,103 @@ def deliver_once(
     post: Callable[..., Any],
     now: str,
     sleep: Callable[[float], None] = time.sleep,
+    source_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply a write-ahead marker so interrupted sends are never replayed."""
+    def _state_error(error: Exception, *, status: str = "FAILED", stage: str) -> dict[str, Any]:
+        reason = getattr(error, "reason_code", None) or "NOTIFICATION_STATE_UNAVAILABLE"
+        detail = str(error) if getattr(error, "reason_code", None) else type(error).__name__
+        return {
+            "schemaVersion": 2,
+            "windowDate": date_key,
+            "window": window,
+            "status": status,
+            "failureStage": stage,
+            "reasonCode": reason,
+            "failureDetail": detail,
+            "httpAttempted": False,
+            "incidentKey": hashlib.sha256(f"settlement|{date_key}|{window}|{reason}".encode("utf-8")).hexdigest()[:24],
+        }
+
     try:
         prior = load_state()
-    except Exception:
+    except Exception as error:
         return {"schemaVersion": 1, "windowDate": date_key, "window": window,
-                "status": "FAILED", "reasonCode": "NOTIFICATION_STATE_UNAVAILABLE"}
+                **_state_error(error, stage="STATE_READ")}
     prior_status = str(prior.get("status", "PENDING"))
     if prior_status == "SENT":
         return {"schemaVersion": 1, "windowDate": date_key, "window": window,
-                "status": "SENT", "reasonCode": "ALREADY_SENT"}
+                "status": "SENT", "reasonCode": "ALREADY_SENT",
+                "priorReceipt": {key: prior.get(key) for key in ("sentAt", "messageId", "attemptId", "sourceRunId", "sourceCommit") if prior.get(key) is not None}}
     if prior_status in {"SENDING", "DELIVERY_UNKNOWN"}:
         return {"schemaVersion": 1, "windowDate": date_key, "window": window,
                 "status": "DELIVERY_UNKNOWN", "reasonCode": "PRIOR_ATTEMPT_UNCONFIRMED"}
     if prior_status == "FAILED" and prior.get("reasonCode") != "TELEGRAM_RATE_LIMITED":
         return {"schemaVersion": 1, "windowDate": date_key, "window": window,
                 "status": "FAILED", "reasonCode": str(prior.get("reasonCode") or "TELEGRAM_REJECTED")}
-    sending = {"status": "SENDING", "attemptedAt": now}
+    source_metadata = source_metadata or {}
+    source_run_id = source_metadata.get("sourceRunId")
+    source_commit = source_metadata.get("sourceCommit")
+    attempt_id = hashlib.sha256(
+        f"{date_key}|{window}|{now}|{source_run_id or ''}|{source_commit or ''}".encode("utf-8")
+    ).hexdigest()[:32]
+    audit = {
+        "schemaVersion": 2,
+        "notificationType": source_metadata.get("notificationType", "settlement"),
+        "messageKind": source_metadata.get("messageKind"),
+        "windowDate": date_key,
+        "window": window,
+        "sourceRunId": str(source_run_id) if source_run_id is not None else None,
+        "sourceCommit": str(source_commit) if source_commit is not None else None,
+        "attemptId": attempt_id,
+    }
+    sending = {**audit, "status": "SENDING", "attemptedAt": now}
     try:
         save_state(sending)
-    except Exception:
-        return {"schemaVersion": 1, "windowDate": date_key, "window": window,
-                "status": "FAILED", "reasonCode": "NOTIFICATION_STATE_WRITE_FAILED"}
+        persisted_sending = load_state()
+    except Exception as error:
+        return {
+            **_state_error(error, status="DELIVERY_UNKNOWN", stage="SENDING_READBACK"),
+            "reasonCode": "NOTIFICATION_SENDING_STATE_UNCONFIRMED",
+            "attemptId": attempt_id,
+        }
+    if persisted_sending.get("status") != "SENDING" or persisted_sending.get("attemptId") != attempt_id:
+        return {
+            "schemaVersion": 2, "windowDate": date_key, "window": window,
+            "status": "DELIVERY_UNKNOWN", "failureStage": "SENDING_READBACK",
+            "reasonCode": "NOTIFICATION_SENDING_STATE_MISMATCH", "httpAttempted": False,
+            "attemptId": attempt_id,
+        }
     try:
         receipt = send_message(token, payload, post=post, sleep=sleep)
     except TelegramDeliveryError as error:
-        result = {"schemaVersion": 1, "windowDate": date_key, "window": window,
-                  "status": error.status, "reasonCode": error.reason_code}
+        result = {**audit, "status": error.status, "reasonCode": error.reason_code,
+                  "failureStage": "TELEGRAM_SEND", "httpAttempted": True,
+                  "attemptedAt": now}
         try:
-            save_state({**result, "attemptedAt": now})
+            save_state(result)
         except Exception:
             # The previously committed SENDING state still prevents a resend.
             result = {**result, "status": "DELIVERY_UNKNOWN",
                       "reasonCode": "NOTIFICATION_STATE_WRITE_FAILED"}
         return result
-    sent = {"status": "SENT", "sentAt": now, "messageId": receipt["messageId"]}
+    sent = {**audit, "status": "SENT", "sentAt": now,
+            "messageId": receipt["messageId"], "httpAttempted": True}
     try:
         save_state(sent)
+        persisted_sent = load_state()
     except Exception:
-        return {"schemaVersion": 1, "windowDate": date_key, "window": window,
-                "status": "DELIVERY_UNKNOWN", "reasonCode": "SENT_STATE_WRITE_FAILED"}
-    return {"schemaVersion": 1, "windowDate": date_key, "window": window,
-            "status": "SENT", "sentAt": now, "messageId": receipt["messageId"]}
+        return {"schemaVersion": 2, "windowDate": date_key, "window": window,
+                "status": "DELIVERY_UNKNOWN", "failureStage": "SENT_READBACK",
+                "reasonCode": "SENT_STATE_WRITE_FAILED", "httpAttempted": True,
+                "attemptId": attempt_id}
+    if (persisted_sent.get("status") != "SENT"
+            or persisted_sent.get("attemptId") != attempt_id
+            or str(persisted_sent.get("messageId")) != str(receipt["messageId"])):
+        return {"schemaVersion": 2, "windowDate": date_key, "window": window,
+                "status": "DELIVERY_UNKNOWN", "failureStage": "SENT_READBACK",
+                "reasonCode": "SENT_STATE_READBACK_MISMATCH", "httpAttempted": True,
+                "attemptId": attempt_id}
+    return {"schemaVersion": 2, "windowDate": date_key, "window": window,
+            "status": "SENT", "sentAt": now, "messageId": receipt["messageId"],
+            "attemptId": attempt_id, "httpAttempted": True}

@@ -1,7 +1,10 @@
 import datetime as dt
+import os
+import tempfile
 import unittest
+from unittest.mock import patch
 
-from schedule_gate import decide_fallback, dispatch_context, scheduled_context
+from schedule_gate import _stage_evidence_for_run, decide_fallback, dispatch_context, main, scheduled_context
 from service_contracts import UTC
 
 
@@ -57,6 +60,165 @@ class ScheduleGateTests(unittest.TestCase):
         )
         self.assertEqual(result["decision"], "RUN")
         self.assertEqual(result["reasonCode"], "RUN_DATA_UNHEALTHY")
+
+    def test_failed_primary_with_all_required_stage_proofs_skips_fallback(self):
+        runs = [{
+            "status": "completed", "conclusion": "failure", "headSha": "old",
+            "createdAt": "2026-09-15T21:42:00Z", "event": "repository_dispatch", "databaseId": 123,
+        }]
+        result = decide_fallback(
+            event_name="schedule", schedule="20 22 * * 1-5", now_utc=self.now,
+            commit="new", runs=runs,
+            stage_evidence={"settlementStatus": "COMPLETE", "notificationStatus": "SENT", "publicationStatus": "VERIFIED"},
+            source_run_id="123",
+        )
+        self.assertEqual(result["decision"], "SKIP")
+        self.assertEqual(result["reasonCode"], "SKIP_REQUIRED_STAGES_COMPLETE")
+
+    def test_settlement_complete_with_only_notification_missing_selects_recovery(self):
+        runs = [{
+            "status": "completed", "conclusion": "failure", "headSha": "old",
+            "createdAt": "2026-09-15T21:42:00Z", "event": "repository_dispatch", "databaseId": 123,
+        }]
+        result = decide_fallback(
+            event_name="schedule", schedule="20 22 * * 1-5", now_utc=self.now,
+            commit="new", runs=runs,
+            stage_evidence={"settlementStatus": "COMPLETE", "notificationStatus": "FAILED", "publicationStatus": "VERIFIED"},
+            source_run_id="123",
+        )
+        self.assertEqual(result["decision"], "RUN")
+        self.assertEqual(result["recoveryMode"], "notification_only")
+        self.assertEqual(result["sourceRunId"], "123")
+
+    def test_recovered_notification_with_publication_missing_selects_publication_only(self):
+        runs = [{
+            "status": "completed", "conclusion": "failure", "headSha": "old",
+            "createdAt": "2026-09-15T21:42:00Z", "event": "repository_dispatch", "databaseId": 123,
+        }]
+        result = decide_fallback(
+            event_name="schedule", schedule="20 22 * * 1-5", now_utc=self.now,
+            commit="new", runs=runs,
+            stage_evidence={"settlementStatus": "COMPLETE", "notificationStatus": "FAILED", "publicationStatus": "FAILED"},
+            recovery_evidence={"status": "SENT", "sourceRunId": "123"},
+            source_run_id="123",
+        )
+        self.assertEqual(result["recoveryMode"], "publication_only")
+
+    def test_missing_publication_artifact_keeps_settlement_and_notification_evidence(self):
+        run = {"databaseId": 123, "headSha": "abc"}
+        health = {"windowDate": "2026-09-15", "window": "tw", "settlementStatus": "COMPLETE"}
+        notification = {"windowDate": "2026-09-15", "window": "tw", "status": "SENT"}
+        with patch("schedule_gate._download_json_artifact", side_effect=[health, notification, None]):
+            evidence = _stage_evidence_for_run(run, expected_window="tw", expected_date="2026-09-15")
+        self.assertEqual(evidence["settlementStatus"], "COMPLETE")
+        self.assertEqual(evidence["notificationStatus"], "SENT")
+        self.assertEqual(evidence["publicationStatus"], "UNVERIFIED")
+        result = decide_fallback(
+            event_name="schedule", schedule="25 7 * * 1-5", now_utc=self.now,
+            runs=[{
+                "status": "completed", "conclusion": "failure", "headSha": "abc",
+                "createdAt": "2026-09-15T06:45:00Z", "event": "repository_dispatch", "databaseId": 123,
+            }],
+            stage_evidence=evidence, source_run_id="123",
+        )
+        self.assertEqual(result["recoveryMode"], "publication_only")
+
+    def test_explicitly_disabled_notification_is_not_auto_recovered(self):
+        runs = [{
+            "status": "completed", "conclusion": "success", "headSha": "abc",
+            "createdAt": "2026-09-15T06:45:00Z", "event": "repository_dispatch", "databaseId": 123,
+        }]
+        result = decide_fallback(
+            event_name="schedule", schedule="25 7 * * 1-5", now_utc=self.now,
+            runs=runs,
+            stage_evidence={"settlementStatus": "COMPLETE", "notificationStatus": "DISABLED", "publicationStatus": "VERIFIED"},
+            source_run_id="123",
+        )
+        self.assertEqual(result["decision"], "SKIP")
+        self.assertEqual(result["reasonCode"], "SKIP_REQUIRED_STAGES_COMPLETE")
+
+    def test_verified_newer_publication_prevents_republishing_superseded_window(self):
+        runs = [{
+            "status": "completed", "conclusion": "failure", "headSha": "abc",
+            "createdAt": "2026-09-15T06:45:00Z", "event": "repository_dispatch", "databaseId": 123,
+        }]
+        result = decide_fallback(
+            event_name="schedule", schedule="25 7 * * 1-5", now_utc=self.now,
+            runs=runs,
+            stage_evidence={"settlementStatus": "COMPLETE", "notificationStatus": "SENT", "publicationStatus": "SUPERSEDED"},
+            source_run_id="123",
+        )
+        self.assertEqual(result["decision"], "SKIP")
+        self.assertEqual(result["reasonCode"], "SKIP_REQUIRED_STAGES_COMPLETE")
+
+    def test_blocked_notification_recovery_is_not_retried_by_later_fallback(self):
+        runs = [{
+            "status": "completed", "conclusion": "failure", "headSha": "abc",
+            "createdAt": "2026-09-15T06:45:00Z", "event": "repository_dispatch", "databaseId": 123,
+        }]
+        common = {
+            "event_name": "schedule", "schedule": "25 7 * * 1-5", "now_utc": self.now,
+            "runs": runs,
+            "stage_evidence": {"settlementStatus": "COMPLETE", "notificationStatus": "FAILED", "publicationStatus": "VERIFIED"},
+            "recovery_evidence": {"status": "BLOCKED_UPSTREAM"}, "source_run_id": "123",
+        }
+        result = decide_fallback(**common)
+        self.assertEqual(result["decision"], "SKIP")
+        self.assertEqual(result["reasonCode"], "SKIP_NOTIFICATION_RECOVERY_BLOCKED_UPSTREAM")
+
+        common["stage_evidence"] = {"settlementStatus": "COMPLETE", "notificationStatus": "FAILED", "publicationStatus": "UNVERIFIED"}
+        result = decide_fallback(**common)
+        self.assertEqual(result["recoveryMode"], "publication_only")
+
+    def test_recovery_technical_failure_is_not_repeated_but_explicit_429_can_retry(self):
+        runs = [{
+            "status": "completed", "conclusion": "failure", "headSha": "abc",
+            "createdAt": "2026-09-15T06:45:00Z", "event": "repository_dispatch", "databaseId": 123,
+        }]
+        args = {
+            "event_name": "schedule", "schedule": "25 7 * * 1-5", "now_utc": self.now,
+            "runs": runs,
+            "stage_evidence": {"settlementStatus": "COMPLETE", "notificationStatus": "FAILED", "publicationStatus": "VERIFIED"},
+            "source_run_id": "123",
+        }
+        args["recovery_evidence"] = {"status": "FAILED", "reasonCode": "OUTBOX_HASH_INVALID"}
+        result = decide_fallback(**args)
+        self.assertEqual(result["decision"], "SKIP")
+        self.assertEqual(result["reasonCode"], "SKIP_NOTIFICATION_RECOVERY_FAILED")
+
+        args["recovery_evidence"] = {"status": "FAILED", "reasonCode": "TELEGRAM_RATE_LIMITED"}
+        result = decide_fallback(**args)
+        self.assertEqual(result["recoveryMode"], "notification_only")
+
+    def test_stage_artifacts_are_bound_to_exact_publication_manifest(self):
+        run = {"databaseId": 123, "headSha": "a" * 40}
+        health = {"windowDate": "2026-09-15", "window": "tw", "settlementStatus": "COMPLETE"}
+        notification = {"windowDate": "2026-09-15", "window": "tw", "status": "SENT"}
+        proof = {
+            "status": "VERIFIED", "runId": "123", "sourceCommit": "a" * 40,
+            "windowDate": "2026-09-15", "window": "tw", "publicationId": "owner/repo:123:1:1",
+            "contentHash": "b" * 64,
+        }
+        with patch("schedule_gate._download_json_artifact", side_effect=[health, notification, proof]):
+            evidence = _stage_evidence_for_run(run, expected_window="tw", expected_date="2026-09-15")
+        self.assertEqual(evidence["publicationStatus"], "VERIFIED")
+        proof["sourceCommit"] = "c" * 40
+        with patch("schedule_gate._download_json_artifact", side_effect=[health, notification, proof]):
+            evidence = _stage_evidence_for_run(run, expected_window="tw", expected_date="2026-09-15")
+        self.assertEqual(evidence["publicationStatus"], "UNVERIFIED")
+
+    def test_non_schedule_main_does_not_require_schedule_artifact_locals(self):
+        previous_directory = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            try:
+                os.chdir(directory)
+                with patch.dict(os.environ, {
+                    "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_EVENT_SCHEDULE": "",
+                    "GITHUB_SHA": "abc", "GITHUB_OUTPUT": "",
+                }, clear=False):
+                    self.assertEqual(main(), 0)
+            finally:
+                os.chdir(previous_directory)
 
     def test_old_date_window_or_commit_does_not_skip(self):
         runs = [{

@@ -1,5 +1,7 @@
 import json
 import io
+import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -17,6 +19,7 @@ from pages_publication import (
     _request_json,
     _oidc_token,
     _publish_pages,
+    main as publication_main,
 )
 
 
@@ -134,6 +137,30 @@ class PagesPublicationTests(unittest.TestCase):
             self.assertNotEqual(manifest_a["publicationId"], manifest_b["publicationId"])
             self.assertIn("status.json", manifest_a["files"])
             self.assertNotIn("portfolio", json.dumps(manifest_a))
+
+    def test_live_verification_artifact_binds_scope_to_exact_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            site = root / "site"
+            self._site(site)
+            manifest = prepare_manifest(site, env={
+                "GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "123",
+                "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "a" * 40,
+                "PUBLICATION_WINDOW_DATE": "2026-10-16", "PUBLICATION_WINDOW": "tw",
+            })
+            summary = root / "publication-verification.json"
+            with patch.dict(os.environ, {"PUBLICATION_SUMMARY_PATH": str(summary)}):
+                with patch("pages_publication.verify_live_publication", return_value="VERIFIED"):
+                    self.assertEqual(publication_main([
+                        "verify-live", str(site), "--base-url", "https://owner.github.io/repo",
+                    ]), 0)
+            saved = json.loads(summary.read_text(encoding="utf-8"))
+            self.assertEqual(saved["publicationId"], manifest["publicationId"])
+            self.assertEqual(saved["runId"], "123")
+            self.assertEqual(saved["sourceCommit"], "a" * 40)
+            self.assertEqual(saved["windowDate"], "2026-10-16")
+            self.assertEqual(saved["window"], "tw")
+            self.assertEqual(saved["contentHash"], manifest["contentHash"])
 
     def test_live_readback_requires_exact_publication_and_all_content_hashes(self):
         with tempfile.TemporaryDirectory() as directory:

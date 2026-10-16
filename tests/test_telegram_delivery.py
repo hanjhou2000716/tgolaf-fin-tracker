@@ -67,6 +67,18 @@ class TelegramDeliveryTests(unittest.TestCase):
         self.assertEqual(second["status"], "DELIVERY_UNKNOWN")
         self.assertEqual(len(sends), 1)
 
+    def test_sending_marker_must_read_back_before_http_post(self):
+        sends = []
+        result = deliver_once(
+            date_key="2026-10-08", window="tw", payload={"text": "fixture"}, token="test-token",
+            load_state=lambda: {"status": "PENDING"}, save_state=lambda value: None,
+            post=lambda *a, **k: sends.append(1), now="2026-10-08T06:00:00Z",
+        )
+        self.assertEqual(result["status"], "DELIVERY_UNKNOWN")
+        self.assertEqual(result["failureStage"], "SENDING_READBACK")
+        self.assertEqual(result["httpAttempted"], False)
+        self.assertEqual(sends, [])
+
     def test_public_artifact_outbox_is_authenticated_and_encrypted(self):
         envelope = {
             "schemaVersion": 1, "notificationType": "settlement", "windowDate": "2026-10-08",

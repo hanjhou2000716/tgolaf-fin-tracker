@@ -567,13 +567,27 @@ def main(argv: list[str] | None = None) -> int:
                 raise PublicationError("Pages base URL is required for independent verification")
             result = verify_live_publication(args.site_dir, args.base_url)
             manifest = json.loads((Path(args.site_dir) / MANIFEST_NAME).read_text(encoding="utf-8"))
-            value = {"status": result, "publicationId": manifest.get("publicationId")}
+            value = {
+                "status": result,
+                "publicationId": manifest.get("publicationId"),
+                "runId": manifest.get("runId"),
+                "sourceCommit": manifest.get("sourceCommit"),
+                "windowDate": manifest.get("windowDate"),
+                "window": manifest.get("window"),
+                "contentHash": manifest.get("contentHash"),
+            }
             _write_summary(value, None, os.environ)
             print(json.dumps(value, sort_keys=True))
             return 0 if result in {"VERIFIED", "SUPERSEDED"} else 1
         result = publish_and_verify(args.site_dir)
-        _write_summary(result, None, os.environ)
-        print(json.dumps(result, sort_keys=True))
+        manifest = json.loads((Path(args.site_dir) / MANIFEST_NAME).read_text(encoding="utf-8"))
+        result_with_manifest = dict(result)
+        result_with_manifest.update({
+            key: manifest.get(key)
+            for key in ("runId", "sourceCommit", "windowDate", "window", "contentHash")
+        })
+        _write_summary(result_with_manifest, None, os.environ)
+        print(json.dumps(result_with_manifest, sort_keys=True))
         return 0 if result.get("status") in {"VERIFIED", "SUPERSEDED"} else 1
     except Exception as error:  # noqa: BLE001 - persist a private summary on deployment failure
         message = str(error)
