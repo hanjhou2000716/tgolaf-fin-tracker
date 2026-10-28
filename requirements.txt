@@ -4,4 +4,4 @@ cryptography==50.0.2
 gspread==6.1.2
 google-auth==2.32.0
 html2image==2.0.4
-matplotlib==3.8.2
+matplotlib==3.11.1
