@@ -11,7 +11,7 @@ on:
         required: true
         default: plan
         type: choice
-        options: [plan, send]
+        options: [plan, send, snapshot_plan, snapshot_send]
       source_run_id:
         description: "Trusted main settlement run ID"
         required: true
@@ -36,7 +36,7 @@ permissions:
 
 jobs:
   recover-notification:
-    if: (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.event != 'pull_request') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
+    if: (github.event_name == 'workflow_run' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.event != 'pull_request') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' && (inputs.mode == 'plan' || inputs.mode == 'send'))
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout trusted main
@@ -127,6 +127,73 @@ jobs:
         with:
           name: notification-recovery-result
           path: .private-build/notification-recovery-result.json
+          if-no-files-found: ignore
+
+  send-verified-snapshot:
+    name: Deliver a verified same-day settlement
+    if: >-
+      github.event_name == 'workflow_dispatch' && github.repository == 'hanjhou2000716/tgolaf-fin-tracker' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/fix/growth-verified-afternoon-notification') &&
+      (inputs.mode == 'snapshot_plan' || inputs.mode == 'snapshot_send') && inputs.window == 'tw'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Checkout reviewed notification code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version-file: .python-version
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install locked dependencies
+        run: python -m pip install --requirement requirements.lock
+      - name: Read exact source run and verified settlement evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN" =~ ^[1-9][0-9]{0,19}$ ]]
+          evidence="$RUNNER_TEMP/verified-settlement"
+          mkdir -p "$evidence"
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" > "$evidence/run.json"
+          jq -e --arg repo "$GITHUB_REPOSITORY" '
+            .workflow_id == 281279630 and .head_repository.full_name == $repo and
+            .head_branch == "main" and .run_attempt == 1 and
+            .status == "completed" and .conclusion == "success"' "$evidence/run.json" >/dev/null
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN/attempts/1/jobs" > "$evidence/jobs.json"
+          gh run download "$SOURCE_RUN" --repo "$GITHUB_REPOSITORY" --name settlement-health --dir "$evidence/health"
+          gh run download "$SOURCE_RUN" --repo "$GITHUB_REPOSITORY" --name pages-publication-verification --dir "$evidence/verification"
+          gh run download "$SOURCE_RUN" --repo "$GITHUB_REPOSITORY" --name public-site --dir "$evidence/site"
+      - name: Check receipt and verify or send using the saved snapshot
+        env:
+          MODE: ${{ inputs.mode == 'snapshot_send' && 'send' || 'plan' }}
+          SOURCE_RUN: ${{ inputs.source_run_id }}
+          WINDOW_DATE: ${{ inputs.date }}
+          TELEGRAM_TOKEN: ${{ inputs.mode == 'snapshot_send' && secrets.TELEGRAM_TOKEN || '' }}
+          TELEGRAM_CHAT_ID: ${{ inputs.mode == 'snapshot_send' && secrets.TELEGRAM_CHAT_ID || '' }}
+          GCP_CREDENTIALS: ${{ secrets.GCP_CREDENTIALS }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_USER_ID: ${{ secrets.SUPABASE_USER_ID }}
+          CURRENT_TRANSACTION_SPREADSHEET_ID: ${{ vars.CURRENT_TRANSACTION_SPREADSHEET_ID || '' }}
+          LEGACY_TRANSACTION_SPREADSHEET_ID: ${{ vars.LEGACY_TRANSACTION_SPREADSHEET_ID || '' }}
+          CURRENT_TRANSACTION_SOURCE: ${{ vars.CURRENT_TRANSACTION_SOURCE || 'TRANSACTIONS_CURRENT' }}
+          LEGACY_TRANSACTION_SOURCES: ${{ vars.LEGACY_TRANSACTION_SOURCES || '表單回覆 3,Form Responses 1,Form Responses 2,Form V2' }}
+          HISTORY_SOURCE: ${{ vars.HISTORY_SOURCE || 'History' }}
+        run: |
+          set -euo pipefail
+          python send_verified_settlement.py --mode "$MODE" --source-run "$SOURCE_RUN" --date "$WINDOW_DATE" \
+            --evidence "$RUNNER_TEMP/verified-settlement" | tee "$RUNNER_TEMP/verified-settlement-delivery.json"
+      - name: Save redacted delivery evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verified-settlement-delivery-result
+          path: ${{ runner.temp }}/verified-settlement-delivery.json
           if-no-files-found: ignore
 
   recover-publication:
