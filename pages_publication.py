@@ -33,6 +33,33 @@ class PublicationError(RuntimeError):
     pass
 
 
+class GitHubAPIError(PublicationError):
+    """Safe API diagnostics plus retry metadata for a GitHub request."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        method: str,
+        status_code: int | None = None,
+        request_id: str = "",
+        retry_after: float | None = None,
+        transport_error: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.method = method.upper()
+        self.status_code = status_code
+        self.request_id = request_id
+        self.retry_after = retry_after
+        self.transport_error = transport_error
+
+    @property
+    def ambiguous_submission(self) -> bool:
+        return self.method == "POST" and (
+            self.transport_error or (self.status_code is not None and self.status_code >= 500)
+        )
+
+
 def _canonical_json(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
@@ -137,6 +164,8 @@ def prepare_manifest(site_dir: str | Path, *, env: Mapping[str, str] | None = No
     }
     if env.get("PUBLICATION_RECOVERY_FROM"):
         body["republicationOf"] = env["PUBLICATION_RECOVERY_FROM"]
+        if env.get("PUBLICATION_RECOVERY_ORIGIN_CONTENT_HASH"):
+            body["originContentHash"] = env["PUBLICATION_RECOVERY_ORIGIN_CONTENT_HASH"]
     body["contentHash"] = _sha256(_canonical_json(body))
     (root / MANIFEST_NAME).write_bytes(_canonical_json(body) + b"\n")
     return body
@@ -147,6 +176,7 @@ def prepare_republication(
     *,
     source_run_id: str,
     source_commit: str,
+    source_run_attempt: str | None = None,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Validate a trusted failed run's public artifact, then issue a new publication identity."""
@@ -163,6 +193,8 @@ def prepare_republication(
         raise PublicationError("source publication belongs to a different repository")
     if str(original.get("runId", "")) != str(source_run_id):
         raise PublicationError("source publication run identity does not match the failed workflow")
+    if source_run_attempt is not None and str(original.get("runAttempt", "")) != str(source_run_attempt):
+        raise PublicationError("source publication attempt does not match the failed workflow")
     if original.get("sourceCommit") != source_commit:
         raise PublicationError("source publication commit does not match the failed workflow")
     files = original.get("files")
@@ -187,6 +219,7 @@ def prepare_republication(
     env["PUBLICATION_WINDOW"] = str(original.get("window") or "")
     env["PUBLICATION_WINDOW_DATE"] = str(original.get("windowDate") or "")
     env["PUBLICATION_RECOVERY_FROM"] = str(original.get("publicationId", ""))
+    env["PUBLICATION_RECOVERY_ORIGIN_CONTENT_HASH"] = str(original.get("contentHash", ""))
     env["PUBLICATION_REQUIRE_ORDERING_PROOF"] = "true"
     return prepare_manifest(root, env=env)
 
@@ -249,11 +282,30 @@ def _request_json(method: str, url: str, *, token: str, body: Mapping[str, Any] 
         request_id = error.headers.get("X-GitHub-Request-Id", "") if error.headers else ""
         request_id = re.sub(r"[^A-Za-z0-9-]", "", request_id)[:80]
         suffix = f" requestId={request_id}" if request_id else ""
-        raise PublicationError(
-            f"GitHub Pages API {method} rejected request: HTTP {error.code}; {detail[:300]}{suffix}"
+        retry_after: float | None = None
+        header_value = error.headers.get("Retry-After", "") if error.headers else ""
+        if header_value:
+            try:
+                retry_after = max(0.0, float(header_value))
+            except (TypeError, ValueError):
+                try:
+                    retry_at = datetime.strptime(header_value, "%a, %d %b %Y %H:%M:%S GMT").replace(tzinfo=timezone.utc)
+                    retry_after = max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+                except (TypeError, ValueError):
+                    retry_after = None
+        raise GitHubAPIError(
+            f"GitHub Pages API {method} rejected request: HTTP {error.code}; {detail[:300]}{suffix}",
+            method=method,
+            status_code=error.code,
+            request_id=request_id,
+            retry_after=retry_after,
         ) from error
     except (URLError, TimeoutError) as error:
-        raise PublicationError(f"GitHub Pages API {method} transport failed: {type(error).__name__}") from error
+        raise GitHubAPIError(
+            f"GitHub Pages API {method} transport failed: {type(error).__name__}",
+            method=method,
+            transport_error=True,
+        ) from error
     if not raw:
         return {}
     try:
@@ -277,20 +329,88 @@ def _oidc_token(env: Mapping[str, str] | None = None) -> str:
     return token
 
 
-def _find_pages_artifact(repo: str, run_id: str, token: str) -> int:
-    payload = _request_json("GET", f"{API_ROOT}/repos/{repo}/actions/artifacts?per_page=100", token=token)
-    artifacts = payload.get("artifacts") if isinstance(payload, Mapping) else None
-    matches = [
-        item for item in artifacts or []
-        if isinstance(item, Mapping)
-        and item.get("name") == "github-pages"
-        and str((item.get("workflow_run") or {}).get("id", "")) == str(run_id)
-        and item.get("expired") is not True
-    ]
-    if not matches:
-        raise PublicationError("current workflow has no non-expired github-pages artifact")
-    matches.sort(key=lambda item: int(item.get("id", 0)), reverse=True)
-    return int(matches[0]["id"])
+def _validate_pages_artifact(
+    repo: str,
+    run_id: str,
+    artifact_id: Any,
+    token: str,
+    *,
+    wait: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    max_wait_seconds: float = 60,
+) -> dict[str, Any]:
+    """Validate only the artifact ID returned by this run's Pages uploader.
+
+    The uploader output is the attempt-level provenance: GitHub's artifact
+    metadata binds the ID to a workflow run but does not expose run_attempt.
+    The publication manifest is checked against this active run/attempt by
+    ``publish_and_verify`` before this API lookup.
+    """
+    try:
+        exact_id = int(str(artifact_id).strip())
+    except (TypeError, ValueError) as error:
+        raise PublicationError("Pages uploader did not return a valid artifact ID") from error
+    if exact_id <= 0:
+        raise PublicationError("Pages uploader did not return a valid artifact ID")
+
+    url = f"{API_ROOT}/repos/{repo}/actions/artifacts/{exact_id}"
+    deadline = monotonic() + max(0.0, max_wait_seconds)
+    retryable_statuses = {404, 429}
+    last_error: GitHubAPIError | None = None
+    for attempt in range(1, 9):
+        try:
+            payload = _request_json("GET", url, token=token)
+        except GitHubAPIError as error:
+            retryable = error.transport_error or error.status_code in retryable_statuses or (
+                error.status_code is not None and error.status_code >= 500
+            )
+            if not retryable:
+                raise
+            last_error = error
+            remaining = deadline - monotonic()
+            if attempt >= 8 or remaining <= 0:
+                break
+            backoff = error.retry_after if error.retry_after is not None else min(2 ** (attempt - 1), 15)
+            delay = min(max(0.0, backoff), remaining)
+            if delay <= 0:
+                break
+            wait(delay)
+            continue
+
+        if not isinstance(payload, Mapping):
+            raise PublicationError("GitHub artifact metadata is malformed")
+        try:
+            returned_id = int(payload.get("id", 0))
+        except (TypeError, ValueError) as error:
+            raise PublicationError("GitHub artifact metadata has an invalid ID") from error
+        workflow_run = payload.get("workflow_run")
+        if not isinstance(workflow_run, Mapping):
+            raise PublicationError("GitHub artifact metadata is missing its workflow identity")
+        try:
+            workflow_run_id = int(workflow_run.get("id", 0))
+        except (TypeError, ValueError) as error:
+            raise PublicationError("GitHub artifact metadata has an invalid workflow identity") from error
+        if returned_id != exact_id:
+            raise PublicationError("GitHub returned metadata for a different Pages artifact ID")
+        if payload.get("name") != "github-pages":
+            raise PublicationError("Pages uploader artifact has an unexpected name")
+        if payload.get("expired") is True:
+            raise PublicationError("Pages uploader artifact has expired")
+        if workflow_run_id != int(run_id):
+            raise PublicationError("Pages artifact belongs to a different workflow run")
+        if "size_in_bytes" in payload:
+            try:
+                if int(payload["size_in_bytes"]) <= 0:
+                    raise PublicationError("Pages artifact is empty")
+            except (TypeError, ValueError) as error:
+                raise PublicationError("GitHub artifact metadata has an invalid size") from error
+        return dict(payload)
+
+    if last_error is not None:
+        reason = f"HTTP {last_error.status_code}" if last_error.status_code else "transient transport error"
+        request_id = f" requestId={last_error.request_id}" if last_error.request_id else ""
+        raise PublicationError(f"Pages artifact {exact_id} was not visible after bounded retry: {reason}{request_id}") from last_error
+    raise PublicationError(f"Pages artifact {exact_id} was not visible after bounded retry")
 
 
 def _publish_pages(repo: str, artifact_id: int, source_commit: str, attempt: int, oidc: str, token: str) -> tuple[str, str | None]:
@@ -347,6 +467,44 @@ def _verify_live_manifest_files(
     return True
 
 
+def _files_hash(manifest: Mapping[str, Any]) -> str | None:
+    files = manifest.get("files")
+    if not isinstance(files, Mapping):
+        return None
+    return _sha256(_canonical_json(dict(files)))
+
+
+def _verification_evidence(
+    status: str, candidate: Mapping[str, Any], observed: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Bind a publication result to both candidate and actually read-back data."""
+    return {
+        "status": status,
+        "publicationId": candidate.get("publicationId"),
+        "runId": candidate.get("runId"),
+        "runAttempt": candidate.get("runAttempt"),
+        "sourceRunId": candidate.get("sourceRunId"),
+        "sourceRunAttempt": candidate.get("sourceRunAttempt"),
+        "sourceCommit": candidate.get("sourceCommit"),
+        "windowDate": candidate.get("windowDate"),
+        "window": candidate.get("window"),
+        "contentHash": candidate.get("contentHash"),
+        "filesHash": _files_hash(candidate),
+        "originPublicationId": candidate.get("republicationOf"),
+        "originContentHash": candidate.get("originContentHash"),
+        "observedPublicationId": observed.get("publicationId"),
+        "observedContentHash": observed.get("contentHash"),
+        "observedFilesHash": _files_hash(observed),
+        "observedSourceRunId": observed.get("sourceRunId"),
+        "observedSourceRunAttempt": observed.get("sourceRunAttempt"),
+        "observedSourceCommit": observed.get("sourceCommit"),
+        "observedWindowDate": observed.get("windowDate"),
+        "observedWindow": observed.get("window"),
+        "observedStatus": "VERIFIED",
+        "observedAt": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def _publication_preflight(
     site_dir: str | Path,
     base_url: str,
@@ -399,7 +557,8 @@ def verify_live_publication(
     monotonic: Callable[[], float] = time.monotonic,
     max_wait_seconds: float = 300,
     poll_seconds: float = 15,
-) -> str:
+    return_details: bool = False,
+) -> str | dict[str, Any]:
     root = Path(site_dir)
     try:
         manifest = json.loads((root / MANIFEST_NAME).read_text(encoding="utf-8"))
@@ -435,11 +594,15 @@ def verify_live_publication(
             if live_id != publication_id:
                 if _source_order(live_manifest) > _source_order(manifest):
                     if live_manifest.get("repository") == manifest.get("repository") and verify_manifest_files(live_manifest, nonce):
-                        return "SUPERSEDED"
+                        evidence = _verification_evidence("SUPERSEDED", manifest, live_manifest)
+                        return evidence if return_details else "SUPERSEDED"
                     raise PublicationError("newer Pages manifest failed its content-integrity check")
                 if _source_order(live_manifest) == _source_order(manifest):
                     if live_manifest.get("files") == manifest.get("files") and verify_manifest_files(live_manifest, nonce):
-                        return "SUPERSEDED"
+                        # A new recovery publication identity may refer to
+                        # byte-identical content from the same source window.
+                        evidence = _verification_evidence("SUPERSEDED", manifest, live_manifest)
+                        return evidence if return_details else "SUPERSEDED"
                     raise PublicationError("same-source Pages publication has conflicting content")
                 raise PublicationError("live Pages is still serving an older publication manifest")
             for relative, expected_hash in digest_map.items():
@@ -451,7 +614,8 @@ def verify_live_publication(
                 actual = _sha256(live)
                 if actual != expected_hash:
                     raise PublicationError(f"live content hash mismatch for {relative}")
-            return "VERIFIED"
+            evidence = _verification_evidence("VERIFIED", manifest, live_manifest)
+            return evidence if return_details else "VERIFIED"
         except PublicationError as error:
             last_error = str(error)
         except Exception as error:  # noqa: BLE001 - retry bounded cache/CDN visibility delays
@@ -465,22 +629,49 @@ def publish_and_verify(site_dir: str | Path, *, env: Mapping[str, str] | None = 
     env = env or os.environ
     repo = env.get("GITHUB_REPOSITORY", "").strip()
     run_id = env.get("GITHUB_RUN_ID", "").strip()
+    run_attempt = env.get("GITHUB_RUN_ATTEMPT", "").strip()
     base_url = env.get("PAGES_BASE_URL", "").strip()
     token = env.get("GH_TOKEN", "")
-    if not repo or not run_id or not base_url or not token:
-        raise PublicationError("repository, run ID, Pages URL, or GitHub token is missing")
+    artifact_id = env.get("PAGES_ARTIFACT_ID", "").strip()
+    if not repo or not run_id or not run_attempt or not base_url or not token:
+        raise PublicationError("repository, run identity, Pages URL, or GitHub token is missing")
+    if not artifact_id:
+        raise PublicationError("Pages uploader artifact ID is missing")
     manifest_path = Path(site_dir) / MANIFEST_NAME
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, Mapping) or not _manifest_hash_is_valid(manifest):
+        raise PublicationError("publication manifest is missing or fails its integrity check")
     publication_id = str(manifest["publicationId"])
+    if manifest.get("repository") != repo or str(manifest.get("runId")) != run_id:
+        raise PublicationError("publication manifest does not belong to the active workflow run")
+    if str(manifest.get("runAttempt")) != run_attempt:
+        raise PublicationError("publication manifest does not belong to the active workflow attempt")
+
+    def verified_without_deploy(reason_code: str) -> dict[str, Any]:
+        detail = verify_live_publication(
+            site_dir, base_url, expected_publication_id=publication_id,
+            reader=_read_bytes_response, wait=wait, monotonic=monotonic,
+            max_wait_seconds=0, return_details=True,
+        )
+        if not isinstance(detail, Mapping):
+            raise PublicationError("live publication verification did not return evidence")
+        result = dict(detail)
+        result["reasonCode"] = reason_code
+        return result
+
     preflight = _publication_preflight(site_dir, base_url)
     if preflight == "SUPERSEDED":
-        return {"status": "SUPERSEDED", "publicationId": publication_id, "reasonCode": "NEWER_SOURCE_ALREADY_PUBLISHED"}
+        return verified_without_deploy("NEWER_SOURCE_ALREADY_PUBLISHED")
     if preflight == "ALREADY_VISIBLE":
-        return {"status": "VERIFIED", "publicationId": publication_id, "reasonCode": "IDENTICAL_SOURCE_ALREADY_VISIBLE"}
+        return verified_without_deploy("IDENTICAL_SOURCE_ALREADY_VISIBLE")
     if preflight == "NO_EXISTING_PUBLICATION" and manifest.get("republicationOf"):
         raise PublicationError("republication requires a verifiable current manifest; refusing a blind overwrite")
-    artifact_id = _find_pages_artifact(repo, run_id, token)
+    artifact_metadata = _validate_pages_artifact(
+        repo, run_id, artifact_id, token, wait=wait, monotonic=monotonic, max_wait_seconds=60,
+    )
+    validated_artifact_id = int(artifact_metadata["id"])
     last_error: Exception | None = None
+    deployment_accepted = False
     for attempt in (1, 2):
         try:
             if attempt > 1:
@@ -495,25 +686,51 @@ def publish_and_verify(site_dir: str | Path, *, env: Mapping[str, str] | None = 
             # Pages request may have consumed most of the token lifetime.
             oidc = _oidc_token(env)
             source_commit = str(manifest.get("sourceCommit") or "")
-            status_url, page_url = _publish_pages(repo, artifact_id, source_commit, attempt, oidc, token)
+            status_url, page_url = _publish_pages(repo, validated_artifact_id, source_commit, attempt, oidc, token)
+            deployment_accepted = True
             _await_deployment(status_url, token, wait=wait, deadline=monotonic() + 600, monotonic=monotonic)
             result = verify_live_publication(
                 site_dir, base_url, expected_publication_id=publication_id,
                 wait=wait, monotonic=monotonic, max_wait_seconds=300, poll_seconds=15,
+                return_details=True,
             )
-            if result == "SUPERSEDED":
-                return {"status": "SUPERSEDED", "publicationId": publication_id, "pagesBuildVersion": pages_build_version(source_commit)}
+            if not isinstance(result, Mapping):
+                raise PublicationError("live publication verification did not return evidence")
+            verified_result = dict(result)
+            if verified_result.get("status") == "SUPERSEDED":
+                verified_result["deploymentAttempt"] = attempt
+                verified_result["artifactId"] = validated_artifact_id
+                verified_result["pagesBuildVersion"] = pages_build_version(source_commit)
+                return verified_result
             output_path = env.get("GITHUB_OUTPUT")
             if output_path:
                 with open(output_path, "a", encoding="utf-8") as output:
                     output.write(f"page_url={page_url or base_url}\n")
-            return {"status": "VERIFIED", "publicationId": publication_id, "deploymentAttempt": attempt,
-                    "artifactId": artifact_id, "pagesBuildVersion": pages_build_version(source_commit),
-                    "pageUrl": page_url or base_url}
+            verified_result.update({
+                "deploymentAttempt": attempt,
+                "artifactId": validated_artifact_id,
+                "pagesBuildVersion": pages_build_version(source_commit),
+                "pageUrl": page_url or base_url,
+            })
+            return verified_result
+        except GitHubAPIError as error:
+            last_error = error
+            if error.ambiguous_submission:
+                # The server may have accepted the deployment even though the
+                # client lost its response.  Never issue a second POST blindly.
+                raise PublicationError(
+                    f"PAGES_SUBMISSION_OUTCOME_UNKNOWN: {error}"
+                ) from error
+            if error.method == "POST" or deployment_accepted:
+                raise
+            if attempt == 2:
+                break
         except PublicationError as error:
             last_error = error
-            if "SUPERSEDED" in str(error):
-                return {"status": "SUPERSEDED", "publicationId": publication_id, "deploymentAttempt": attempt}
+            if deployment_accepted:
+                # Do not duplicate a deployment whose accepted status or live
+                # visibility could not be conclusively determined.
+                raise
             if attempt == 2:
                 break
     raise PublicationError(str(last_error or "PUBLICATION_NOT_VISIBLE"))
@@ -524,7 +741,7 @@ def _write_summary(result: Mapping[str, Any] | None, error: str | None, env: Map
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary = dict(result or {})
     summary.update({
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "status": summary.get("status") or ("FAILED" if error else "UNKNOWN"),
         "reasonCode": "PUBLICATION_NOT_VISIBLE" if error and "PUBLICATION_NOT_VISIBLE" in error else "PUBLICATION_FAILED" if error else None,
         "verifiedAt": datetime.now(timezone.utc).isoformat(),
@@ -542,6 +759,7 @@ def main(argv: list[str] | None = None) -> int:
     republish.add_argument("site_dir")
     republish.add_argument("--source-run-id", required=True)
     republish.add_argument("--source-commit", required=True)
+    republish.add_argument("--source-run-attempt", required=True)
     deploy = sub.add_parser("publish-and-verify")
     deploy.add_argument("site_dir")
     verify = sub.add_parser("verify-live")
@@ -556,6 +774,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "prepare-republication":
             manifest = prepare_republication(
                 args.site_dir, source_run_id=args.source_run_id, source_commit=args.source_commit,
+                source_run_attempt=args.source_run_attempt,
             )
             print(json.dumps({
                 "status": "REPUBLISH_PREPARED", "publicationId": manifest["publicationId"],
@@ -565,27 +784,29 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "verify-live":
             if not args.base_url:
                 raise PublicationError("Pages base URL is required for independent verification")
-            result = verify_live_publication(args.site_dir, args.base_url)
+            result = verify_live_publication(args.site_dir, args.base_url, return_details=True)
             manifest = json.loads((Path(args.site_dir) / MANIFEST_NAME).read_text(encoding="utf-8"))
-            value = {
-                "status": result,
-                "publicationId": manifest.get("publicationId"),
-                "runId": manifest.get("runId"),
-                "sourceCommit": manifest.get("sourceCommit"),
-                "windowDate": manifest.get("windowDate"),
-                "window": manifest.get("window"),
-                "contentHash": manifest.get("contentHash"),
-            }
+            value = dict(result) if isinstance(result, Mapping) else {"status": str(result)}
+            value.update({key: manifest.get(key) for key in (
+                "publicationId", "runId", "runAttempt", "sourceRunId", "sourceRunAttempt",
+                "sourceCommit", "windowDate", "window", "contentHash",
+            )})
+            value.setdefault("schemaVersion", 2)
             _write_summary(value, None, os.environ)
             print(json.dumps(value, sort_keys=True))
-            return 0 if result in {"VERIFIED", "SUPERSEDED"} else 1
+            result_status = value.get("status")
+            return 0 if result_status in {"VERIFIED", "SUPERSEDED"} else 1
         result = publish_and_verify(args.site_dir)
         manifest = json.loads((Path(args.site_dir) / MANIFEST_NAME).read_text(encoding="utf-8"))
         result_with_manifest = dict(result)
         result_with_manifest.update({
             key: manifest.get(key)
-            for key in ("runId", "sourceCommit", "windowDate", "window", "contentHash")
+            for key in (
+                "runId", "runAttempt", "sourceRunId", "sourceRunAttempt", "sourceCommit",
+                "windowDate", "window", "contentHash", "republicationOf", "originContentHash",
+            )
         })
+        result_with_manifest.setdefault("schemaVersion", 2)
         _write_summary(result_with_manifest, None, os.environ)
         print(json.dumps(result_with_manifest, sort_keys=True))
         return 0 if result.get("status") in {"VERIFIED", "SUPERSEDED"} else 1

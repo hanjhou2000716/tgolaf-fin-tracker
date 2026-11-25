@@ -185,8 +185,9 @@ def decide_fallback(
         notification = str(stage_evidence.get("notificationStatus") or "").upper()
         publication = str(stage_evidence.get("publicationStatus") or "").upper()
         recovered_notification = str((recovery_evidence or {}).get("status") or "").upper()
+        recovered_publication = str((recovery_evidence or {}).get("publicationStatus") or "").upper()
         recovery_reason = str((recovery_evidence or {}).get("reasonCode") or "").upper()
-        publication_complete = publication in {"VERIFIED", "SUPERSEDED"}
+        publication_complete = publication in {"VERIFIED", "SUPERSEDED"} or recovered_publication in {"VERIFIED", "SUPERSEDED"}
         # DISABLED is an explicit operator choice, not a recoverable send
         # failure.  In particular, a later scheduled fallback must never turn
         # a notification-disabled validation run into a real Telegram send.
@@ -252,7 +253,7 @@ def _query_runs() -> list[dict[str, Any]]:
     command = [
         "gh", "run", "list", "--repo", repository, "--workflow", workflow,
         "--branch", "main", "--limit", "50", "--json",
-        "status,conclusion,headSha,createdAt,event,databaseId",
+        "status,conclusion,headSha,createdAt,event,databaseId,attempt",
     ]
     completed = subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
     value = json.loads(completed.stdout or "[]")
@@ -294,6 +295,118 @@ def _download_json_artifact(run_id: Any, artifact_name: str, filename: str) -> d
     return value if isinstance(value, dict) else None
 
 
+def _valid_sha256(value: Any) -> bool:
+    return isinstance(value, str) and len(value) == 64 and all(character in "0123456789abcdef" for character in value.lower())
+
+
+def _source_order(run_id: Any, attempt: Any) -> tuple[int, int] | None:
+    try:
+        parsed = int(str(run_id)), int(str(attempt))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed[0] > 0 and parsed[1] > 0 else None
+
+
+def _publication_proof_status(
+    proof: dict[str, Any] | None,
+    *,
+    expected_source_run_id: Any,
+    expected_source_run_attempt: Any,
+    expected_commit: str,
+    expected_date: str,
+    expected_window: str,
+    proof_run_id: Any | None = None,
+    proof_run_attempt: Any | None = None,
+    recovery: bool = False,
+) -> str:
+    """Return only publication states backed by a matching live readback proof."""
+    if not isinstance(proof, dict):
+        return "UNVERIFIED"
+    expected_run = str(expected_source_run_id or "")
+    expected_attempt = str(expected_source_run_attempt or "")
+    if (not expected_run or proof.get("sourceCommit") != expected_commit
+            or proof.get("windowDate") != expected_date or proof.get("window") != expected_window):
+        return "UNVERIFIED"
+    if proof.get("sourceRunId") is not None and str(proof.get("sourceRunId")) != expected_run:
+        return "UNVERIFIED"
+    if proof.get("sourceRunAttempt") is not None and expected_attempt and str(proof.get("sourceRunAttempt")) != expected_attempt:
+        return "UNVERIFIED"
+
+    publication_id = str(proof.get("publicationId") or "")
+    if not publication_id or not _valid_sha256(proof.get("contentHash")):
+        return "UNVERIFIED"
+
+    if recovery:
+        if proof_run_id is None or str(proof.get("runId") or "") != str(proof_run_id):
+            return "UNVERIFIED"
+        if proof_run_attempt is not None and str(proof.get("runAttempt") or "") != str(proof_run_attempt):
+            return "UNVERIFIED"
+        source_identity = _source_order(expected_run, expected_attempt)
+        recovery_identity = _source_order(proof.get("runId"), proof.get("runAttempt"))
+        if recovery_identity is None or f":{recovery_identity[0]}:{recovery_identity[1]}:" not in publication_id:
+            return "UNVERIFIED"
+        origin_id = str(proof.get("originPublicationId") or "")
+        if (source_identity is None or f":{source_identity[0]}:{source_identity[1]}:" not in origin_id
+                or not _valid_sha256(proof.get("originContentHash"))
+                or not _valid_sha256(proof.get("filesHash"))):
+            return "UNVERIFIED"
+
+    status = str(proof.get("status") or "").upper()
+    try:
+        schema_version = int(proof.get("schemaVersion") or 1)
+    except (TypeError, ValueError):
+        return "UNVERIFIED"
+    if status == "VERIFIED":
+        # Legacy summaries had no observed-manifest fields. They remain
+        # compatible only when the verifier says the exact candidate ID was live.
+        if schema_version < 2:
+            if not recovery and str(proof.get("runId") or "") == expected_run:
+                if expected_attempt and f":{expected_run}:{expected_attempt}:" not in publication_id:
+                    return "UNVERIFIED"
+                return "VERIFIED"
+            return "UNVERIFIED"
+        observed_id = str(proof.get("observedPublicationId") or "")
+        if (proof.get("observedStatus") != "VERIFIED" or not observed_id
+                or not _valid_sha256(proof.get("observedContentHash"))
+                or not _valid_sha256(proof.get("observedFilesHash"))):
+            return "UNVERIFIED"
+        same_source = (
+            str(proof.get("observedSourceRunId") or "") == expected_run
+            and (not expected_attempt or str(proof.get("observedSourceRunAttempt") or "") == expected_attempt)
+            and proof.get("observedSourceCommit") == expected_commit
+            and proof.get("observedWindowDate") == expected_date
+            and proof.get("observedWindow") == expected_window
+            and proof.get("observedFilesHash") == proof.get("filesHash")
+        )
+        if observed_id == publication_id and same_source:
+            return "VERIFIED"
+        if recovery and same_source:
+            return "VERIFIED"
+        return "UNVERIFIED"
+
+    if status == "SUPERSEDED" and schema_version >= 2:
+        observed_order = _source_order(proof.get("observedSourceRunId"), proof.get("observedSourceRunAttempt"))
+        candidate_order = _source_order(expected_run, expected_attempt)
+        valid_readback = (
+            proof.get("observedStatus") == "VERIFIED"
+            and _valid_sha256(proof.get("observedContentHash"))
+            and _valid_sha256(proof.get("observedFilesHash"))
+            and bool(proof.get("observedPublicationId"))
+        )
+        if valid_readback and observed_order and candidate_order and observed_order > candidate_order:
+            return "SUPERSEDED"
+        same_source = (
+            recovery and valid_readback and observed_order == candidate_order
+            and proof.get("observedSourceCommit") == expected_commit
+            and proof.get("observedWindowDate") == expected_date
+            and proof.get("observedWindow") == expected_window
+            and proof.get("observedFilesHash") == proof.get("filesHash")
+        )
+        if same_source:
+            return "VERIFIED"
+    return "UNVERIFIED"
+
+
 def _stage_evidence_for_run(run: dict[str, Any] | None, *, expected_window: str, expected_date: str) -> dict[str, Any] | None:
     if not run or not run.get("databaseId"):
         return None
@@ -304,25 +417,14 @@ def _stage_evidence_for_run(run: dict[str, Any] | None, *, expected_window: str,
         return None
     if any(item.get("window") != expected_window or item.get("windowDate") != expected_date for item in (health, notification)):
         return None
-    publication_status = "UNVERIFIED"
-    if publication:
-        # A successful status alone is not enough: bind the Pages proof to
-        # this exact source run, commit, window and content manifest.
-        run_id = str(run.get("databaseId"))
-        publication_id = str(publication.get("publicationId") or "")
-        content_hash = str(publication.get("contentHash") or "")
-        same_publication = (
-            publication.get("runId") is not None
-            and str(publication.get("runId")) == run_id
-            and publication.get("sourceCommit") == run.get("headSha")
-            and publication.get("window") == expected_window
-            and publication.get("windowDate") == expected_date
-            and f":{run_id}:" in publication_id
-            and len(content_hash) == 64
-            and all(character in "0123456789abcdef" for character in content_hash.lower())
-        )
-        if same_publication:
-            publication_status = str(publication.get("status") or "UNVERIFIED").upper()
+    publication_status = _publication_proof_status(
+        publication,
+        expected_source_run_id=run.get("databaseId"),
+        expected_source_run_attempt=run.get("attempt"),
+        expected_commit=str(run.get("headSha") or ""),
+        expected_date=expected_date,
+        expected_window=expected_window,
+    )
     return {
         "settlementStatus": health.get("settlementStatus"),
         "completionStatus": health.get("completionStatus"),
@@ -332,12 +434,19 @@ def _stage_evidence_for_run(run: dict[str, Any] | None, *, expected_window: str,
     }
 
 
-def _recovery_evidence_for_source(source_run_id: Any, *, date_key: str, window: str, source_commit: str) -> dict[str, Any] | None:
+def _recovery_evidence_for_source(
+    source_run_id: Any,
+    *,
+    date_key: str,
+    window: str,
+    source_commit: str,
+    source_run_attempt: Any | None = None,
+) -> dict[str, Any] | None:
     repository = os.getenv("GITHUB_REPOSITORY", "")
     command = [
         "gh", "run", "list", "--repo", repository,
         "--workflow", "settlement-notification-recovery.yml", "--branch", "main", "--limit", "30",
-        "--json", "status,conclusion,createdAt,databaseId",
+        "--json", "status,conclusion,createdAt,databaseId,attempt,event,headBranch",
     ]
     try:
         completed = subprocess.run(command, check=True, capture_output=True, text=True, timeout=30)
@@ -346,15 +455,61 @@ def _recovery_evidence_for_source(source_run_id: Any, *, date_key: str, window: 
         return None
     if not isinstance(runs, list):
         return None
-    for run in runs:
+    candidates = sorted(
+        (run for run in runs if isinstance(run, dict)),
+        key=lambda run: str(run.get("createdAt") or ""),
+        reverse=True,
+    )
+    notification_proof = None
+    publication_proof = None
+    for run in candidates:
         if str(run.get("status") or "").lower() != "completed" or not run.get("databaseId"):
             continue
-        proof = _download_json_artifact(run["databaseId"], "notification-recovery-result", "notification-recovery-result.json")
-        if (proof and str(proof.get("sourceRunId") or "") == str(source_run_id)
-                and proof.get("sourceCommit") == source_commit
-                and proof.get("windowDate") == date_key and proof.get("window") == window):
-            return proof
-    return None
+        if run.get("headBranch") not in {None, "", "main"}:
+            continue
+        if run.get("event") not in {None, "", "workflow_run", "workflow_dispatch"}:
+            continue
+        recovery_run_id = str(run["databaseId"])
+        recovery_attempt = run.get("attempt")
+        if notification_proof is None:
+            proof = _download_json_artifact(
+                recovery_run_id, "notification-recovery-result", "notification-recovery-result.json",
+            )
+            if (proof and str(proof.get("sourceRunId") or "") == str(source_run_id)
+                    and proof.get("sourceCommit") == source_commit
+                    and proof.get("windowDate") == date_key and proof.get("window") == window):
+                notification_proof = proof
+        if publication_proof is None:
+            proof = _download_json_artifact(
+                recovery_run_id, "publication-recovery-result", "pages-publication-recovery-summary.json",
+            )
+            status = _publication_proof_status(
+                proof,
+                expected_source_run_id=source_run_id,
+                expected_source_run_attempt=source_run_attempt,
+                expected_commit=source_commit,
+                expected_date=date_key,
+                expected_window=window,
+                proof_run_id=recovery_run_id,
+                proof_run_attempt=recovery_attempt,
+                recovery=True,
+            )
+            if status in {"VERIFIED", "SUPERSEDED"}:
+                publication_proof = {**proof, "status": status}
+    if notification_proof is None and publication_proof is None:
+        return None
+    return {
+        **(notification_proof or {}),
+        "status": str((notification_proof or {}).get("status") or "UNAVAILABLE").upper(),
+        "reasonCode": (notification_proof or {}).get("reasonCode"),
+        "publicationStatus": str((publication_proof or {}).get("status") or "UNVERIFIED").upper(),
+        "publicationProof": publication_proof,
+        "sourceRunId": str(source_run_id),
+        "sourceCommit": source_commit,
+        "sourceRunAttempt": str(source_run_attempt) if source_run_attempt is not None else None,
+        "windowDate": date_key,
+        "window": window,
+    }
 
 
 def _write_output(result: dict[str, Any]) -> None:
@@ -395,6 +550,7 @@ def main() -> int:
         recovery_evidence = _recovery_evidence_for_source(
             matching_run.get("databaseId"), date_key=str(context["date"]),
             window=str(context["window"]), source_commit=str(matching_run.get("headSha") or ""),
+            source_run_attempt=matching_run.get("attempt"),
         ) if matching_run and matching_run.get("databaseId") else None
         health_status = _health_status_for_run(
             matching_run, expected_window=context["window"], expected_date=context["date"],

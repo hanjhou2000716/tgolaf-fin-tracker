@@ -10,8 +10,10 @@ from urllib.parse import unquote, urlsplit
 from urllib.error import HTTPError
 
 from pages_publication import (
+    GitHubAPIError,
     PublicationError,
     _publication_preflight,
+    _validate_pages_artifact,
     pages_build_version,
     prepare_manifest,
     prepare_republication,
@@ -19,6 +21,7 @@ from pages_publication import (
     _request_json,
     _oidc_token,
     _publish_pages,
+    publish_and_verify,
     main as publication_main,
 )
 
@@ -77,6 +80,166 @@ class PagesPublicationTests(unittest.TestCase):
                 _request_json("POST", "https://api.github.com/ignored", token="ghp_secretvalue", body={})
         self.assertIn("REQ-123", str(caught.exception))
         self.assertNotIn("ghp_secretvalue", str(caught.exception))
+
+    def test_pages_artifact_lookup_uses_exact_uploader_id_and_run(self):
+        payload = {
+            "id": 987654,
+            "name": "github-pages",
+            "expired": False,
+            "size_in_bytes": 1024,
+            "workflow_run": {"id": 123},
+        }
+        with patch("pages_publication._request_json", return_value=payload) as request:
+            result = _validate_pages_artifact(
+                "owner/repo", "123", "987654", "token", max_wait_seconds=0,
+            )
+        self.assertEqual(result["id"], 987654)
+        self.assertEqual(request.call_args.args[0], "GET")
+        self.assertEqual(request.call_args.args[1], "https://api.github.com/repos/owner/repo/actions/artifacts/987654")
+
+    def test_pages_artifact_lookup_retries_read_after_write_404_without_listing(self):
+        payload = {
+            "id": 987654, "name": "github-pages", "expired": False,
+            "size_in_bytes": 1, "workflow_run": {"id": 123},
+        }
+        clock = _Clock()
+        with patch("pages_publication._request_json", side_effect=[
+            GitHubAPIError("not visible", method="GET", status_code=404),
+            payload,
+        ]) as request:
+            result = _validate_pages_artifact(
+                "owner/repo", "123", 987654, "token",
+                wait=clock.wait, monotonic=clock.monotonic, max_wait_seconds=60,
+            )
+        self.assertEqual(result, payload)
+        self.assertEqual(request.call_count, 2)
+        self.assertTrue(all(call.args[1].endswith("/actions/artifacts/987654") for call in request.call_args_list))
+        self.assertGreater(clock.value, 0)
+
+    def test_pages_artifact_lookup_rejects_wrong_id_run_name_expiry_and_empty_payload(self):
+        cases = [
+            ({"id": 1, "name": "github-pages", "expired": False, "workflow_run": {"id": 123}}, "different Pages artifact ID"),
+            ({"id": 987654, "name": "other", "expired": False, "workflow_run": {"id": 123}}, "unexpected name"),
+            ({"id": 987654, "name": "github-pages", "expired": True, "workflow_run": {"id": 123}}, "expired"),
+            ({"id": 987654, "name": "github-pages", "expired": False, "workflow_run": {"id": 999}}, "different workflow run"),
+            ({"id": 987654, "name": "github-pages", "expired": False, "size_in_bytes": 0, "workflow_run": {"id": 123}}, "empty"),
+        ]
+        for payload, reason in cases:
+            with self.subTest(reason=reason), patch("pages_publication._request_json", return_value=payload):
+                with self.assertRaisesRegex(PublicationError, reason):
+                    _validate_pages_artifact("owner/repo", "123", 987654, "token", max_wait_seconds=0)
+        for invalid in ("", "not-an-id", "0", "-4"):
+            with self.subTest(invalid=invalid), patch("pages_publication._request_json") as request:
+                with self.assertRaisesRegex(PublicationError, "valid artifact ID"):
+                    _validate_pages_artifact("owner/repo", "123", invalid, "token")
+                request.assert_not_called()
+
+    def test_prepare_republication_binds_source_attempt_and_origin_hash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory) / "site"
+            self._site(site)
+            original = prepare_manifest(site, env={
+                "GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "123",
+                "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "a" * 40,
+                "PUBLICATION_WINDOW_DATE": "2026-10-16", "PUBLICATION_WINDOW": "tw",
+            })
+            with self.assertRaisesRegex(PublicationError, "attempt"):
+                prepare_republication(
+                    site, source_run_id="123", source_run_attempt="1", source_commit="a" * 40,
+                    env={"GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "200",
+                         "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "b" * 40},
+                )
+            recovered = prepare_republication(
+                site, source_run_id="123", source_run_attempt="2", source_commit="a" * 40,
+                env={"GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "200",
+                     "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": "b" * 40},
+            )
+            self.assertEqual(recovered["republicationOf"], original["publicationId"])
+            self.assertEqual(recovered["originContentHash"], original["contentHash"])
+            self.assertEqual(recovered["sourceRunAttempt"], "2")
+
+    def test_publisher_requires_uploader_id_and_matching_active_attempt_before_any_api_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory) / "site"
+            self._site(site)
+            prepare_manifest(site, env={
+                "GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "123",
+                "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "a" * 40,
+            })
+            base_env = {
+                "GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "123",
+                "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "a" * 40,
+                "PAGES_BASE_URL": "https://owner.github.io/repo", "GH_TOKEN": "token",
+            }
+            with patch("pages_publication._request_json") as request:
+                with self.assertRaisesRegex(PublicationError, "artifact ID is missing"):
+                    __import__("pages_publication").publish_and_verify(site, env=base_env)
+                request.assert_not_called()
+
+            with patch("pages_publication._publication_preflight", return_value="READY"), \
+                 patch("pages_publication._validate_pages_artifact") as validate:
+                wrong_attempt = {**base_env, "GITHUB_RUN_ATTEMPT": "3", "PAGES_ARTIFACT_ID": "987654"}
+                with self.assertRaisesRegex(PublicationError, "active workflow attempt"):
+                    __import__("pages_publication").publish_and_verify(site, env=wrong_attempt)
+                validate.assert_not_called()
+
+    def test_publisher_deploys_the_exact_artifact_id_returned_by_this_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory) / "site"
+            self._site(site)
+            prepare_manifest(site, env={
+                "GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "123",
+                "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "a" * 40,
+            })
+            env = {
+                "GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "123",
+                "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "a" * 40,
+                "PAGES_BASE_URL": "https://owner.github.io/repo", "GH_TOKEN": "token",
+                "PAGES_ARTIFACT_ID": "987654",
+            }
+            verification = {
+                "status": "VERIFIED", "publicationId": "owner/repo:123:2:1",
+                "observedPublicationId": "owner/repo:123:2:1",
+            }
+            with patch("pages_publication._publication_preflight", return_value="READY"), \
+                 patch("pages_publication._validate_pages_artifact", return_value={"id": 987654}) as validate, \
+                 patch("pages_publication._oidc_token", return_value="oidc"), \
+                 patch("pages_publication._publish_pages", return_value=("https://api.github.test/status", "https://owner.github.io/repo")) as publish, \
+                 patch("pages_publication._await_deployment"), \
+                 patch("pages_publication.verify_live_publication", return_value=verification):
+                result = publish_and_verify(site, env=env)
+            validate.assert_called_once_with(
+                "owner/repo", "123", "987654", "token", wait=unittest.mock.ANY,
+                monotonic=unittest.mock.ANY, max_wait_seconds=60,
+            )
+            publish.assert_called_once_with("owner/repo", 987654, "a" * 40, 1, "oidc", "token")
+            self.assertEqual(result["artifactId"], 987654)
+            self.assertEqual(result["status"], "VERIFIED")
+
+    def test_live_readback_details_capture_observed_manifest_identity_and_hashes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            site = Path(directory) / "site"
+            self._site(site)
+            manifest = prepare_manifest(site, env={
+                "GITHUB_REPOSITORY": "owner/repo", "GITHUB_RUN_ID": "123",
+                "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": "a" * 40,
+                "PUBLICATION_WINDOW_DATE": "2026-10-16", "PUBLICATION_WINDOW": "tw",
+            })
+
+            def reader(url, *, headers):
+                path = unquote(urlsplit(url).path).removeprefix("/repo/")
+                return (site / path).read_bytes()
+
+            details = __import__("pages_publication").verify_live_publication(
+                site, "https://owner.github.io/repo", expected_publication_id=manifest["publicationId"],
+                reader=reader, wait=lambda _seconds: None, monotonic=lambda: 0,
+                max_wait_seconds=0, return_details=True,
+            )
+            self.assertEqual(details["status"], "VERIFIED")
+            self.assertEqual(details["observedPublicationId"], manifest["publicationId"])
+            self.assertEqual(details["observedContentHash"], manifest["contentHash"])
+            self.assertEqual(details["observedFilesHash"], details["filesHash"])
+            self.assertEqual(details["observedSourceRunAttempt"], "2")
 
     def _site(self, root):
         root.mkdir()
@@ -150,7 +313,10 @@ class PagesPublicationTests(unittest.TestCase):
             })
             summary = root / "publication-verification.json"
             with patch.dict(os.environ, {"PUBLICATION_SUMMARY_PATH": str(summary)}):
-                with patch("pages_publication.verify_live_publication", return_value="VERIFIED"):
+                with patch("pages_publication.verify_live_publication", return_value={
+                    "status": "VERIFIED", "observedPublicationId": manifest["publicationId"],
+                    "observedContentHash": manifest["contentHash"], "observedStatus": "VERIFIED",
+                }):
                     self.assertEqual(publication_main([
                         "verify-live", str(site), "--base-url", "https://owner.github.io/repo",
                     ]), 0)
@@ -161,6 +327,8 @@ class PagesPublicationTests(unittest.TestCase):
             self.assertEqual(saved["windowDate"], "2026-10-16")
             self.assertEqual(saved["window"], "tw")
             self.assertEqual(saved["contentHash"], manifest["contentHash"])
+            self.assertEqual(saved["observedPublicationId"], manifest["publicationId"])
+            self.assertEqual(saved["schemaVersion"], 2)
 
     def test_live_readback_requires_exact_publication_and_all_content_hashes(self):
         with tempfile.TemporaryDirectory() as directory:

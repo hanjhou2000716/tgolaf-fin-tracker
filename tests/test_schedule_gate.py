@@ -1,10 +1,20 @@
 import datetime as dt
+import json
 import os
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from schedule_gate import _stage_evidence_for_run, decide_fallback, dispatch_context, main, scheduled_context
+from schedule_gate import (
+    _publication_proof_status,
+    _recovery_evidence_for_source,
+    _stage_evidence_for_run,
+    decide_fallback,
+    dispatch_context,
+    main,
+    scheduled_context,
+)
 from service_contracts import UTC
 
 
@@ -103,6 +113,124 @@ class ScheduleGateTests(unittest.TestCase):
             source_run_id="123",
         )
         self.assertEqual(result["recoveryMode"], "publication_only")
+
+    def test_successful_automatic_publication_recovery_prevents_backup_rerun(self):
+        runs = [{
+            "status": "completed", "conclusion": "failure", "headSha": "abc",
+            "createdAt": "2026-09-15T21:42:00Z", "event": "repository_dispatch", "databaseId": 123,
+        }]
+        result = decide_fallback(
+            event_name="schedule", schedule="20 22 * * 1-5", now_utc=self.now,
+            commit="new", runs=runs,
+            stage_evidence={"settlementStatus": "COMPLETE", "notificationStatus": "SENT", "publicationStatus": "UNVERIFIED"},
+            recovery_evidence={"status": "SOURCE_RECEIPT_ALREADY_CONFIRMED", "publicationStatus": "VERIFIED"},
+            source_run_id="123",
+        )
+        self.assertEqual(result["decision"], "SKIP")
+        self.assertEqual(result["reasonCode"], "SKIP_REQUIRED_STAGES_COMPLETE")
+
+    @staticmethod
+    def _recovery_publication_proof(*, source_attempt="2", run_attempt="1"):
+        return {
+            "schemaVersion": 2,
+            "status": "VERIFIED",
+            "runId": "200",
+            "runAttempt": run_attempt,
+            "sourceRunId": "123",
+            "sourceRunAttempt": source_attempt,
+            "sourceCommit": "a" * 40,
+            "windowDate": "2026-09-15",
+            "window": "tw",
+            "publicationId": f"owner/repo:200:{run_attempt}:1",
+            "contentHash": "b" * 64,
+            "filesHash": "c" * 64,
+            "originPublicationId": "owner/repo:123:2:1",
+            "originContentHash": "d" * 64,
+            "observedPublicationId": f"owner/repo:200:{run_attempt}:1",
+            "observedContentHash": "e" * 64,
+            "observedFilesHash": "c" * 64,
+            "observedSourceRunId": "123",
+            "observedSourceRunAttempt": source_attempt,
+            "observedSourceCommit": "a" * 40,
+            "observedWindowDate": "2026-09-15",
+            "observedWindow": "tw",
+            "observedStatus": "VERIFIED",
+        }
+
+    def test_recovery_reader_merges_notification_and_publication_artifacts_by_source(self):
+        recovery_run = {
+            "status": "completed", "conclusion": "failure", "createdAt": "2026-09-16T00:00:00Z",
+            "databaseId": 200, "attempt": 1, "event": "workflow_run", "headBranch": "main",
+        }
+        notification = {
+            "schemaVersion": 2, "status": "SOURCE_RECEIPT_ALREADY_CONFIRMED",
+            "sourceRunId": "123", "sourceCommit": "a" * 40,
+            "windowDate": "2026-09-15", "window": "tw",
+        }
+        publication = self._recovery_publication_proof()
+        with patch("schedule_gate.subprocess.run", return_value=subprocess.CompletedProcess(
+            args=["gh"], returncode=0, stdout=json.dumps([recovery_run]), stderr="",
+        )), patch("schedule_gate._download_json_artifact", side_effect=[notification, publication]) as download:
+            evidence = _recovery_evidence_for_source(
+                "123", date_key="2026-09-15", window="tw", source_commit="a" * 40,
+                source_run_attempt="2",
+            )
+        self.assertEqual(download.call_count, 2)
+        self.assertEqual(evidence["status"], "SOURCE_RECEIPT_ALREADY_CONFIRMED")
+        self.assertEqual(evidence["publicationStatus"], "VERIFIED")
+        self.assertEqual(evidence["publicationProof"]["runId"], "200")
+
+    def test_recovery_publication_proof_with_wrong_source_attempt_or_hash_is_not_complete(self):
+        proof = self._recovery_publication_proof(source_attempt="1")
+        status = _publication_proof_status(
+            proof,
+            expected_source_run_id="123",
+            expected_source_run_attempt="2",
+            expected_commit="a" * 40,
+            expected_date="2026-09-15",
+            expected_window="tw",
+            proof_run_id="200",
+            proof_run_attempt="1",
+            recovery=True,
+        )
+        self.assertEqual(status, "UNVERIFIED")
+
+    def test_recovery_preflight_that_finds_identical_live_source_counts_as_complete(self):
+        proof = self._recovery_publication_proof()
+        proof["status"] = "SUPERSEDED"
+        proof["observedPublicationId"] = "owner/repo:123:2:1"
+        proof["observedContentHash"] = "f" * 64
+        proof["observedSourceRunId"] = "123"
+        proof["observedSourceRunAttempt"] = "2"
+        proof["observedSourceCommit"] = "a" * 40
+        proof["observedFilesHash"] = proof["filesHash"]
+        status = _publication_proof_status(
+            proof,
+            expected_source_run_id="123",
+            expected_source_run_attempt="2",
+            expected_commit="a" * 40,
+            expected_date="2026-09-15",
+            expected_window="tw",
+            proof_run_id="200",
+            proof_run_attempt="1",
+            recovery=True,
+        )
+        self.assertEqual(status, "VERIFIED")
+
+        proof = self._recovery_publication_proof()
+        proof["observedContentHash"] = "bad"
+        status = _publication_proof_status(
+            proof,
+            expected_source_run_id="123",
+            expected_source_run_attempt="2",
+            expected_commit="a" * 40,
+            expected_date="2026-09-15",
+            expected_window="tw",
+            proof_run_id="200",
+            proof_run_attempt="1",
+            recovery=True,
+        )
+        self.assertEqual(status, "UNVERIFIED")
 
     def test_missing_publication_artifact_keeps_settlement_and_notification_evidence(self):
         run = {"databaseId": 123, "headSha": "abc"}
