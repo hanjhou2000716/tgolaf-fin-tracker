@@ -77,12 +77,15 @@ jobs:
           REQUESTED_WINDOW: ${{ inputs.window || '' }}
         run: |
           mkdir -p .private-build/source-notification .private-build/source-health .private-build/source-publication
-          gh run view "$SOURCE_RUN_ID" --repo "$SOURCE_REPOSITORY" --json headBranch,headSha,event,jobs > .private-build/source-run.json
+          gh run view "$SOURCE_RUN_ID" --repo "$SOURCE_REPOSITORY" --json headBranch,headSha,event,attempt,jobs > .private-build/source-run.json
           jq -e --arg sha "$EXPECTED_SOURCE_SHA" \
             '.headBranch == "main" and ($sha == "" or .headSha == $sha) and .event != "pull_request" and any(.jobs[]; .name == "build" and .conclusion == "success")' \
             .private-build/source-run.json >/dev/null
           SOURCE_SHA=$(jq -r '.headSha' .private-build/source-run.json)
+          SOURCE_ATTEMPT=$(jq -r '.attempt' .private-build/source-run.json)
+          test "$SOURCE_ATTEMPT" -gt 0
           printf 'RECOVERY_SOURCE_COMMIT=%s\n' "$SOURCE_SHA" >> "$GITHUB_ENV"
+          printf 'RECOVERY_SOURCE_RUN_ATTEMPT=%s\n' "$SOURCE_ATTEMPT" >> "$GITHUB_ENV"
           gh run download "$SOURCE_RUN_ID" --repo "$SOURCE_REPOSITORY" --name settlement-notification-result --dir .private-build/source-notification
           gh run download "$SOURCE_RUN_ID" --repo "$SOURCE_REPOSITORY" --name settlement-health --dir .private-build/source-health
           printf 'RECOVERY_WINDOW_DATE=%s\n' "$(jq -r '.windowDate // empty' .private-build/source-health/settlement-health.json)" >> "$GITHUB_ENV"
@@ -152,6 +155,7 @@ jobs:
           SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
           SOURCE_REPOSITORY: ${{ github.repository }}
           SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: |
           mkdir -p .private-build/source-publication
           if gh run download "$SOURCE_RUN_ID" --repo "$SOURCE_REPOSITORY" --name pages-publication-verification --dir .private-build/source-publication; then
@@ -163,9 +167,27 @@ jobs:
               proof = json.loads(path.read_text(encoding='utf-8'))
           except Exception:
               proof = {}
-          verified = isinstance(proof, dict) and proof.get('status') == 'VERIFIED'
-          commit = proof.get('sourceCommit') if isinstance(proof, dict) else None
-          verified = verified and (commit is None or commit == '${{ github.event.workflow_run.head_sha }}')
+          import os
+          source_run_id = os.environ['SOURCE_RUN_ID']
+          source_attempt = os.environ['SOURCE_RUN_ATTEMPT']
+          source_commit = os.environ['SOURCE_COMMIT']
+          publication_id = str(proof.get('publicationId') or '') if isinstance(proof, dict) else ''
+          expected_identity = f':{source_run_id}:{source_attempt}:'
+          content_hash = str(proof.get('contentHash') or '') if isinstance(proof, dict) else ''
+          verified = (
+              isinstance(proof, dict)
+              and proof.get('status') == 'VERIFIED'
+              and str(proof.get('runId') or '') == source_run_id
+              and str(proof.get('runAttempt') or source_attempt) == source_attempt
+              and proof.get('sourceCommit') == source_commit
+              and str(proof.get('sourceRunId') or source_run_id) == source_run_id
+              and str(proof.get('sourceRunAttempt') or source_attempt) == source_attempt
+              and expected_identity in publication_id
+              and len(content_hash) == 64
+              and all(char in '0123456789abcdef' for char in content_hash.lower())
+              and proof.get('window') in {'us', 'tw'}
+              and isinstance(proof.get('windowDate'), str)
+          )
           print('needed=false' if verified else 'needed=true')
           PY
           else
@@ -205,12 +227,15 @@ jobs:
         env:
           RECOVERY_SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
           RECOVERY_SOURCE_COMMIT: ${{ github.event.workflow_run.head_sha }}
+          RECOVERY_SOURCE_RUN_ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
         run: >-
           python pages_publication.py prepare-republication public-site
           --source-run-id "$RECOVERY_SOURCE_RUN_ID"
           --source-commit "$RECOVERY_SOURCE_COMMIT"
+          --source-run-attempt "$RECOVERY_SOURCE_RUN_ATTEMPT"
       - name: Create Pages deployment artifact
         if: steps.publication_state.outputs.needed == 'true' && steps.source_artifact.outputs.available == 'true'
+        id: pages_artifact
         uses: actions/upload-pages-artifact@98ef48e41587a300b82de4cf298aa98b57b2faae # v3.0.1
         with:
           path: ./public-site
@@ -219,6 +244,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PAGES_BASE_URL: ${{ steps.pages_config.outputs.base_url }}
+          PAGES_ARTIFACT_ID: ${{ steps.pages_artifact.outputs.artifact_id }}
           PUBLICATION_SUMMARY_PATH: .private-build/pages-publication-recovery-summary.json
         run: python pages_publication.py publish-and-verify public-site
       - name: Upload non-sensitive publication recovery result

@@ -459,10 +459,12 @@ jobs:
           SOURCE_RUN_ID: ${{ needs.gate.outputs.source_run_id }}
         run: |
           mkdir -p public-site .private-build
-          gh run view "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json headBranch,headSha,event,jobs > .private-build/source-run.json
-          jq -e '.headBranch == "main" and .event == "repository_dispatch" and any(.jobs[]; .name == "build" and .conclusion == "success")' .private-build/source-run.json >/dev/null
+          gh run view "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --json headBranch,headSha,event,attempt,jobs > .private-build/source-run.json
+          jq -e '.headBranch == "main" and .event == "repository_dispatch" and (.attempt | numbers) > 0 and any(.jobs[]; .name == "build" and .conclusion == "success")' .private-build/source-run.json >/dev/null
           SOURCE_SHA=$(jq -r '.headSha' .private-build/source-run.json)
+          SOURCE_ATTEMPT=$(jq -r '.attempt' .private-build/source-run.json)
           printf 'RECOVERY_SOURCE_COMMIT=%s\n' "$SOURCE_SHA" >> "$GITHUB_ENV"
+          printf 'RECOVERY_SOURCE_RUN_ATTEMPT=%s\n' "$SOURCE_ATTEMPT" >> "$GITHUB_ENV"
           gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name public-site --dir public-site
       - name: Prepare a new identity for the existing artifact
         env:
@@ -470,7 +472,9 @@ jobs:
         run: >-
           python pages_publication.py prepare-republication public-site
           --source-run-id "$RECOVERY_SOURCE_RUN_ID" --source-commit "$RECOVERY_SOURCE_COMMIT"
+          --source-run-attempt "$RECOVERY_SOURCE_RUN_ATTEMPT"
       - name: Create Pages deployment artifact
+        id: pages_artifact
         uses: actions/upload-pages-artifact@98ef48e41587a300b82de4cf298aa98b57b2faae # v3.0.1
         with:
           path: ./public-site
@@ -479,6 +483,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PAGES_BASE_URL: ${{ steps.pages_config.outputs.base_url }}
+          PAGES_ARTIFACT_ID: ${{ steps.pages_artifact.outputs.artifact_id }}
           PUBLICATION_SUMMARY_PATH: .private-build/pages-stage-recovery-summary.json
         run: python pages_publication.py publish-and-verify public-site
       - name: Record publication recovery status
@@ -526,6 +531,7 @@ jobs:
           python-version-file: .python-version
 
       - name: Upload Pages artifact
+        id: pages_artifact
         uses: actions/upload-pages-artifact@98ef48e41587a300b82de4cf298aa98b57b2faae # v3.0.1
         with:
           path: ./public-site
@@ -535,6 +541,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PAGES_BASE_URL: ${{ needs.build.outputs.pages_base_url }}
+          PAGES_ARTIFACT_ID: ${{ steps.pages_artifact.outputs.artifact_id }}
           PUBLICATION_SUMMARY_PATH: .private-build/pages-publication-summary.json
         run: python pages_publication.py publish-and-verify public-site
 
